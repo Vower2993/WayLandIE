@@ -36,13 +36,13 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
         with:
-          packages: |
-            tools
-            platform-tools
-            platforms;android-34
-            build-tools;34.0.0
-            ndk;26.1.10909125
-            cmake;3.22.1
+          # setup-android@v3 accepts packages as a single space-separated
+          # string. Using single quotes is the safest YAML form — avoids
+          # any ambiguity with the semicolons in package names like
+          # 'platforms;android-34' and avoids the literal-block-scalar
+          # form that some YAML parsers in older action runners
+          # misinterpret.
+          packages: 'tools platform-tools platforms;android-34 build-tools;34.0.0 ndk;26.1.10909125 cmake;3.22.1'
 
       - name: Restore JDK 17 as default JAVA_HOME
         # setup-android@v3 sets JAVA_HOME to Java 11 for sdkmanager.

@@ -105,7 +105,9 @@ android {
         getByName("main") {
             java.srcDirs("src/main/java")
             res.srcDirs("src/main/res")
-            assets.srcDirs("src/main/assets")
+            assets {
+                srcDirs("src/main/assets")
+            }
         }
     }
 }
