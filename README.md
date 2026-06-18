@@ -130,24 +130,84 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 ---
 
-## Build (from cmdline-tools without Android Studio)
+## Build (in the cloud — recommended if you only have a phone)
 
-If you don't want to install Android Studio, you can build with the
-Android cmdline-tools + NDK only:
+**You cannot build this APK inside Termux on a phone.** The official
+Android NDK only ships x86_64-linux *host* toolchains — the
+`aarch64-linux-android-clang` binary inside the NDK is an x86_64 ELF
+and won't run on arm64 Termux. Don't waste time on sdkmanager
+workarounds; they all hit this wall.
+
+Use GitHub Actions instead. The repo ships a workflow at
+`.github/workflows/build-apk.yml` that builds a debug APK on every
+push and on manual dispatch.
+
+Steps:
+
+1. Create a free GitHub account if you don't have one.
+2. Fork or push this repo to GitHub:
+   ```sh
+   cd WayLandIE-android-noroot
+   git init
+   git add .
+   git commit -m "init"
+   git branch -M main
+   git remote add origin https://github.com/YOUR_USER/WayLandIE.git
+   git push -u origin main
+   ```
+3. Open the repo on GitHub → **Actions** tab → **Build APK** →
+   **Run workflow** button (top right).
+4. Wait ~5 minutes. The build runs on a free GitHub-hosted Ubuntu
+   runner.
+5. When the run finishes, scroll down to the **Artifacts** section of
+   the run → download `waylandie-debug-apk`. You'll get a zip with
+   `app-debug.apk` inside.
+6. Unzip on your phone and sideload the APK.
+
+This is the only reliable path if you don't have access to a PC. It's
+free for personal use (2,000 actions minutes/month).
+
+---
+
+## Build (from cmdline-tools on a PC)
+
+If you have a Linux/Mac/Windows PC and don't want to install Android
+Studio:
 
 ```sh
 # 1. Install cmdline-tools + sdkmanager
 #    https://developer.android.com/tools
-sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0" "ndk;26.3.11579264"
+sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0" "ndk;26.1.10909125" "cmake;3.22.1"
 
 # 2. Set env
 export ANDROID_HOME=$HOME/Android/Sdk
-export ANDROID_NDK_HOME=$ANDROID_HOME/ndk/26.3.11579264
+export ANDROID_NDK_HOME=$ANDROID_HOME/ndk/26.1.10909125
 
 # 3. Build
 cd WayLandIE-android-noroot
 ./gradlew assembleDebug
 ```
+
+---
+
+## Can I build inside Termux anyway?
+
+Short answer: **no**, not with the official NDK.
+
+Longer answer: you can technically run the x86_64 NDK toolchains under
+FEX-Emu inside Termux, but it's slow (~5× slower compiles), fragile,
+and you'd need to patch CMake to invoke FEX as a prefix. Not worth it
+when GitHub Actions gives you a free Ubuntu runner that builds this
+project in 5 minutes.
+
+If you really want to try it anyway:
+
+```sh
+pkg install fex-emu
+# Then wrap every NDK toolchain call with `FEXLoader --`
+# You're on your own for the CMake plumbing.
+```
+
 
 ---
 
