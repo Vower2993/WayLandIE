@@ -398,7 +398,7 @@ public final class HomeActivity extends Activity {
         try {
             String[] extraArgs = gamescope
                     ? new String[]{"--gamescope"} : new String[0];
-            Process p = runner.execWine(exePath, extraArgs);
+            Process p = runner.execWine(exePath, extraArgs, useProton);
             log("Wine process started (pid=" + getPid(p) + ")");
             // Don't wait — let it run in the background.
         } catch (java.io.IOException error) {

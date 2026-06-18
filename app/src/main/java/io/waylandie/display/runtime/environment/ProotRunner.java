@@ -117,6 +117,34 @@ public final class ProotRunner {
         argv.add("-b");
         argv.add(tmpDir.getAbsolutePath() + ":/tmp");
 
+        // Bind-mount user-installed Proton into /opt/proton (if installed)
+        File protonDir = new File(context.getFilesDir(), "contents/proton/active");
+        if (protonDir.isDirectory()) {
+            argv.add("-b");
+            argv.add(protonDir.getAbsolutePath() + ":/opt/proton");
+        }
+
+        // Bind-mount user-installed DXVK into /opt/dxvk (if installed)
+        File dxvkDir = new File(context.getFilesDir(), "contents/dxvk/active");
+        if (dxvkDir.isDirectory()) {
+            argv.add("-b");
+            argv.add(dxvkDir.getAbsolutePath() + ":/opt/dxvk");
+        }
+
+        // Bind-mount user-installed Turnip into /opt/turnip (if installed)
+        File turnipDir = new File(context.getFilesDir(), "contents/turnip/active");
+        if (turnipDir.isDirectory()) {
+            argv.add("-b");
+            argv.add(turnipDir.getAbsolutePath() + ":/opt/turnip");
+        }
+
+        // Bind-mount user-installed FEX into /opt/fex (if installed)
+        File fexDir = new File(context.getFilesDir(), "contents/fex/active");
+        if (fexDir.isDirectory()) {
+            argv.add("-b");
+            argv.add(fexDir.getAbsolutePath() + ":/opt/fex");
+        }
+
         // Link back to the app's bridge socket path so Wine processes can
         // connect to the abstract socket waylandie.display.bridge.v1
         // (proot allows abstract socket access by default — no bind needed).
@@ -198,11 +226,33 @@ public final class ProotRunner {
     /**
      * Convenience: execs Wine with the given .exe path. Uses the active
      * Adrenotools driver if one is installed, otherwise falls back to the
-     * rootfs's default Turnip.
+     * rootfs's default Turnip. Proton is used if installed via Settings
+     * tab and the user ticked "Use Proton".
      */
-    public Process execWine(String exePath, String[] extraArgs) throws IOException {
+    public Process execWine(String exePath, String[] extraArgs, boolean useProton) throws IOException {
         java.util.List<String> cmd = new java.util.ArrayList<>();
-        cmd.add(imageFs.getWineDir().getAbsolutePath() + "/bin/wine");
+
+        // Determine whether to use Proton or bare Wine.
+        // Proton is installed via Settings tab → extracted to app-private storage.
+        // Wine is NOT in the rootfs — if no Proton, we can't run.
+        File protonDir = new File(context.getFilesDir(), "contents/proton/active");
+        File wineFromProton = new File(protonDir, "files/bin/wine");
+        File wineFromProtonAlt = new File(protonDir, "dist/bin/wine");
+
+        if (useProton || (protonDir.exists() && (wineFromProton.exists() || wineFromProtonAlt.exists()))) {
+            // Use Proton's bundled wine
+            File wineBin = wineFromProton.exists() ? wineFromProton : wineFromProtonAlt;
+            if (!wineBin.exists()) {
+                throw new IOException("Proton installed but wine binary not found at "
+                        + wineFromProton + " or " + wineFromProtonAlt);
+            }
+            cmd.add(wineBin.getAbsolutePath());
+            Log.i(TAG, "Using Proton wine: " + wineBin);
+        } else {
+            throw new IOException("No Proton installed. Install Proton via Settings tab first. "
+                    + "(Wine is not bundled in the rootfs — Proton provides Wine.)");
+        }
+
         cmd.add(exePath);
         if (extraArgs != null) {
             cmd.addAll(java.util.Arrays.asList(extraArgs));
@@ -214,21 +264,35 @@ public final class ProotRunner {
         env.add("DXVK_STATE_CACHE_PATH"); env.add("/home/xuser/.dxvk-cache");
         env.add("MESA_VK_WSI_PRESENT_MODE"); env.add("immediate");
 
+        // Proton env vars
+        if (protonDir.exists()) {
+            env.add("PROTONPATH"); env.add(protonDir.getAbsolutePath());
+            env.add("STEAM_COMPAT_CLIENT_INSTALL_PATH");
+            env.add(new File(context.getFilesDir(), "contents/steam").getAbsolutePath());
+            env.add("STEAM_COMPAT_DATA_PATH");
+            env.add(new File(context.getFilesDir(), "contents/steam/compatdata").getAbsolutePath());
+            env.add("STEAM_RUNTIME"); env.add("0");  // no pressure-vessel in proot
+        }
+
         // Use active Adrenotools driver if one is set, otherwise rootfs Turnip
         io.waylandie.display.runtime.content.AdrenotoolsManager atm =
                 new io.waylandie.display.runtime.content.AdrenotoolsManager(context);
         String activeDriverSo = atm.getActiveDriverSoPath();
         if (activeDriverSo != null) {
-            // Adrenotools-loaded driver — set the magic env vars
             env.add("VULKAN_ADRENOTOOLS_DRIVER_SO"); env.add(activeDriverSo);
-            env.add("VK_ICD_FILENAMES"); env.add("/usr/etc/vulkan/icd.d/freedreno_icd.json");
+            env.add("VK_ICD_FILENAMES"); env.add("/usr/local/etc/vulkan/icd.d/freedreno_icd.json");
             Log.i(TAG, "Using Adrenotools driver: " + activeDriverSo);
         } else {
-            // Rootfs Turnip (KGSL bionic)
-            env.add("VK_ICD_FILENAMES"); env.add("/usr/etc/vulkan/icd.d/freedreno_icd.json");
-            Log.i(TAG, "Using rootfs Turnip driver");
+            env.add("VK_ICD_FILENAMES"); env.add("/usr/local/etc/vulkan/icd.d/freedreno_icd.json");
+            Log.i(TAG, "Using rootfs default Vulkan driver");
         }
 
         return exec(cmd.toArray(new String[0]), env.toArray(new String[0]));
+    }
+
+    /** @deprecated Use {@link #execWine(String, String[], boolean)} */
+    @Deprecated
+    public Process execWine(String exePath, String[] extraArgs) throws IOException {
+        return execWine(exePath, extraArgs, false);
     }
 }
