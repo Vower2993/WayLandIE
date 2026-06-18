@@ -1,0 +1,10 @@
+#!/bin/sh
+# waylandie-status — quick bridge status. Exits 0 if listening, 1 otherwise.
+SOCKET="${WAYLANDIE_BRIDGE_SOCKET:-waylandie.display.bridge.v1}"
+if grep -q "@${SOCKET}" /proc/net/unix 2>/dev/null; then
+    echo "bridge: LISTENING @$SOCKET"
+    exit 0
+else
+    echo "bridge: off"
+    exit 1
+fi

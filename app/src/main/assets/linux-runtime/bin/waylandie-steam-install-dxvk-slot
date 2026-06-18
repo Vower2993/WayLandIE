@@ -1,0 +1,38 @@
+#!/bin/sh
+# waylandie-steam-install-dxvk-slot — install a custom DXVK build into a slot
+# for a given Steam AppID.
+#
+# Usage:
+#   waylandie-steam-install-dxvk-slot --appid 287390 --slot test-dxvk --activate path/to/dxvk.tar.gz
+
+set -e
+APPID=""
+SLOT=""
+ARCHIVE=""
+ACTIVATE=false
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --appid) APPID="$2"; shift 2 ;;
+        --slot)  SLOT="$2";  shift 2 ;;
+        --activate) ARCHIVE="$2"; ACTIVATE=true; shift 2 ;;
+        *) echo "unknown arg: $1" >&2; exit 2 ;;
+    esac
+done
+
+[ -z "$APPID" ] && { echo "--appid required" >&2; exit 2; }
+[ -z "$SLOT" ]  && { echo "--slot required"  >&2; exit 2; }
+[ -z "$ARCHIVE" ] && { echo "--activate FILE required" >&2; exit 2; }
+
+ROOT="${XDG_DATA_HOME:-$HOME/.local/share}/waylandie/steam-profiles/$APPID/dxvk/$SLOT"
+mkdir -p "$ROOT"
+case "$ARCHIVE" in
+    *.tar.gz|*.tgz)  tar -xzf "$ARCHIVE" -C "$ROOT" ;;
+    *.zip)           unzip -q "$ARCHIVE" -d "$ROOT" ;;
+    *)               tar -xf "$ARCHIVE" -C "$ROOT" 2>/dev/null || unzip -q "$ARCHIVE" -d "$ROOT" ;;
+esac
+echo "installed DXVK slot '$SLOT' for AppID $APPID → $ROOT"
+if [ "$ACTIVATE" = "true" ]; then
+    echo "to activate: add to your Steam Launch Options:"
+    echo "  WINEDLLOVERRIDES=\"d3d9,d3d10core,d3d11=native\" %command%"
+fi

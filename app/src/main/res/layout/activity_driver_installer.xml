@@ -1,0 +1,194 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/bg_dark"
+    android:fillViewport="true">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="20dp">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Install a driver"
+            android:textColor="@color/text_primary"
+            android:textSize="26sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Pick a DXVK, Turnip, FEX, box86/box64, or Qualcomm Adreno driver archive from your Downloads folder or file explorer. It will be installed into a named slot inside the Debian proot and can be activated for any game."
+            android:textColor="@color/text_secondary"
+            android:textSize="13sp"
+            android:layout_marginTop="6dp"
+            android:layout_marginBottom="16dp"
+            android:lineSpacingExtra="2dp" />
+
+        <!-- Kind -->
+        <LinearLayout style="@style/Card"
+            android:orientation="vertical"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content">
+
+            <TextView style="@style/CardTitle"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="1. Driver kind" />
+
+            <Spinner
+                android:id="@+id/kindSpinner"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:background="@color/bg_card_active"
+                android:padding="8dp" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="dxvk       — DirectX 9/10/11 → Vulkan\nturnip     — Mesa Vulkan ICD for Adreno\nfex        — FEX-Emu x86 → ARM translation\nqcom-adreno — Qualcomm proprietary Vulkan driver (.deb)\nbox86      — alternative x86 emulator\nbox64      — alternative x86_64 emulator"
+                android:textColor="@color/text_secondary"
+                android:textSize="11sp"
+                android:fontFamily="monospace"
+                android:layout_marginTop="8dp" />
+        </LinearLayout>
+
+        <!-- Slot -->
+        <LinearLayout style="@style/Card"
+            android:orientation="vertical"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content">
+
+            <TextView style="@style/CardTitle"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="2. Slot name" />
+
+            <EditText
+                android:id="@+id/slotEdit"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:hint="e.g. turnip-current, dxvk-2.4, fex-2406"
+                android:textColor="@color/text_primary"
+                android:textColorHint="@color/text_secondary"
+                android:background="@color/bg_card_active"
+                android:padding="10dp"
+                android:fontFamily="monospace"
+                android:textSize="13sp"
+                android:singleLine="true" />
+
+            <CheckBox android:id="@+id/chkActivate"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Activate this slot as default for new games"
+                android:textColor="@color/text_primary"
+                android:layout_marginTop="6dp" />
+        </LinearLayout>
+
+        <!-- Archive picker -->
+        <LinearLayout style="@style/Card"
+            android:orientation="vertical"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content">
+
+            <TextView style="@style/CardTitle"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="3. Pick the archive" />
+
+            <TextView
+                android:id="@+id/archivePathText"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="(no file picked)"
+                android:textColor="@color/accent"
+                android:fontFamily="monospace"
+                android:textSize="12sp"
+                android:maxLines="3"
+                android:ellipsize="middle"
+                android:layout_marginBottom="10dp" />
+
+            <Button
+                android:id="@+id/btnPickArchive"
+                style="@style/PrimaryButton"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Pick .tar.gz / .zip / .deb" />
+        </LinearLayout>
+
+        <!-- Install -->
+        <LinearLayout style="@style/Card"
+            android:orientation="vertical"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content">
+
+            <TextView style="@style/CardTitle"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="4. Install" />
+
+            <Button
+                android:id="@+id/btnInstall"
+                style="@style/PrimaryButton"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Install into Debian proot" />
+
+            <Button
+                android:id="@+id/btnCancel"
+                style="@style/SecondaryButton"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/cancel" />
+        </LinearLayout>
+
+        <!-- Existing staged archives -->
+        <LinearLayout style="@style/Card"
+            android:orientation="vertical"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content">
+
+            <TextView style="@style/CardTitle"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Archives staged in /sdcard/Download/WayLandIE/drivers/" />
+
+            <TextView
+                android:id="@+id/existingSlotsText"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:fontFamily="monospace"
+                android:textColor="@color/text_secondary"
+                android:textSize="11sp"
+                android:background="@color/bg_dark"
+                android:padding="8dp"
+                android:text="(loading…)" />
+        </LinearLayout>
+
+        <!-- Log -->
+        <LinearLayout style="@style/Card"
+            android:orientation="vertical"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content">
+
+            <TextView style="@style/CardTitle"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Log" />
+
+            <TextView
+                android:id="@+id/logText"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:fontFamily="monospace"
+                android:textColor="@color/text_secondary"
+                android:textSize="11sp"
+                android:background="@color/bg_dark"
+                android:padding="8dp" />
+        </LinearLayout>
+    </LinearLayout>
+</ScrollView>

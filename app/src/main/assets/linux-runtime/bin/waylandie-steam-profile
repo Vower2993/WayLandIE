@@ -1,0 +1,176 @@
+#!/bin/sh
+# waylandie-steam-profile — manage per-game driver + launch-option profiles.
+#
+# Each Steam AppID can have multiple named profiles. A profile sets:
+#   - DXVK version slot
+#   - Turnip (Mesa Vulkan Adreno) version slot
+#   - Qualcomm proprietary driver slot
+#   - MangoHud / FEX / NTSYNC flags
+#   - Steam Launch Options string written into localconfig.vdf
+#
+# Subcommands:
+#   bootstrap                      — create the default profile set
+#   list-games                     — show every game with at least one profile
+#   list-profiles APPID            — list profiles for an AppID
+#   hook APPID                     — install the Steam Launch Options hook
+#   status APPID                   — show current active profile
+#   set APPID PROFILE              — activate a named profile
+#   launch APPID --process EXE     — manually launch a game (bypass Steam)
+#
+# Slot management:
+#   waylandie-steam-install-dxvk-slot --appid A --slot S --activate FILE
+#   waylandie-steam-install-turnip-slot --appid A --slot S --activate FILE
+#   waylandie-import-qcom-adreno-driver --name N --appid A --activate FILE
+
+set -e
+
+CMD="${1:-}"
+[ $# -gt 0 ] && shift
+
+PROFILES_ROOT="${XDG_DATA_HOME:-$HOME/.local/share}/waylandie/steam-profiles"
+mkdir -p "$PROFILES_ROOT"
+
+usage() {
+    cat <<EOF
+usage: waylandie-steam-profile SUBCOMMAND [args...]
+
+subcommands:
+  bootstrap
+  list-games
+  list-profiles APPID
+  hook APPID
+  status APPID
+  set APPID PROFILE
+  launch APPID --process EXE [extra args...]
+EOF
+}
+
+case "$CMD" in
+    bootstrap)
+        # Create a default profile set with two slots: stock and turnip-current.
+        for APPID in 287390; do
+            DIR="$PROFILES_ROOT/$APPID"
+            mkdir -p "$DIR"
+            [ -f "$DIR/stock.env" ] || cat > "$DIR/stock.env" <<EOF
+# Stock profile — no driver overrides.
+export DXVK_CONFIG_FILE=""
+export VK_ICD_FILENAMES=""
+export MESA_VK_WSI_PRESENT_MODE=immediate
+EOF
+            [ -f "$DIR/turnip-current.env" ] || cat > "$DIR/turnip-current.env" <<EOF
+# Turnip current — Mesa Vulkan Adreno driver, no DXVK override.
+export DXVK_CONFIG_FILE=""
+export VK_ICD_FILENAMES=/usr/local/share/waylandie/drivers/turnip-current/share/vulkan/icd.d/lvp_icd.x86_64.json
+export MESA_VK_WSI_PRESENT_MODE=immediate
+export RADV_PERFTEST=nooverflow
+EOF
+            echo "bootstrapped profiles for AppID $APPID"
+        done
+        ;;
+
+    list-games)
+        for d in "$PROFILES_ROOT"/*; do
+            [ -d "$d" ] || continue
+            APPID=$(basename "$d")
+            PROFILES=$(ls "$d"/*.env 2>/dev/null | xargs -n1 basename 2>/dev/null | sed 's/\.env$//' | tr '\n' ' ')
+            echo "$APPID  profiles: $PROFILES"
+        done
+        ;;
+
+    list-profiles)
+        APPID="${1:-}"
+        [ -z "$APPID" ] && { echo "missing APPID" >&2; exit 2; }
+        DIR="$PROFILES_ROOT/$APPID"
+        if [ ! -d "$DIR" ]; then
+            echo "no profiles for $APPID (run: waylandie-steam-profile bootstrap)"
+            exit 0
+        fi
+        for f in "$DIR"/*.env; do
+            [ -f "$f" ] || continue
+            NAME=$(basename "$f" .env)
+            ACTIVE=""
+            [ -L "$DIR/active" ] && [ "$(readlink "$DIR/active")" = "$NAME.env" ] && ACTIVE=" *active*"
+            echo "$NAME$ACTIVE"
+        done
+        ;;
+
+    hook)
+        APPID="${1:-}"
+        [ -z "$APPID" ] && { echo "missing APPID" >&2; exit 2; }
+        # The Steam Launch Options string tells Steam to source the active
+        # profile before running the game. Steam reads this from
+        # localconfig.vdf. We don't rewrite localconfig.vdf here (Steam
+        # overwrites it on exit) — instead we recommend setting it manually
+        # via Steam UI: game → Properties → Launch Options.
+        cat <<EOF
+To hook Steam AppID $APPID into WayLandIE:
+
+1. Open Steam → right-click the game → Properties → Launch Options.
+2. Paste the following:
+
+   sh -c 'WAYLANDIE_BRIDGE_SOCKET=waylandie.display.bridge.v1 WAYLANDIE_FINAL_COPY=forbidden MESA_VK_WSI_PRESENT_MODE=immediate %command%'
+
+3. (Optional) Activate a profile first:
+   waylandie-steam-profile set $APPID turnip-current
+
+4. Launch the game. It will render into the WayLandIE bridge.
+EOF
+        ;;
+
+    status)
+        APPID="${1:-}"
+        [ -z "$APPID" ] && { echo "missing APPID" >&2; exit 2; }
+        DIR="$PROFILES_ROOT/$APPID"
+        if [ ! -d "$DIR" ]; then
+            echo "appid=$APPID profiles=none"
+            exit 0
+        fi
+        ACTIVE="(none)"
+        [ -L "$DIR/active" ] && ACTIVE=$(readlink "$DIR/active" | sed 's/\.env$//')
+        echo "appid=$APPID active=$ACTIVE launch_hook=manual"
+        ;;
+
+    set)
+        APPID="${1:-}"; PROFILE="${2:-}"
+        [ -z "$APPID" ] || [ -z "$PROFILE" ] && { echo "usage: set APPID PROFILE" >&2; exit 2; }
+        DIR="$PROFILES_ROOT/$APPID"
+        ENV_FILE="$DIR/$PROFILE.env"
+        if [ ! -f "$ENV_FILE" ]; then
+            echo "no such profile: $PROFILE for AppID $APPID" >&2
+            exit 1
+        fi
+        ln -sf "$PROFILE.env" "$DIR/active"
+        echo "activated $PROFILE for AppID $APPID"
+        ;;
+
+    launch)
+        APPID="${1:-}"
+        [ -z "$APPID" ] && { echo "missing APPID" >&2; exit 2; }
+        shift
+        PROCESS=""
+        EXTRA=""
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                --process) PROCESS="$2"; shift 2 ;;
+                *) EXTRA="$EXTRA $1"; shift ;;
+            esac
+        done
+        if [ -z "$PROCESS" ]; then
+            echo "missing --process EXE" >&2
+            exit 2
+        fi
+        DIR="$PROFILES_ROOT/$APPID"
+        ACTIVE_ENV="$DIR/active"
+        if [ -L "$ACTIVE_ENV" ] && [ -f "$DIR/$(readlink "$ACTIVE_ENV")" ]; then
+            . "$DIR/$(readlink "$ACTIVE_ENV")"
+        fi
+        export WAYLANDIE_BRIDGE_SOCKET="${WAYLANDIE_BRIDGE_SOCKET:-waylandie.display.bridge.v1}"
+        export WAYLANDIE_FINAL_COPY=forbidden
+        exec "$PROCESS" $EXTRA
+        ;;
+
+    *)
+        usage
+        exit 2
+        ;;
+esac

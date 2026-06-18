@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- App-internal files (where AssetInstaller extracts the bundled
+         linux-runtime scripts to). -->
+    <files-path
+        name="linux-runtime"
+        path="linux-runtime/" />
+    <!-- External app-specific files — also used for sharing to Termux. -->
+    <external-files-path
+        name="external-linux-runtime"
+        path="linux-runtime/" />
+    <!-- Public Downloads folder — Termux can read this directly via
+         ~/storage/downloads/WayLandIE/... -->
+    <external-path
+        name="public-downloads"
+        path="Download/WayLandIE/" />
+</paths>
