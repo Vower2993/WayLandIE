@@ -1,0 +1,111 @@
+#!/bin/sh
+# waylandie-steam-session — manage the Steam ARM64 + Gamescope session.
+#
+# Subcommands:
+#   start    — start Steam under gamescope inside the Debian proot
+#   stop     — kill the running session
+#   status   — show whether the session is running
+#   restart  — stop then start
+#
+# This script does NOT replace Steam. It wraps the Steam launch with:
+#   - WAYLANDIE_BRIDGE_SOCKET exported so the game renders into the bridge
+#   - gamescope as the nested compositor (if installed) so Steam Big Picture
+#     has a fullscreen surface
+#   - DXVK + Turnip driver slots activated if any are set
+
+set -e
+
+ACTION="${1:-status}"
+SESSION_DIR="${XDG_RUNTIME_DIR:-/tmp}/waylandie"
+SESSION_PID_FILE="$SESSION_DIR/steam-session.pid"
+SESSION_LOG_FILE="$SESSION_DIR/steam-session.log"
+
+mkdir -p "$SESSION_DIR"
+
+# Source the env if available.
+[ -f "$SESSION_DIR/env.sh" ] && . "$SESSION_DIR/env.sh"
+
+case "$ACTION" in
+    start)
+        if [ -f "$SESSION_PID_FILE" ] && kill -0 "$(cat "$SESSION_PID_FILE")" 2>/dev/null; then
+            echo "Steam session already running (pid $(cat "$SESSION_PID_FILE"))"
+            exit 0
+        fi
+
+        # Pick a gamescope command if available.
+        GAMESCOPE_ARGS="--force-composition --immediate-transitions -- rt-width 1280 --rt-height 720"
+        if command -v gamescope >/dev/null 2>&1; then
+            GAMESCOPE="gamescope -W 1280 -H 720 -r 60 --"
+        else
+            GAMESCOPE=""
+            echo "NOTE: gamescope not installed. Running Steam directly." >&2
+        fi
+
+        # Locate steam. In proot Debian, it's usually /usr/bin/steam or
+        # installed via the box64/box86 path.
+        STEAM_BIN=""
+        for c in steam steam-runtime steam; do
+            if command -v "$c" >/dev/null 2>&1; then
+                STEAM_BIN="$c"
+                break
+            fi
+        done
+        if [ -z "$STEAM_BIN" ]; then
+            echo "ERROR: steam not found. Install steam first." >&2
+            echo "  On arm64 Debian proot, try the box64 + steam-deb path." >&2
+            exit 1
+        fi
+
+        echo "Starting Steam session…"
+        echo "  steam   : $STEAM_BIN"
+        echo "  gamescope: ${GAMESCOPE:-<disabled>}"
+        echo "  socket  : ${WAYLANDIE_BRIDGE_SOCKET:-waylandie.display.bridge.v1}"
+        echo "  log     : $SESSION_LOG_FILE"
+
+        # Launch in background, log to file.
+        (
+            if [ -n "$GAMESCOPE" ]; then
+                $GAMESCOPE $STEAM_BIN -bigpicture
+            else
+                $STEAM_BIN -bigpicture
+            fi
+        ) >"$SESSION_LOG_FILE" 2>&1 &
+        echo $! > "$SESSION_PID_FILE"
+        echo "Steam session started (pid $(cat "$SESSION_PID_FILE"))"
+        echo "Tail the log with: tail -f $SESSION_LOG_FILE"
+        ;;
+
+    stop)
+        if [ -f "$SESSION_PID_FILE" ]; then
+            PID=$(cat "$SESSION_PID_FILE")
+            if kill -0 "$PID" 2>/dev/null; then
+                kill "$PID" || true
+                sleep 1
+                kill -9 "$PID" 2>/dev/null || true
+                echo "Steam session stopped (pid $PID)"
+            fi
+            rm -f "$SESSION_PID_FILE"
+        else
+            echo "No Steam session pidfile."
+        fi
+        ;;
+
+    status)
+        if [ -f "$SESSION_PID_FILE" ] && kill -0 "$(cat "$SESSION_PID_FILE")" 2>/dev/null; then
+            echo "status=running pid=$(cat "$SESSION_PID_FILE")"
+            echo "log=$SESSION_LOG_FILE"
+        else
+            echo "status=stopped"
+        fi
+        ;;
+
+    restart)
+        "$0" stop || true
+        "$0" start
+        ;;
+
+    *)
+        echo "usage: $0 {start|stop|status|restart}" >&2
+        exit 2
+        ;;
+esac

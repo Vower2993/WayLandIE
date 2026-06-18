@@ -1,0 +1,37 @@
+#!/bin/sh
+# waylandie-run — wrap a command with the WayLandIE environment set up.
+#
+# Usage:
+#   waylandie-run vkcube --wsi wayland
+#   waylandie-run weston-simple-egl
+#   waylandie-run steam
+#
+# Internally: source the env.sh that waylandie-start-display wrote, then
+# exec the user's command. If env.sh doesn't exist yet, run
+# waylandie-start-display inline.
+
+RC_DIR="${XDG_RUNTIME_DIR:-/tmp}/waylandie"
+if [ -f "$RC_DIR/env.sh" ]; then
+    . "$RC_DIR/env.sh"
+else
+    echo "waylandie-run: env not initialized, running waylandie-start-display…" >&2
+    "$(dirname "$0")/waylandie-start-display" || true
+    [ -f "$RC_DIR/env.sh" ] && . "$RC_DIR/env.sh"
+fi
+
+if [ $# -eq 0 ]; then
+    echo "waylandie-run: no command given" >&2
+    exit 1
+fi
+
+# Force zero-copy path. The bridge will refuse to fall back to CPU blit
+# because WAYLANDIE_FINAL_COPY=forbidden is set by install.sh. This
+# environment variable is what the bridge reads to decide.
+export WAYLANDIE_FINAL_COPY="${WAYLANDIE_FINAL_COPY:-forbidden}"
+
+# Mesa Turnip / Zink options that improve the zero-copy path on Adreno.
+export MESA_VK_WSI_PRESENT_MODE="${MESA_VK_WSI_PRESENT_MODE:-immediate}"
+export RADV_PERFTEST="${RADV_PERFTEST:-nooverflow}"
+
+# Execute the wrapped command.
+exec "$@"

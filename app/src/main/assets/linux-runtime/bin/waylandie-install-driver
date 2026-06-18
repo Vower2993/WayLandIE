@@ -1,0 +1,182 @@
+#!/bin/bash
+# waylandie-install-driver — unified driver installer.
+#
+# Installs a driver archive (DXVK / Turnip / FEX / box86 / box64 /
+# Qualcomm Adreno) into a named slot. The slot can later be activated
+# for any game via waylandie-game-profile or via the GameLauncher's
+# --profile flag.
+#
+# Usage:
+#   waylandie-install-driver --kind KIND --slot NAME --file PATH [--activate]
+#
+# Kinds:
+#   dxvk          DXVK archive (.tar.gz or .zip) — contains x32/ + x64/
+#   turnip        Mesa Turnip build (.tar.gz) — contains *icd*.json
+#   fex           FEX-Emu rootfs + bin (.tar.gz)
+#   qcom-adreno   Qualcomm .deb package — ar x then tar xf data.tar
+#   box86         box86 binary release (.tar.gz)
+#   box64         box64 binary release (.tar.gz)
+#
+# The slot is installed under:
+#   $XDG_DATA_HOME/waylandie/driver-slots/KIND/SLOT/
+#
+# If --activate is passed, a symlink named 'active' is created in the
+# KIND directory pointing at this slot, and a default game profile
+# named 'default' is updated to reference this slot.
+
+set -e
+
+KIND=""
+SLOT=""
+FILE=""
+ACTIVATE=false
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --kind)     KIND="$2"; shift 2 ;;
+        --slot)     SLOT="$2"; shift 2 ;;
+        --file)     FILE="$2"; shift 2 ;;
+        --activate) ACTIVATE=true; shift ;;
+        *)          echo "unknown arg: $1" >&2; exit 2 ;;
+    esac
+done
+
+[ -z "$KIND" ] && { echo "--kind required" >&2; exit 2; }
+[ -z "$SLOT" ] && { echo "--slot required" >&2; exit 2; }
+[ -z "$FILE" ] && { echo "--file required" >&2; exit 2; }
+
+case "$KIND" in
+    dxvk|turnip|fex|qcom-adreno|box86|box64) ;;
+    *) echo "unknown kind: $KIND" >&2; exit 2 ;;
+esac
+
+if [ ! -f "$FILE" ]; then
+    echo "ERROR: file not found: $FILE" >&2
+    exit 1
+fi
+
+# ---------------------------------------------------------------------
+# Resolve install root.
+# ---------------------------------------------------------------------
+SLOTS_ROOT="${XDG_DATA_HOME:-$HOME/.local/share}/waylandie/driver-slots"
+SLOT_DIR="$SLOTS_ROOT/$KIND/$SLOT"
+mkdir -p "$SLOT_DIR"
+
+# Clean previous slot content (idempotent reinstall).
+rm -rf "$SLOT_DIR"/*
+mkdir -p "$SLOT_DIR"
+
+echo "Installing $KIND slot '$SLOT' from $FILE → $SLOT_DIR"
+
+# ---------------------------------------------------------------------
+# Extract.
+# ---------------------------------------------------------------------
+case "$FILE" in
+    *.deb)
+        # Qualcomm .deb — ar x then untar data.tar.*
+        TMP=$(mktemp -d)
+        cp "$FILE" "$TMP/pkg.deb"
+        (cd "$TMP" && ar x pkg.deb && tar -xf data.tar.* -C "$SLOT_DIR")
+        rm -rf "$TMP"
+        ;;
+    *.tar.gz|*.tgz)
+        tar -xzf "$FILE" -C "$SLOT_DIR"
+        ;;
+    *.tar.xz|*.txz)
+        tar -xJf "$FILE" -C "$SLOT_DIR"
+        ;;
+    *.tar.bz2|*.tbz2)
+        tar -xjf "$FILE" -C "$SLOT_DIR"
+        ;;
+    *.tar)
+        tar -xf "$FILE" -C "$SLOT_DIR"
+        ;;
+    *.zip)
+        unzip -q "$FILE" -d "$SLOT_DIR"
+        ;;
+    *)
+        # Try tar then zip as fallbacks.
+        tar -xf "$FILE" -C "$SLOT_DIR" 2>/dev/null || unzip -q "$FILE" -d "$SLOT_DIR"
+        ;;
+esac
+
+# ---------------------------------------------------------------------
+# Verify the install looks sane.
+# ---------------------------------------------------------------------
+case "$KIND" in
+    dxvk)
+        if [ ! -d "$SLOT_DIR/x32" ] && [ ! -d "$SLOT_DIR/x64" ]; then
+            # Maybe the archive had a top-level dir — flatten it.
+            TOP=$(find "$SLOT_DIR" -maxdepth 1 -mindepth 1 -type d | head -1)
+            if [ -n "$TOP" ] && { [ -d "$TOP/x32" ] || [ -d "$TOP/x64" ]; }; then
+                mv "$TOP"/* "$SLOT_DIR"/ 2>/dev/null || true
+                rmdir "$TOP" 2>/dev/null || true
+            fi
+        fi
+        echo "  DXVK dlls at: $SLOT_DIR/x32, $SLOT_DIR/x64"
+        ;;
+    turnip|qcom-adreno)
+        ICD=$(find "$SLOT_DIR" -name "*icd*.json" -type f 2>/dev/null | head -1)
+        if [ -z "$ICD" ]; then
+            echo "  WARNING: no ICD JSON found in slot — verify the archive." >&2
+        else
+            echo "  ICD JSON: $ICD"
+        fi
+        ;;
+    fex)
+        if [ -d "$SLOT_DIR/bin" ]; then
+            echo "  FEX-Emu bin: $SLOT_DIR/bin"
+        else
+            # Flatten if needed.
+            TOP=$(find "$SLOT_DIR" -maxdepth 1 -mindepth 1 -type d | head -1)
+            if [ -n "$TOP" ] && [ -d "$TOP/bin" ]; then
+                mv "$TOP"/* "$SLOT_DIR"/ 2>/dev/null || true
+                rmdir "$TOP" 2>/dev/null || true
+            fi
+        fi
+        echo "  FEX-Emu root: $SLOT_DIR"
+        ;;
+    box86|box64)
+        BIN=$(find "$SLOT_DIR" -name "box86" -o -name "box64" -type f 2>/dev/null | head -1)
+        echo "  $KIND binary: ${BIN:-<not found>}"
+        ;;
+esac
+
+# ---------------------------------------------------------------------
+# Optionally activate as default.
+# ---------------------------------------------------------------------
+if [ "$ACTIVATE" = "true" ]; then
+    KIND_DIR="$SLOTS_ROOT/$KIND"
+    ln -sfn "$SLOT" "$KIND_DIR/active"
+    echo "  → activated as default $KIND slot."
+
+    # Also update the default game profile.
+    PROFILE_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/waylandie/game-profiles/default"
+    mkdir -p "$PROFILE_DIR"
+    ln -sfn "$SLOT_DIR" "$PROFILE_DIR/$KIND"
+    echo "  → linked into default game profile."
+fi
+
+echo
+echo "Done."
+echo
+echo "To use this slot from a game:"
+echo "  waylandie-run-game --exe /path/to/game.exe --profile default"
+echo
+echo "Or from a Steam game's Launch Options:"
+case "$KIND" in
+    dxvk)
+        echo "  WINEDLLOVERRIDES=\"d3d9,d3d10core,d3d11,dxgi=native\" \\""
+        echo "  LD_LIBRARY_PATH=\"$SLOT_DIR/x32:$SLOT_DIR/x64:\$LD_LIBRARY_PATH\" %command%"
+        ;;
+    turnip|qcom-adreno)
+        ICD=$(find "$SLOT_DIR" -name "*icd*.json" -type f 2>/dev/null | head -1)
+        echo "  VK_ICD_FILENAMES=$ICD %command%"
+        ;;
+    fex)
+        echo "  FEX_ROOT=$SLOT_DIR PATH=\"$SLOT_DIR/bin:\$PATH\" %command%"
+        ;;
+    box86|box64)
+        echo "  PATH=\"$SLOT_DIR/bin:\$PATH\" %command%"
+        ;;
+esac
