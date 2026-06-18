@@ -13,10 +13,10 @@ android {
         versionCode = 1
         versionName = "0.2.0-no-root"
 
-        // Bundle the Linux runtime installer scripts as app assets.
-        // The SetupWizardActivity extracts them to app-external storage and
-        // then triggers Termux RUN_COMMAND intents to execute them.
-        assets.srcDirs("src/main/assets")
+        // Pin the NDK version so AGP doesn't try to auto-download a
+        // different one. Matches the version in the GitHub Actions
+        // workflow and the README's manual install instructions.
+        ndkVersion = "26.1.10909125"
 
         // Build all the ABIs the project supports. arm64-v8a is the only one
         // the original native code was written for, but armeabi-v7a and
@@ -43,6 +43,8 @@ android {
     externalNativeBuild {
         cmake {
             path = file("src/main/cpp/CMakeLists.txt")
+            // Pin to 3.22.1 — matches the version installed by the
+            // GitHub Actions workflow and is the AGP 8.5 default.
             version = "3.22.1"
         }
     }
@@ -114,4 +116,18 @@ dependencies {
     implementation("androidx.core:core:1.13.1")
     implementation("androidx.annotation:annotation:1.8.0")
     implementation("androidx.activity:activity:1.9.0")
+
+    // Force Kotlin stdlib to a consistent version. androidx.activity:1.9.0
+    // pulls in the modern kotlin-stdlib:1.8.22 (which absorbed the old
+    // jdk7/jdk8 splits), but other AndroidX deps transitively pull in the
+    // older kotlin-stdlib-jdk7/jdk8:1.6.21 splits, causing duplicate class
+    // errors at the checkDebugDuplicateClasses task. Constraints force the
+    // old splits up to 1.8.22 so they no longer duplicate the merged-in
+    // classes from the main stdlib.
+    constraints {
+        implementation("org.jetbrains.kotlin:kotlin-stdlib:1.8.22")
+        implementation("org.jetbrains.kotlin:kotlin-stdlib-jdk7:1.8.22")
+        implementation("org.jetbrains.kotlin:kotlin-stdlib-jdk8:1.8.22")
+        implementation("org.jetbrains.kotlin:kotlin-stdlib-common:1.8.22")
+    }
 }
