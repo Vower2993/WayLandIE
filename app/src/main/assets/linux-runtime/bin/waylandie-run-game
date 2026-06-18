@@ -1,0 +1,201 @@
+#!/bin/bash
+# waylandie-run-game — run a Windows .exe through Wine in the
+# termux-native (bionic) environment, with optional gamescope + Armec
+# DXVK + Armec Proton + FEX/box86/box64 + driver slot.
+#
+# Usage:
+#   waylandie-run-game --exe PATH [options]
+#
+# Options:
+#   --exe PATH         Path to the .exe (required).
+#   --profile NAME     Driver slot profile (default: 'default')
+#   --gamescope        Wrap in gamescope (nested Wayland compositor)
+#   --no-dxvk          Force DXVK off (default: on if Armec DXVK installed)
+#   --use-proton       Use Armec Proton instead of bare Wine
+#   --fex              Enable FEX-Emu for x86 .exe on arm64 host
+#   --box86            Enable box86 (alternative x86 emulator)
+#   --box64            Enable box64 (alternative x86_64 emulator)
+#   --wine PATH        Wine binary to use (default: auto-detect)
+#   --prefix PATH      WINEPREFIX (default: ~/.local/share/waylandie/wine)
+#   -- ARGS            Everything after -- is passed to wine verbatim.
+
+set -e
+
+EXE=""
+PROFILE="default"
+GAMESCOPE=false
+DXVK=""
+USE_PROTON=false
+FEX=false
+BOX86=false
+BOX64=false
+WINE_BIN=""
+WINEPREFIX_DIR="$HOME/.local/share/waylandie/wine"
+EXTRA_ARGS=()
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --exe)        EXE="$2"; shift 2 ;;
+        --profile)    PROFILE="$2"; shift 2 ;;
+        --gamescope)  GAMESCOPE=true; shift ;;
+        --no-dxvk)    DXVK=off; shift ;;
+        --use-proton) USE_PROTON=true; shift ;;
+        --fex)        FEX=true; shift ;;
+        --box86)      BOX86=true; shift ;;
+        --box64)      BOX64=true; shift ;;
+        --wine)       WINE_BIN="$2"; shift 2 ;;
+        --prefix)     WINEPREFIX_DIR="$2"; shift 2 ;;
+        --)           shift; EXTRA_ARGS+=("$@"); break ;;
+        *)            EXTRA_ARGS+=("$1"); shift ;;
+    esac
+done
+
+[ -z "$EXE" ] && { echo "ERROR: --exe is required" >&2; exit 2; }
+
+# Resolve EXE path
+case "$EXE" in
+    /sdcard/*)        REAL_EXE="$EXE" ;;
+    ~/storage/*)      REAL_EXE="$HOME/storage${EXE#~/storage}" ;;
+    ~/*)              REAL_EXE="$HOME${EXE#~}" ;;
+    *)                REAL_EXE="$EXE" ;;
+esac
+[ ! -f "$REAL_EXE" ] && { echo "ERROR: file not found: $REAL_EXE" >&2; exit 1; }
+
+PREFIX="${WAYLANDIE_PREFIX:-/data/data/com.termux/files/usr}"
+
+# Source WayLandIE env
+if [ -f "${XDG_RUNTIME_DIR:-$PREFIX/tmp}/waylandie/env.sh" ]; then
+    . "${XDG_RUNTIME_DIR:-$PREFIX/tmp}/waylandie/env.sh"
+elif [ -f "$PREFIX/bin/waylandie-start-display" ]; then
+    "$PREFIX/bin/waylandie-start-display" || true
+    [ -f "${XDG_RUNTIME_DIR:-$PREFIX/tmp}/waylandie/env.sh" ] && \
+        . "${XDG_RUNTIME_DIR:-$PREFIX/tmp}/waylandie/env.sh"
+fi
+
+# Source driver env files
+for envfile in env-turnip.sh env-dxvk.sh env-proton.sh env-fex.sh; do
+    if [ -f "$PREFIX/share/waylandie/$envfile" ]; then
+        . "$PREFIX/share/waylandie/$envfile"
+    fi
+done
+
+# Zero-copy + perf
+export WAYLANDIE_FINAL_COPY="${WAYLANDIE_FINAL_COPY:-forbidden}"
+export MESA_VK_WSI_PRESENT_MODE="${MESA_VK_WSI_PRESENT_MODE:-immediate}"
+export RADV_PERFTEST="${RADV_PERFTEST:-nooverflow}"
+
+# Set WINEPREFIX
+mkdir -p "$WINEPREFIX_DIR"
+export WINEPREFIX="$WINEPREFIX_DIR"
+
+# ---------------------------------------------------------------------
+# Detect wine / proton
+# ---------------------------------------------------------------------
+if [ "$USE_PROTON" = "true" ]; then
+    if [ -n "$WAYLANDIE_PROTON_DIR" ] && [ -x "$WAYLANDIE_PROTON_DIR/proton" ]; then
+        echo "Using Armec Proton: $WAYLANDIE_PROTON_DIR"
+        # Proton expects to be run as: proton run <exe> <args>
+        # It internally invokes wine with the right env
+        PROTON_BIN="$WAYLANDIE_PROTON_DIR/proton"
+    else
+        echo "ERROR: --use-proton but no Armec Proton installed." >&2
+        echo "  Install via Settings tab → Install Proton." >&2
+        exit 1
+    fi
+else
+    if [ -z "$WINE_BIN" ]; then
+        for c in wine wine64 wine-stable; do
+            if command -v "$c" >/dev/null 2>&1; then
+                WINE_BIN="$c"
+                break
+            fi
+        done
+    fi
+    if [ -z "$WINE_BIN" ]; then
+        echo "ERROR: wine not found. Install via:" >&2
+        echo "  pkg install x11-repo && pkg install wine-stable" >&2
+        exit 1
+    fi
+fi
+
+# ---------------------------------------------------------------------
+# DXVK overlay — inject DLLs into WINEPREFIX if Armec DXVK is installed
+# ---------------------------------------------------------------------
+if [ "$DXVK" != "off" ] && [ -n "$WAYLANDIE_DXVK_DIR" ] && [ -d "$WAYLANDIE_DXVK_DIR" ]; then
+    echo "Setting up Armec DXVK from $WAYLANDIE_DXVK_DIR …"
+    # Copy d3d*.dll and dxgi.dll into the wineprefix windows/system32 + syswow64
+    SYS32="$WINEPREFIX/drive_c/windows/system32"
+    SYSWOW="$WINEPREFIX/drive_c/windows/syswow64"
+    mkdir -p "$SYS32" "$SYSWOW"
+    for dll in d3d8 d3d9 d3d10core d3d11 dxgi; do
+        [ -f "$WAYLANDIE_DXVK_DIR/x64/$dll.dll" ] && \
+            cp -f "$WAYLANDIE_DXVK_DIR/x64/$dll.dll" "$SYS32/" 2>/dev/null || true
+        [ -f "$WAYLANDIE_DXVK_DIR/x32/$dll.dll" ] && \
+            cp -f "$WAYLANDIE_DXVK_DIR/x32/$dll.dll" "$SYSWOW/" 2>/dev/null || true
+    done
+    export WINEDLLOVERRIDES="d3d8,d3d9,d3d10core,d3d11,dxgi=native;${WINEDLLOVERRIDES:-}"
+    DXVK=on
+    echo "  DXVK dlls installed to $SYS32 + $SYSWOW"
+fi
+
+# ---------------------------------------------------------------------
+# Emulator wrapping (FEX / box86 / box64)
+# ---------------------------------------------------------------------
+FEX_PREFIX=""
+if [ "$FEX" = "true" ] && command -v FEXLoader >/dev/null 2>&1; then
+    FEX_PREFIX="FEXLoader --"
+    echo "FEX-Emu wrapping enabled."
+fi
+BOX86_PREFIX=""
+if [ "$BOX86" = "true" ] && command -v box86 >/dev/null 2>&1; then
+    BOX86_PREFIX="box86"
+    echo "box86 wrapping enabled."
+fi
+BOX64_PREFIX=""
+if [ "$BOX64" = "true" ] && command -v box64 >/dev/null 2>&1; then
+    BOX64_PREFIX="box64"
+    echo "box64 wrapping enabled."
+fi
+
+# ---------------------------------------------------------------------
+# Gamescope wrapping (optional, zero-copy Wayland nested compositor)
+# ---------------------------------------------------------------------
+GAMESCOPE_PREFIX=""
+if [ "$GAMESCOPE" = "true" ]; then
+    if command -v gamescope >/dev/null 2>&1; then
+        GAMESCOPE_PREFIX="gamescope -W 1280 -H 720 -r 60 --"
+        echo "gamescope enabled (1280x720@60)."
+    else
+        echo "WARNING: --gamescope requested but gamescope not installed." >&2
+        echo "  pkg install x11-repo && pkg install gamescope" >&2
+    fi
+fi
+
+# ---------------------------------------------------------------------
+# Print summary + exec
+# ---------------------------------------------------------------------
+echo
+echo "=== WayLandIE game launch ==="
+echo "  exe       : $REAL_EXE"
+echo "  profile   : $PROFILE"
+[ "$USE_PROTON" = "true" ] && echo "  proton    : $PROTON_BIN" || echo "  wine      : $WINE_BIN"
+echo "  wineprefix: $WINEPREFIX"
+echo "  dxvk      : $DXVK"
+echo "  fex       : $FEX"
+echo "  box86/64  : $BOX86 / $BOX64"
+echo "  gamescope : $GAMESCOPE"
+echo "  socket    : $WAYLANDIE_BRIDGE_SOCKET"
+echo "  finalcopy : $WAYLANDIE_FINAL_COPY"
+echo "  audio     : TCP 127.0.0.1:${WAYLANDIE_AUDIO_PORT:-57392}"
+echo "  extra args: ${EXTRA_ARGS[*]:-(none)}"
+echo
+
+if [ "$USE_PROTON" = "true" ]; then
+    # shellcheck disable=SC2086
+    exec $GAMESCOPE_PREFIX $BOX64_PREFIX $BOX86_PREFIX $FEX_PREFIX \
+        "$PROTON_BIN" run "$REAL_EXE" "${EXTRA_ARGS[@]}"
+else
+    # shellcheck disable=SC2086
+    exec $GAMESCOPE_PREFIX $BOX64_PREFIX $BOX86_PREFIX $FEX_PREFIX \
+        "$WINE_BIN" "$REAL_EXE" "${EXTRA_ARGS[@]}"
+fi

@@ -1,0 +1,294 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/bg_dark"
+    android:fillViewport="true">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="20dp">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Settings"
+            android:textColor="@color/text_primary"
+            android:textSize="28sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Drivers &amp; translation layers"
+            android:textColor="@color/text_secondary"
+            android:textSize="13sp"
+            android:layout_marginBottom="20dp" />
+
+        <!-- DXVK section -->
+        <LinearLayout style="@style/Card"
+            android:orientation="vertical"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content">
+
+            <TextView style="@style/CardTitle"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="DXVK" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="DirectX 9/10/11 → Vulkan translation. Lets Windows games render through Vulkan (Adreno/Turnip)."
+                android:textColor="@color/text_secondary"
+                android:textSize="12sp"
+                android:lineSpacingExtra="2dp"
+                android:layout_marginBottom="10dp" />
+
+            <TextView
+                android:id="@+id/dxvkStatus"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Installed slots: (none)"
+                android:textColor="@color/text_tertiary"
+                android:textSize="12sp"
+                android:fontFamily="monospace"
+                android:layout_marginBottom="10dp" />
+
+            <Button
+                android:id="@+id/btnInstallDxvk"
+                style="@style/PrimaryButton"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Install DXVK from file" />
+        </LinearLayout>
+
+        <!-- Turnip section -->
+        <LinearLayout style="@style/Card"
+            android:orientation="vertical"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content">
+
+            <TextView style="@style/CardTitle"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Turnip (Mesa Vulkan — Adreno)" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Open-source Vulkan ICD for Qualcomm Adreno GPUs. Recommended over the proprietary Qualcomm driver for most games."
+                android:textColor="@color/text_secondary"
+                android:textSize="12sp"
+                android:lineSpacingExtra="2dp"
+                android:layout_marginBottom="10dp" />
+
+            <TextView
+                android:id="@+id/turnipStatus"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Installed slots: (none)"
+                android:textColor="@color/text_tertiary"
+                android:textSize="12sp"
+                android:fontFamily="monospace"
+                android:layout_marginBottom="10dp" />
+
+            <Button
+                android:id="@+id/btnInstallTurnip"
+                style="@style/PrimaryButton"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Install Turnip from file" />
+        </LinearLayout>
+
+        <!-- FEX-Emu section -->
+        <LinearLayout style="@style/Card"
+            android:orientation="vertical"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content">
+
+            <TextView style="@style/CardTitle"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="FEX-Emu" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="x86/x64 → ARM64 JIT translator. Optional — Armec Proton may bundle its own FEX."
+                android:textColor="@color/text_secondary"
+                android:textSize="12sp"
+                android:lineSpacingExtra="2dp"
+                android:layout_marginBottom="10dp" />
+
+            <TextView
+                android:id="@+id/fexStatus"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Status: unknown (run setup wizard)"
+                android:textColor="@color/text_tertiary"
+                android:textSize="12sp"
+                android:fontFamily="monospace"
+                android:layout_marginBottom="10dp" />
+
+            <Button
+                android:id="@+id/btnInstallFex"
+                style="@style/PrimaryButton"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Install FEX from file" />
+        </LinearLayout>
+
+        <!-- Armec Proton section -->
+        <LinearLayout style="@style/Card"
+            android:orientation="vertical"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content">
+
+            <TextView style="@style/CardTitle"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Armec Proton (bionic)" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Proton fork optimized for arm64 + bionic. Use this for Steam games instead of standard Proton."
+                android:textColor="@color/text_secondary"
+                android:textSize="12sp"
+                android:lineSpacingExtra="2dp"
+                android:layout_marginBottom="10dp" />
+
+            <TextView
+                android:id="@+id/protonStatus"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Installed slots: (none)"
+                android:textColor="@color/text_tertiary"
+                android:textSize="12sp"
+                android:fontFamily="monospace"
+                android:layout_marginBottom="10dp" />
+
+            <Button
+                android:id="@+id/btnInstallProton"
+                style="@style/PrimaryButton"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Install Armec Proton from file" />
+        </LinearLayout>
+
+        <!-- Qualcomm Adreno proprietary -->
+        <LinearLayout style="@style/Card"
+            android:orientation="vertical"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content">
+
+            <TextView style="@style/CardTitle"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Qualcomm Adreno (proprietary)" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Official Qualcomm Vulkan driver (.deb). Use only if Turnip has issues with a specific game."
+                android:textColor="@color/text_secondary"
+                android:textSize="12sp"
+                android:lineSpacingExtra="2dp"
+                android:layout_marginBottom="10dp" />
+
+            <TextView
+                android:id="@+id/qcomStatus"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Installed slots: (none)"
+                android:textColor="@color/text_tertiary"
+                android:textSize="12sp"
+                android:fontFamily="monospace"
+                android:layout_marginBottom="10dp" />
+
+            <Button
+                android:id="@+id/btnInstallQcom"
+                style="@style/PrimaryButton"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Install Qualcomm driver from .deb" />
+        </LinearLayout>
+
+        <!-- box86 / box64 -->
+        <LinearLayout style="@style/Card"
+            android:orientation="vertical"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content">
+
+            <TextView style="@style/CardTitle"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="box86 / box64" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Alternative x86/x64 emulators. Useful for older games that FEX doesn't handle well."
+                android:textColor="@color/text_secondary"
+                android:textSize="12sp"
+                android:lineSpacingExtra="2dp"
+                android:layout_marginBottom="10dp" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal">
+
+                <Button
+                    android:id="@+id/btnInstallBox86"
+                    style="@style/SecondaryButton"
+                    android:layout_width="0dp"
+                    android:layout_weight="1"
+                    android:layout_height="wrap_content"
+                    android:layout_marginEnd="6dp"
+                    android:text="Install box86" />
+
+                <Button
+                    android:id="@+id/btnInstallBox64"
+                    style="@style/SecondaryButton"
+                    android:layout_width="0dp"
+                    android:layout_weight="1"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="6dp"
+                    android:text="Install box64" />
+            </LinearLayout>
+        </LinearLayout>
+
+        <!-- Profile management -->
+        <LinearLayout style="@style/Card"
+            android:orientation="vertical"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content">
+
+            <TextView style="@style/CardTitle"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Active profile" />
+
+            <TextView
+                android:id="@+id/activeProfileText"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="default"
+                android:textColor="@color/accent_secondary"
+                android:fontFamily="monospace"
+                android:textSize="13sp"
+                android:layout_marginBottom="10dp" />
+
+            <Button
+                android:id="@+id/btnManageProfiles"
+                style="@style/SecondaryButton"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Manage profiles in Termux" />
+        </LinearLayout>
+    </LinearLayout>
+</ScrollView>

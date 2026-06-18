@@ -1,0 +1,285 @@
+#!/bin/bash
+# waylandie-install-driver — unified driver/wrapper installer for the
+# termux-native (bionic) environment.
+#
+# Supports:
+#   turnip       Mesa Turnip KGSL bionic variant (.zip or .tar.gz)
+#                Standalone variant (links against libhardware.so) is
+#                REJECTED because it crashes with SIGTRAP in bionic.
+#   dxvk         Armec DXVK (bionic) — .tar.gz or .zip
+#   proton       Armec Proton (bionic) — .tar.gz
+#   fex          FEX-Emu rootfs (.tar.xz)
+#   qcom-adreno  Qualcomm proprietary driver (.deb) — kept for compat
+#   box86        box86 binary release (.tar.gz)
+#   box64        box64 binary release (.tar.gz)
+#
+# Usage:
+#   waylandie-install-driver --kind KIND --slot NAME --file PATH [--activate]
+#
+# The slot is installed under:
+#   $PREFIX/share/waylandie/driver-slots/KIND/SLOT/
+#
+# If --activate is passed, an env file is written at:
+#   $PREFIX/share/waylandie/env-KIND.sh
+# which waylandie-termux sources automatically.
+
+set -e
+
+KIND=""
+SLOT=""
+FILE=""
+ACTIVATE=false
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --kind)     KIND="$2"; shift 2 ;;
+        --slot)     SLOT="$2"; shift 2 ;;
+        --file)     FILE="$2"; shift 2 ;;
+        --activate) ACTIVATE=true; shift ;;
+        *)          echo "unknown arg: $1" >&2; exit 2 ;;
+    esac
+done
+
+[ -z "$KIND" ] && { echo "--kind required" >&2; exit 2; }
+[ -z "$SLOT" ] && { echo "--slot required" >&2; exit 2; }
+[ -z "$FILE" ] && { echo "--file required" >&2; exit 2; }
+
+case "$KIND" in
+    turnip|dxvk|proton|fex|qcom-adreno|box86|box64) ;;
+    *) echo "unknown kind: $KIND" >&2; exit 2 ;;
+esac
+
+PREFIX="${WAYLANDIE_PREFIX:-/data/data/com.termux/files/usr}"
+
+# Resolve file path
+RESOLVED_FILE=""
+for candidate in \
+    "$FILE" \
+    "$PREFIX/share/waylandie/driver-archive/$(basename "$FILE")" \
+    "/sdcard/Download/$(basename "$FILE")" \
+    "/sdcard/Download/WayLandIE/drivers/$(basename "$FILE")" \
+    "/storage/emulated/0/Download/$(basename "$FILE")" \
+    "$HOME/storage/downloads/$(basename "$FILE")"; do
+    if [ -f "$candidate" ]; then
+        RESOLVED_FILE="$candidate"
+        break
+    fi
+done
+if [ -z "$RESOLVED_FILE" ]; then
+    echo "ERROR: file not found. Tried:" >&2
+    echo "  $FILE" >&2
+    echo "  $PREFIX/share/waylandie/driver-archive/$(basename "$FILE")" >&2
+    echo "  /sdcard/Download/$(basename "$FILE")" >&2
+    echo "  /storage/emulated/0/Download/$(basename "$FILE")" >&2
+    exit 1
+fi
+FILE="$RESOLVED_FILE"
+echo "Resolved archive to: $FILE"
+
+# Install root
+SLOTS_ROOT="$PREFIX/share/waylandie/driver-slots"
+SLOT_DIR="$SLOTS_ROOT/$KIND/$SLOT"
+mkdir -p "$SLOT_DIR"
+rm -rf "$SLOT_DIR"/*
+echo "Installing $KIND slot '$SLOT' → $SLOT_DIR"
+
+# ---------------------------------------------------------------------
+# Extract
+# ---------------------------------------------------------------------
+case "$FILE" in
+    *.deb)
+        TMP=$(mktemp -d)
+        cp "$FILE" "$TMP/pkg.deb"
+        (cd "$TMP" && ar x pkg.deb && tar -xf data.tar.* -C "$SLOT_DIR")
+        rm -rf "$TMP"
+        ;;
+    *.tar.gz|*.tgz)  tar -xzf "$FILE" -C "$SLOT_DIR" ;;
+    *.tar.xz|*.txz)  tar -xJf "$FILE" -C "$SLOT_DIR" ;;
+    *.tar.bz2|*.tbz2) tar -xjf "$FILE" -C "$SLOT_DIR" ;;
+    *.tar)           tar -xf "$FILE" -C "$SLOT_DIR" ;;
+    *.zip)           unzip -q "$FILE" -d "$SLOT_DIR" ;;
+    *)
+        tar -xf "$FILE" -C "$SLOT_DIR" 2>/dev/null || unzip -q "$FILE" -d "$SLOT_DIR"
+        ;;
+esac
+
+# ---------------------------------------------------------------------
+# Kind-specific validation + install
+# ---------------------------------------------------------------------
+case "$KIND" in
+    turnip)
+        # Find the .so
+        SO=$(find "$SLOT_DIR" -name "libvulkan_freedreno.so" -type f 2>/dev/null | head -1)
+        if [ -z "$SO" ]; then
+            echo "ERROR: no libvulkan_freedreno.so in archive." >&2
+            find "$SLOT_DIR" -type f | head -10
+            exit 1
+        fi
+        echo "  Found .so: $SO"
+
+        # CRITICAL: validate this is the KGSL bionic variant, NOT standalone.
+        # Standalone links against libhardware.so, libsync.so, libcutils.so —
+        # all of which are bionic framework libs that cause SIGTRAP crashes
+        # in the Termux-native environment.
+        if strings "$SO" 2>/dev/null | grep -qi "libhardware\|libsync\.so\|libcutils"; then
+            echo "ERROR: this Turnip .so is the STANDALONE variant." >&2
+            echo >&2
+            echo "It links against Android's libhardware.so which crashes" >&2
+            echo "with SIGTRAP 'Trace/breakpoint trap' inside Termux-native" >&2
+            echo "(bionic/glibc ABI conflict)." >&2
+            echo >&2
+            echo "Install the KGSL bionic variant instead. Look for:" >&2
+            echo "  - File names containing 'kgsl' or 'mesa-vulkan-kgsl'" >&2
+            echo "  - Builds from the termux-packages mesa-vulkan-icd-freedreno" >&2
+            echo "  - Or builds labeled 'bionic' from Armec or similar" >&2
+            echo >&2
+            echo "Cleaning up failed install…" >&2
+            rm -rf "$SLOT_DIR"
+            exit 1
+        fi
+
+        # Looks safe — verify it has KGSL symbols
+        if strings "$SO" 2>/dev/null | grep -qi "kgsl\|/dev/kgsl"; then
+            echo "  KGSL variant detected ✓"
+        else
+            echo "  WARNING: no KGSL symbols found. May not work." >&2
+            echo "  Continuing anyway — test with vulkaninfo." >&2
+        fi
+
+        # Install .so to system lib path
+        mkdir -p "$PREFIX/lib"
+        cp -f "$SO" "$PREFIX/lib/libvulkan_freedreno.so"
+        chmod 644 "$PREFIX/lib/libvulkan_freedreno.so"
+
+        # Write ICD JSON with absolute path
+        ICD_DIR="$PREFIX/etc/vulkan/icd.d"
+        mkdir -p "$ICD_DIR"
+        cat > "$ICD_DIR/freedreno_icd.json" <<EOF
+{
+    "file_format_version": "1.0.0",
+    "ICD": {
+        "library_path": "$PREFIX/lib/libvulkan_freedreno.so",
+        "api_version": "1.3.0"
+    }
+}
+EOF
+        echo "  ICD JSON: $ICD_DIR/freedreno_icd.json"
+
+        # Disable llvmpipe ICD if present
+        LP_ICD="$PREFIX/etc/vulkan/icd.d/lvp_icd.json"
+        if [ -f "$LP_ICD" ]; then
+            mv "$LP_ICD" "${LP_ICD}.disabled"
+            echo "  Disabled llvmpipe ICD"
+        fi
+
+        # Write env file
+        if [ "$ACTIVATE" = "true" ]; then
+            cat > "$PREFIX/share/waylandie/env-turnip.sh" <<EOF
+export VK_ICD_FILENAMES=$ICD_DIR/freedreno_icd.json
+export VK_DRIVER_FILES=$ICD_DIR/freedreno_icd.json
+EOF
+            echo "  Wrote $PREFIX/share/waylandie/env-turnip.sh"
+            ln -sfn "$SLOT" "$SLOTS_ROOT/turnip/active"
+        fi
+        ;;
+
+    dxvk)
+        # Find DXVK layout — either x32/x64 dirs at root, or nested
+        if [ ! -d "$SLOT_DIR/x32" ] && [ ! -d "$SLOT_DIR/x64" ]; then
+            TOP=$(find "$SLOT_DIR" -maxdepth 1 -mindepth 1 -type d | head -1)
+            if [ -n "$TOP" ] && { [ -d "$TOP/x32" ] || [ -d "$TOP/x64" ]; }; then
+                mv "$TOP"/* "$SLOT_DIR"/ 2>/dev/null || true
+                rmdir "$TOP" 2>/dev/null || true
+            fi
+        fi
+        echo "  DXVK at: $SLOT_DIR"
+
+        if [ "$ACTIVATE" = "true" ]; then
+            cat > "$PREFIX/share/waylandie/env-dxvk.sh" <<EOF
+export DXVK_CONFIG_FILE="${DXVK_CONFIG_FILE:-$SLOT_DIR/dxvk.conf}"
+export WINEDLLOVERRIDES="d3d8,d3d9,d3d10core,d3d11,dxgi=native"
+export DXVK_STATE_CACHE_PATH="\$HOME/.dxvk-cache-$SLOT"
+# Path so wine can find DXVK dlls
+export WAYLANDIE_DXVK_DIR="$SLOT_DIR"
+EOF
+            echo "  Wrote $PREFIX/share/waylandie/env-dxvk.sh"
+            ln -sfn "$SLOT" "$SLOTS_ROOT/dxvk/active"
+        fi
+        ;;
+
+    proton)
+        # Armec Proton layout: typically has 'proton' script + 'files/' + 'dist/'
+        echo "  Proton at: $SLOT_DIR"
+        ls -la "$SLOT_DIR" | head -10
+
+        if [ "$ACTIVATE" = "true" ]; then
+            cat > "$PREFIX/share/waylandie/env-proton.sh" <<EOF
+export WAYLANDIE_PROTON_DIR="$SLOT_DIR"
+export STEAM_COMPAT_CLIENT_INSTALL_PATH="\$HOME/.local/share/Steam"
+export STEAM_COMPAT_DATA_PATH="\$HOME/.proton-$SLOT"
+# Proton 9+ respects this for skipping pressure-vessel (no namespaces in Termux)
+export STEAM_RUNTIME=0
+EOF
+            echo "  Wrote $PREFIX/share/waylandie/env-proton.sh"
+            ln -sfn "$SLOT" "$SLOTS_ROOT/proton/active"
+        fi
+        ;;
+
+    fex)
+        if [ -d "$SLOT_DIR/bin" ]; then
+            echo "  FEX bin: $SLOT_DIR/bin"
+        else
+            TOP=$(find "$SLOT_DIR" -maxdepth 1 -mindepth 1 -type d | head -1)
+            if [ -n "$TOP" ] && [ -d "$TOP/bin" ]; then
+                mv "$TOP"/* "$SLOT_DIR"/ 2>/dev/null || true
+                rmdir "$TOP" 2>/dev/null || true
+            fi
+        fi
+
+        if [ "$ACTIVATE" = "true" ]; then
+            cat > "$PREFIX/share/waylandie/env-fex.sh" <<EOF
+export FEX_ROOT="$SLOT_DIR"
+export PATH="$SLOT_DIR/bin:\$PATH"
+EOF
+            echo "  Wrote $PREFIX/share/waylandie/env-fex.sh"
+            ln -sfn "$SLOT" "$SLOTS_ROOT/fex/active"
+        fi
+        ;;
+
+    qcom-adreno)
+        ICD=$(find "$SLOT_DIR" -name "*icd*.json" -type f 2>/dev/null | head -1)
+        if [ -n "$ICD" ]; then
+            echo "  Qualcomm ICD: $ICD"
+            ICD_DIR="$PREFIX/etc/vulkan/icd.d"
+            mkdir -p "$ICD_DIR"
+            cp -f "$ICD" "$ICD_DIR/"
+        fi
+        ;;
+
+    box86|box64)
+        BIN=$(find "$SLOT_DIR" -name "box86" -o -name "box64" -type f 2>/dev/null | head -1)
+        echo "  $KIND binary: ${BIN:-<not found>}"
+        if [ -n "$BIN" ] && [ "$ACTIVATE" = "true" ]; then
+            mkdir -p "$PREFIX/bin"
+            ln -sf "$BIN" "$PREFIX/bin/$KIND"
+        fi
+        ;;
+esac
+
+# Write a meta.json with slot info
+cat > "$SLOT_DIR/meta.json" <<EOF
+{
+    "kind": "$KIND",
+    "slot": "$SLOT",
+    "installed_from": "$FILE",
+    "installed_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+    "activated": $ACTIVATE
+}
+EOF
+
+echo
+echo "Done."
+if [ "$ACTIVATE" = "true" ]; then
+    echo "Slot '$SLOT' activated as default for $KIND."
+    echo "Run waylandie-doctor to verify."
+fi

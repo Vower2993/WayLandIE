@@ -1,0 +1,30 @@
+#!/bin/sh
+# waylandie-status — quick bridge status. Exits 0 if listening, 1 otherwise.
+SOCKET="${WAYLANDIE_BRIDGE_SOCKET:-waylandie.display.bridge.v1}"
+PORT="${WAYLANDIE_BRIDGE_PORT:-57391}"
+
+ABSTRACT_OK=false
+TCP_OK=false
+
+if grep -q "@${SOCKET}" /proc/net/unix 2>/dev/null; then
+    ABSTRACT_OK=true
+fi
+
+if command -v nc >/dev/null 2>&1; then
+    nc -z -w 2 127.0.0.1 "$PORT" 2>/dev/null && TCP_OK=true
+elif [ -e /proc/net/tcp ]; then
+    PORT_HEX=$(printf '%04X' "$PORT")
+    if grep -q " 0100007F:$PORT_HEX .*0A " /proc/net/tcp 2>/dev/null; then
+        TCP_OK=true
+    fi
+fi
+
+if [ "$ABSTRACT_OK" = "true" ] || [ "$TCP_OK" = "true" ]; then
+    echo "bridge: LISTENING"
+    [ "$ABSTRACT_OK" = "true" ] && echo "  abstract socket @$SOCKET ✓"
+    [ "$TCP_OK" = "true" ] &&      echo "  tcp 127.0.0.1:$PORT ✓"
+    exit 0
+else
+    echo "bridge: off"
+    exit 1
+fi

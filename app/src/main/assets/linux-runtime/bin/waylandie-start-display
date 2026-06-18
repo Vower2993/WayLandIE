@@ -1,0 +1,88 @@
+#!/bin/sh
+# waylandie-start-display — connect the Termux (bionic) side to the
+# Android WayLandIE bridge. NO proot, NO Debian. Direct bionic.
+#
+# After running this, run `waylandie-doctor` to verify, or
+# `waylandie-run <cmd>` to actually launch a client.
+
+set -e
+
+PREFIX="${WAYLANDIE_PREFIX:-/data/data/com.termux/files/usr}"
+
+# Load backend config
+[ -f "$PREFIX/share/waylandie/backend.conf" ] && . "$PREFIX/share/waylandie/backend.conf"
+
+SOCKET="${WAYLANDIE_BRIDGE_SOCKET:-waylandie.display.bridge.v1}"
+PORT="${WAYLANDIE_BRIDGE_PORT:-57391}"
+
+echo "WayLandIE bridge setup (termux-native / bionic)"
+echo "  socket   : $SOCKET (abstract — visible from Termux)"
+echo "  tcp port : $PORT (fallback)"
+echo "  backend  : ${WAYLANDIE_BACKEND:-termux-native}"
+echo "  finalcopy: ${WAYLANDIE_FINAL_COPY:-forbidden}"
+echo
+
+# In termux-native, we CAN see Android abstract sockets because Termux
+# runs as an Android app under the same kernel namespace as WayLandIE.
+# (This was the issue with proot — proot's namespace isolation hid them.)
+ABSTRACT_OK=false
+TCP_OK=false
+
+if grep -q "@${SOCKET}" /proc/net/unix 2>/dev/null; then
+    ABSTRACT_OK=true
+fi
+
+if command -v nc >/dev/null 2>&1; then
+    nc -z -w 2 127.0.0.1 "$PORT" 2>/dev/null && TCP_OK=true
+elif [ -e /proc/net/tcp ]; then
+    PORT_HEX=$(printf '%04X' "$PORT")
+    if grep -q " 0100007F:$PORT_HEX .*0A " /proc/net/tcp 2>/dev/null; then
+        TCP_OK=true
+    fi
+fi
+
+if [ "$ABSTRACT_OK" = "true" ]; then
+    echo "  abstract : LISTENING ✓"
+else
+    echo "  abstract : not listening"
+fi
+if [ "$TCP_OK" = "true" ]; then
+    echo "  tcp      : LISTENING ✓"
+else
+    echo "  tcp      : not listening"
+fi
+
+if [ "$ABSTRACT_OK" = "false" ] && [ "$TCP_OK" = "false" ]; then
+    echo
+    echo "Bridge is NOT listening. Open the WayLandIE Android app and tap"
+    echo "'Start display', then re-run this script."
+    exit 1
+fi
+
+# Set Wayland env vars — prefer abstract socket (faster, no TCP overhead)
+export WAYLAND_DISPLAY="waylandie"
+export WAYLANDIE_BRIDGE_SOCKET="$SOCKET"
+export WAYLANDIE_BRIDGE_PORT="$PORT"
+export WAYLANDIE_BRIDGE_PREFER="abstract"
+export WAYLANDIE_FINAL_COPY="${WAYLANDIE_FINAL_COPY:-forbidden}"
+export _WAYLANDIE_ACTIVE=1
+
+# Write env file for waylandie-run to source
+RC_DIR="${XDG_RUNTIME_DIR:-$PREFIX/tmp}/waylandie"
+mkdir -p "$RC_DIR"
+cat > "$RC_DIR/env.sh" <<EOF
+export WAYLAND_DISPLAY="$WAYLAND_DISPLAY"
+export WAYLANDIE_BRIDGE_SOCKET="$SOCKET"
+export WAYLANDIE_BRIDGE_PORT="$PORT"
+export WAYLANDIE_BRIDGE_PREFER="$WAYLANDIE_BRIDGE_PREFER"
+export WAYLANDIE_FINAL_COPY="$WAYLANDIE_FINAL_COPY"
+export WAYLANDIE_AUDIO_PORT="${WAYLANDIE_AUDIO_PORT:-57392}"
+export _WAYLANDIE_ACTIVE=1
+EOF
+
+echo
+echo "Environment exported. Now run:"
+echo "  waylandie-doctor                # verify"
+echo "  waylandie-run vkcube --wsi wayland"
+echo "  waylandie-run-game --exe /sdcard/Download/game.exe"
+echo "  waylandie-steam-session start"
