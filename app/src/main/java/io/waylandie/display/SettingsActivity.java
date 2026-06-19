@@ -24,7 +24,6 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
-import java.util.Locale;
 
 /**
  * SettingsActivity — central hub for driver and translation layer
@@ -193,10 +192,19 @@ public final class SettingsActivity extends Activity {
                     new InputStreamReader(p.getInputStream()));
             StringBuilder sb = new StringBuilder();
             String line;
-            while ((line = reader.readLine()) != null) {
+            // Cap at 500 lines so a huge archive doesn't OOM the preview.
+            int lineCount = 0;
+            while ((line = reader.readLine()) != null && lineCount < 500) {
                 sb.append(line).append('\n');
+                lineCount++;
             }
-            p.waitFor();
+            // Wait with timeout — if proot hangs (rare but possible on
+            // corrupted archives), don't leave this background thread
+            // blocked forever. 15s is generous for listing contents.
+            if (!p.waitFor(15, java.util.concurrent.TimeUnit.SECONDS)) {
+                p.destroyForcibly();
+                sb.append("\n(preview timed out after 15s — archive may be very large or corrupted)");
+            }
             return sb.length() > 0 ? sb.toString() : "(no output from preview command)";
         } catch (Exception e) {
             return "(preview failed: " + e.getMessage() + " — tap Install to try anyway)";
@@ -270,20 +278,65 @@ public final class SettingsActivity extends Activity {
 
         toast("Installing " + kind + " slot '" + slot + "'…");
         log("Installing via ProotRunner: " + inner);
+        io.waylandie.display.shared.util.LogRingBuffer.append(
+                "[Settings] Installing " + kind + " slot '" + slot + "'…");
         try {
             Process p = runner.exec(inner);
-            // Drain output in background
+            // Capture output line-by-line and append to LogRingBuffer so
+            // it appears in crash logs + the diagnostic log. Every line
+            // is logged — no silent discard. The install can take 10-30s
+            // for large Proton packages, so this runs on a background
+            // thread and posts the result back to the UI thread.
             new Thread(() -> {
+                StringBuilder captured = new StringBuilder();
+                try (java.io.BufferedReader reader = new java.io.BufferedReader(
+                        new java.io.InputStreamReader(p.getInputStream()))) {
+                    String line;
+                    while ((line = reader.readLine()) != null) {
+                        captured.append(line).append('\n');
+                        android.util.Log.i("WayLandIE/Install", line);
+                        io.waylandie.display.shared.util.LogRingBuffer.append(
+                                "[install] " + line);
+                    }
+                } catch (java.io.IOException e) {
+                    String msg = "install output read failed: " + e.getMessage();
+                    android.util.Log.w("WayLandIE/Install", msg);
+                    io.waylandie.display.shared.util.LogRingBuffer.append(
+                            "[install] " + msg);
+                }
+                int exitCode;
                 try {
-                    byte[] buf = new byte[4096];
-                    while (p.getInputStream().read(buf) > 0) {}
-                    p.waitFor();
-                } catch (Exception ignored) {}
-            }).start();
+                    exitCode = p.waitFor();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    exitCode = -1;
+                }
+                final int code = exitCode;
+                final String output = captured.toString();
+                runOnUiThread(() -> {
+                    if (code == 0) {
+                        toast(kind + " '" + slot + "' installed ✓");
+                        log("Install succeeded: " + kind + " " + slot);
+                        io.waylandie.display.shared.util.LogRingBuffer.append(
+                                "[Settings] Install succeeded: " + kind + " " + slot);
+                    } else {
+                        toast(kind + " '" + slot + "' install FAILED (exit " + code + ")");
+                        log("Install FAILED (exit " + code + "): " + kind + " " + slot
+                                + "\n" + output);
+                        io.waylandie.display.shared.util.LogRingBuffer.append(
+                                "[Settings] Install FAILED (exit " + code + "): "
+                                + kind + " " + slot);
+                    }
+                    refreshAllStatuses();
+                });
+            }, "wl-install-" + kind).start();
         } catch (java.io.IOException error) {
-            toast("Install failed: " + error.getMessage());
+            String msg = "Install failed to start: " + error.getMessage();
+            toast(msg);
+            log(msg);
+            io.waylandie.display.shared.util.LogRingBuffer.append("[install] " + msg);
+            refreshAllStatuses();
         }
-        refreshAllStatuses();
     }
 
     private void refreshAllStatuses() {
@@ -291,39 +344,54 @@ public final class SettingsActivity extends Activity {
         refreshStatus(turnipStatus, "turnip");
         refreshStatus(qcomStatus, "qcom-adreno");
         refreshStatus(protonStatus, "proton");
-        refreshFexStatus();
+        refreshStatus(fexStatus, "fex");
         refreshActiveProfile();
     }
 
+    /**
+     * Scans the app-private contents directory for installed driver
+     * slots of the given kind. Shows the slot names + which one is
+     * active (via the 'active' symlink created by
+     * waylandie-install-driver).
+     *
+     * <p>Previously this scanned /sdcard/Download/WayLandIE/drivers/
+     * (the staged archive files), which showed the user's downloaded
+     * .wcp/.zip files instead of actual installed slots. That was
+     * misleading — it looked like drivers were "installed" when they
+     * weren't. Now scans the real install path:
+     * getFilesDir()/contents/<kind>/.
+     */
     private void refreshStatus(TextView view, String kind) {
-        File root = new File(
-                Environment.getExternalStoragePublicDirectory(
-                        Environment.DIRECTORY_DOWNLOADS),
-                "WayLandIE/drivers");
+        File kindDir = new File(getFilesDir(), "contents/" + kind);
         StringBuilder sb = new StringBuilder("Installed slots: ");
         int count = 0;
-        if (root.exists()) {
-            File[] kids = root.listFiles();
+        String activeSlot = null;
+        if (kindDir.isDirectory()) {
+            // Resolve the 'active' symlink to find which slot is active
+            File activeLink = new File(kindDir, "active");
+            if (activeLink.exists()) {
+                try {
+                    activeSlot = activeLink.getCanonicalFile().getName();
+                } catch (java.io.IOException e) {
+                    // Symlink exists but can't resolve — show it anyway
+                    activeSlot = "(active — unresolved)";
+                }
+            }
+            File[] kids = kindDir.listFiles();
             if (kids != null) {
                 for (File kid : kids) {
-                    if (kid.getName().toLowerCase(Locale.US).contains(kind)
-                            || kind.equals("dxvk") && kid.getName().toLowerCase(Locale.US).contains("dxvk")
-                            || kind.equals("turnip") && kid.getName().toLowerCase(Locale.US).contains("turnip")) {
-                        if (count > 0) sb.append(", ");
-                        sb.append(kid.getName());
-                        count++;
+                    if (kid.getName().equals("active")) continue;
+                    if (!kid.isDirectory()) continue;
+                    if (count > 0) sb.append(", ");
+                    sb.append(kid.getName());
+                    if (kid.getName().equals(activeSlot)) {
+                        sb.append(" (active)");
                     }
+                    count++;
                 }
             }
         }
-        // Also list staged archives (just the .tar.gz/.zip/.deb files staged for install)
         view.setText(sb.toString() + (count == 0 ? "(none — install one to begin)" : ""));
-    }
-
-    private void refreshFexStatus() {
-        // FEX is installed via apt, so we can't easily check it from here.
-        // Just show a hint to run the setup wizard.
-        fexStatus.setText("Status: managed by setup wizard (apt: fex-emu-app)");
     }
 
     private void refreshActiveProfile() {

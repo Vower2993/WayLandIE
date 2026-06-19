@@ -122,7 +122,7 @@ echo 'debconf debconf/frontend select Noninteractive' | chroot_run debconf-set-s
 
 chroot_run apt-get update -qq
 chroot_run apt-get install -y --no-install-recommends \
-    ca-certificates wget curl xz-utils tar bzip2 gzip \
+    ca-certificates wget curl xz-utils tar bzip2 gzip unzip binutils \
     locales bash coreutils findutils \
     libwayland-client0 libwayland-server0 wayland-protocols \
     libvulkan1 vulkan-tools mesa-vulkan-drivers mesa-utils \

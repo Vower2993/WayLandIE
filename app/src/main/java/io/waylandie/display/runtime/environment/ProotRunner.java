@@ -117,6 +117,21 @@ public final class ProotRunner {
         argv.add("-b");
         argv.add(tmpDir.getAbsolutePath() + ":/tmp");
 
+        // Bind-mount the user-contents directory (where driver slots +
+        // 'active' symlinks live) into the rootfs at /waylandie-contents.
+        // This is writable so waylandie-install-driver can create slots
+        // and 'active' symlinks here. Java checks
+        // getFilesDir()/contents/<kind>/active which resolves to the
+        // same physical path — bridging the install script (writes
+        // inside proot at /waylandie-contents) and Java (reads from
+        // app-private storage). WITHOUT this bind mount, the script
+        // would write inside the rootfs and Java would never find the
+        // installed driver.
+        File contentsDir = new File(context.getFilesDir(), "contents");
+        if (!contentsDir.exists()) contentsDir.mkdirs();
+        argv.add("-b");
+        argv.add(contentsDir.getAbsolutePath() + ":/waylandie-contents");
+
         // Bind-mount user-installed Proton into /opt/proton (if installed)
         File protonDir = new File(context.getFilesDir(), "contents/proton/active");
         if (protonDir.isDirectory()) {
@@ -204,6 +219,11 @@ public final class ProotRunner {
         pb.environment().put("TERM", "xterm-256color");
         pb.environment().put("TMPDIR", "/tmp");
         pb.environment().put("XDG_RUNTIME_DIR", "/tmp");
+
+        // Contents dir — where driver slots + 'active' symlinks live.
+        // waylandie-install-driver reads this to know where to install.
+        // Must match the bind-mount in buildProotCommand().
+        pb.environment().put("WAYLANDIE_CONTENTS_DIR", "/waylandie-contents");
 
         // WaylandIE bridge env
         pb.environment().put("WAYLAND_DISPLAY", "waylandie");

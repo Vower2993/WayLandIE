@@ -38,7 +38,11 @@ public final class ImageFsManager {
 
     private static final String TAG = "WayLandIE/ImageFs";
 
-    public static final int LATEST_VERSION = 1;
+    // Version 2: rootfs now includes unzip + binutils (for .zip extraction,
+    // .deb extraction via ar, and strings validation via grep -a fallback).
+    // Bumping from 1 → 2 forces re-extraction on existing installs so they
+    // get the new packages without manually clearing app data.
+    public static final int LATEST_VERSION = 2;
     private static final String IMAGEFS_ARCHIVE = "imagefs/imagefs.tar.xz";
     private static final long IMAGEFS_EXTRACTED_BYTES = 500_000_000L;
 

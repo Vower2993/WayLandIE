@@ -24,14 +24,35 @@
 # Useful for diagnosing layout mismatches (e.g. Winlator .wcp packages
 # that have a different internal structure than Armec packages).
 #
-# The slot is installed under:
-#   $PREFIX/share/waylandie/driver-slots/KIND/SLOT/
+# ARCHITECTURE (important — read before changing paths):
 #
-# If --activate is passed, an env file is written at:
-#   $PREFIX/share/waylandie/env-KIND.sh
-# which waylandie-bundled rootfs sources automatically.
+# The slot is installed to $WAYLANDIE_CONTENTS_DIR/KIND/SLOT/ which is
+# bind-mounted by ProotRunner from the app's getFilesDir()/contents/
+# directory. This is OUTSIDE the rootfs tarball — the rootfs stays
+# read-only, and user-installed drivers live in app-private storage
+# that persists across app upgrades.
+#
+# The 'active' symlink is created at:
+#   $WAYLANDIE_CONTENTS_DIR/KIND/active → SLOT
+#
+# Java (ProotRunner.buildProotCommand + execWine) checks:
+#   getFilesDir()/contents/KIND/active
+# which resolves through the bind-mount to the same path. This is the
+# ONLY path Java looks at — do NOT write slots inside the rootfs
+# ($PREFIX/share/waylandie/driver-slots/) because Java will never
+# find them there.
+#
+# Env files (env-KIND.sh) are written to $PREFIX/share/waylandie/
+# (rootfs-internal) so they can be sourced by the rootfs's bash
+# profile. These are secondary — the primary activation mechanism
+# is the 'active' symlink in the contents dir.
 
 set -e
+
+# Print a failure banner on any non-zero exit so the user sees that
+# the install failed (output is now captured by SettingsActivity and
+# shown in toasts + LogRingBuffer).
+trap '[ $? -ne 0 ] && echo "" && echo "INSTALL FAILED (exit $?) — see output above" >&2' EXIT
 
 KIND=""
 SLOT=""
@@ -51,44 +72,6 @@ while [ $# -gt 0 ]; do
 done
 
 [ -z "$FILE" ] && { echo "--file required" >&2; exit 2; }
-
-if [ "$LIST_ONLY" = "true" ]; then
-    # Resolve file path
-    for candidate in \
-        "$FILE" \
-        "/usr/local/share/waylandie/driver-archive/$(basename "$FILE")" \
-        "/sdcard/Download/$(basename "$FILE")" \
-        "/sdcard/Download/WayLandIE/drivers/$(basename "$FILE")" \
-        "/storage/emulated/0/Download/$(basename "$FILE")" \
-        "$HOME/storage/downloads/$(basename "$FILE")"; do
-        if [ -f "$candidate" ]; then
-            FILE="$candidate"
-            break
-        fi
-    done
-    if [ ! -f "$FILE" ]; then
-        echo "ERROR: file not found: $FILE" >&2
-        exit 1
-    fi
-    echo "=== Archive: $FILE ==="
-    echo "Size: $(stat -c%s "$FILE") bytes"
-    echo "Magic: $(head -c 4 "$FILE" | od -An -tx1 | tr -d ' ')"
-    echo ""
-    echo "=== Detection ==="
-    detect_archive_type "$FILE"
-    echo ""
-    echo "=== Contents (first 100 entries) ==="
-    list_archive_contents "$FILE" | head -100
-    exit 0
-fi
-
-[ -z "$KIND" ] && { echo "--kind required" >&2; exit 2; }
-[ -z "$SLOT" ] && { echo "--slot required" >&2; exit 2; }
-
-case "$KIND" in
-    turnip|dxvk|proton|fex|qcom-adreno|box86|box64) ;;
-    *) echo "unknown kind: $KIND" >&2; exit 2 ;;
-esac
 
 # ---------------------------------------------------------------------
 # Archive format detection helpers
@@ -136,12 +119,28 @@ list_archive_contents() {
         bzip2)  tar -tjf "$f" 2>/dev/null ;;
         xz)     tar -tJf "$f" 2>/dev/null ;;
         tar)    tar -tf "$f" 2>/dev/null ;;
-        zip)    unzip -l "$f" 2>/dev/null | awk 'NR>3 && $4 != "" {print $4}' ;;
-        ar-deb) ar t "$f" 2>/dev/null ;;
+        zip)
+            if command -v unzip >/dev/null 2>&1; then
+                unzip -l "$f" 2>/dev/null | awk 'NR>3 && $4 != "" {print $4}'
+            else
+                echo "  (unzip not installed — cannot list .zip contents)" >&2
+            fi
+            ;;
+        ar-deb)
+            if command -v ar >/dev/null 2>&1; then
+                ar t "$f" 2>/dev/null
+            else
+                echo "  (ar not installed — cannot list .deb contents)" >&2
+            fi
+            ;;
         *)
             echo "  (unknown archive type, magic=$(head -c 4 "$f" | od -An -tx1 | tr -d ' '))" >&2
             # Try tar then zip as last resort
-            tar -tf "$f" 2>/dev/null || unzip -l "$f" 2>/dev/null | awk 'NR>3 && $4 != "" {print $4}'
+            tar -tf "$f" 2>/dev/null || {
+                if command -v unzip >/dev/null 2>&1; then
+                    unzip -l "$f" 2>/dev/null | awk 'NR>3 && $4 != "" {print $4}'
+                fi
+            }
             ;;
     esac
 }
@@ -158,8 +157,23 @@ extract_archive() {
         bzip2)  tar -xjf "$f" -C "$dest" ;;
         xz)     tar -xJf "$f" -C "$dest" ;;
         tar)    tar -xf "$f" -C "$dest" ;;
-        zip)    unzip -q "$f" -d "$dest" ;;
+        zip)
+            if ! command -v unzip >/dev/null 2>&1; then
+                echo "ERROR: .zip extraction requires 'unzip' which is not installed in the rootfs." >&2
+                echo "  Either:" >&2
+                echo "    1. Convert the .zip to .tar.gz (gzip is available)" >&2
+                echo "    2. Install unzip: apt install unzip (needs network inside rootfs)" >&2
+                echo "    3. Wait for the next APK build — unzip is now added to build-imagefs.sh" >&2
+                return 1
+            fi
+            unzip -q "$f" -d "$dest"
+            ;;
         ar-deb)
+            if ! command -v ar >/dev/null 2>&1; then
+                echo "ERROR: .deb extraction requires 'ar' (binutils) which is not installed in the rootfs." >&2
+                echo "  Install binutils: apt install binutils (needs network inside rootfs)" >&2
+                return 1
+            fi
             local tmp
             tmp=$(mktemp -d)
             cp "$f" "$tmp/pkg.deb"
@@ -176,13 +190,70 @@ extract_archive() {
     esac
 }
 
+if [ "$LIST_ONLY" = "true" ]; then
+    # Resolve file path
+    for candidate in \
+        "$FILE" \
+        "/sdcard/Download/$(basename "$FILE")" \
+        "/sdcard/Download/WayLandIE/drivers/$(basename "$FILE")" \
+        "/storage/emulated/0/Download/$(basename "$FILE")" \
+        "$HOME/storage/downloads/$(basename "$FILE")"; do
+        if [ -f "$candidate" ]; then
+            FILE="$candidate"
+            break
+        fi
+    done
+    if [ ! -f "$FILE" ]; then
+        echo "ERROR: file not found: $FILE" >&2
+        exit 1
+    fi
+    echo "=== Archive: $FILE ==="
+    echo "Size: $(stat -c%s "$FILE") bytes"
+    echo "Magic: $(head -c 4 "$FILE" | od -An -tx1 | tr -d ' ')"
+    echo ""
+    echo "=== Detection ==="
+    detect_archive_type "$FILE"
+    echo ""
+    echo "=== Contents (first 100 entries) ==="
+    list_archive_contents "$FILE" | head -100
+    exit 0
+fi
+
+[ -z "$KIND" ] && { echo "--kind required" >&2; exit 2; }
+[ -z "$SLOT" ] && { echo "--slot required" >&2; exit 2; }
+
+case "$KIND" in
+    turnip|dxvk|proton|fex|qcom-adreno|box86|box64) ;;
+    *) echo "unknown kind: $KIND" >&2; exit 2 ;;
+esac
+
+# ---------------------------------------------------------------------
+# Paths
+# ---------------------------------------------------------------------
+# PREFIX = rootfs-internal /usr/local (for env files + ICD JSON + libs)
+# CONTENTS_DIR = bind-mounted from app's getFilesDir()/contents/ — this
+#   is where slots + active symlinks live so Java can find them.
 PREFIX="${WAYLANDIE_PREFIX:-/usr/local}"
+CONTENTS_DIR="${WAYLANDIE_CONTENTS_DIR:-/waylandie-contents}"
+ENV_DIR="$PREFIX/share/waylandie"
+mkdir -p "$ENV_DIR"
+
+# Verify the contents dir is writable (it should be — ProotRunner
+# bind-mounts it from app-private storage). If it's not, the bind
+# mount failed and we'd be writing into the rootfs (which Java can't
+# see). Fail loud rather than silently writing to the wrong place.
+if [ ! -d "$CONTENTS_DIR" ] || [ ! -w "$CONTENTS_DIR" ]; then
+    echo "ERROR: contents dir not writable: $CONTENTS_DIR" >&2
+    echo "  This usually means ProotRunner failed to bind-mount it." >&2
+    echo "  Check that getFilesDir()/contents/ exists and is writable." >&2
+    echo "  WAYLANDIE_CONTENTS_DIR=$WAYLANDIE_CONTENTS_DIR" >&2
+    exit 1
+fi
 
 # Resolve file path
 RESOLVED_FILE=""
 for candidate in \
     "$FILE" \
-    "$PREFIX/share/waylandie/driver-archive/$(basename "$FILE")" \
     "/sdcard/Download/$(basename "$FILE")" \
     "/sdcard/Download/WayLandIE/drivers/$(basename "$FILE")" \
     "/storage/emulated/0/Download/$(basename "$FILE")" \
@@ -195,17 +266,17 @@ done
 if [ -z "$RESOLVED_FILE" ]; then
     echo "ERROR: file not found. Tried:" >&2
     echo "  $FILE" >&2
-    echo "  $PREFIX/share/waylandie/driver-archive/$(basename "$FILE")" >&2
     echo "  /sdcard/Download/$(basename "$FILE")" >&2
+    echo "  /sdcard/Download/WayLandIE/drivers/$(basename "$FILE")" >&2
     echo "  /storage/emulated/0/Download/$(basename "$FILE")" >&2
     exit 1
 fi
 FILE="$RESOLVED_FILE"
 echo "Resolved archive to: $FILE"
 
-# Install root
-SLOTS_ROOT="$PREFIX/share/waylandie/driver-slots"
-SLOT_DIR="$SLOTS_ROOT/$KIND/$SLOT"
+# Install root — in the contents dir (bind-mounted from app storage)
+KIND_DIR="$CONTENTS_DIR/$KIND"
+SLOT_DIR="$KIND_DIR/$SLOT"
 mkdir -p "$SLOT_DIR"
 rm -rf "$SLOT_DIR"/*
 echo "Installing $KIND slot '$SLOT' → $SLOT_DIR"
@@ -237,7 +308,8 @@ case "$KIND" in
         SO=$(find "$SLOT_DIR" -name "libvulkan_freedreno.so" -type f 2>/dev/null | head -1)
         if [ -z "$SO" ]; then
             echo "ERROR: no libvulkan_freedreno.so in archive." >&2
-            find "$SLOT_DIR" -type f | head -10
+            find "$SLOT_DIR" -type f | head -10 >&2
+            rm -rf "$SLOT_DIR"
             exit 1
         fi
         echo "  Found .so: $SO"
@@ -246,7 +318,12 @@ case "$KIND" in
         # Standalone links against libhardware.so, libsync.so, libcutils.so —
         # all of which are bionic framework libs that cause SIGTRAP crashes
         # in the bundled rootfs-native environment.
-        if strings "$SO" 2>/dev/null | grep -qi "libhardware\|libsync\.so\|libcutils"; then
+        #
+        # Use grep -a (treat binary as text) instead of strings|grep so we
+        # don't depend on binutils being installed in the rootfs. grep is
+        # always available (coreutils). The -q flag suppresses output, -a
+        # forces text mode (otherwise grep prints "Binary file matches").
+        if grep -aqi "libhardware\|libsync\.so\|libcutils" "$SO" 2>/dev/null; then
             echo "ERROR: this Turnip .so is the STANDALONE variant." >&2
             echo >&2
             echo "It links against Android's libhardware.so which crashes" >&2
@@ -255,23 +332,22 @@ case "$KIND" in
             echo >&2
             echo "Install the KGSL bionic variant instead. Look for:" >&2
             echo "  - File names containing 'kgsl' or 'mesa-vulkan-kgsl'" >&2
-            echo "  - Builds from the bundled rootfs-packages mesa-vulkan-icd-freedreno" >&2
-            echo "  - Or builds labeled 'bionic' from Armec or similar" >&2
+            echo "  - Builds labeled 'bionic' from Armec or similar" >&2
             echo >&2
             echo "Cleaning up failed install…" >&2
             rm -rf "$SLOT_DIR"
             exit 1
         fi
 
-        # Looks safe — verify it has KGSL symbols
-        if strings "$SO" 2>/dev/null | grep -qi "kgsl\|/dev/kgsl"; then
+        if grep -aqi "kgsl\|/dev/kgsl" "$SO" 2>/dev/null; then
             echo "  KGSL variant detected ✓"
         else
             echo "  WARNING: no KGSL symbols found. May not work." >&2
             echo "  Continuing anyway — test with vulkaninfo." >&2
         fi
 
-        # Install .so to system lib path
+        # Install .so to system lib path (rootfs-internal — Turnip needs
+        # to be loadable by the Vulkan loader inside the rootfs)
         mkdir -p "$PREFIX/lib"
         cp -f "$SO" "$PREFIX/lib/libvulkan_freedreno.so"
         chmod 644 "$PREFIX/lib/libvulkan_freedreno.so"
@@ -297,14 +373,15 @@ EOF
             echo "  Disabled llvmpipe ICD"
         fi
 
-        # Write env file
+        # Write env file (rootfs-internal, sourced by bash profile)
         if [ "$ACTIVATE" = "true" ]; then
-            cat > "$PREFIX/share/waylandie/env-turnip.sh" <<EOF
+            cat > "$ENV_DIR/env-turnip.sh" <<EOF
 export VK_ICD_FILENAMES=$ICD_DIR/freedreno_icd.json
 export VK_DRIVER_FILES=$ICD_DIR/freedreno_icd.json
 EOF
-            echo "  Wrote $PREFIX/share/waylandie/env-turnip.sh"
-            ln -sfn "$SLOT" "$SLOTS_ROOT/turnip/active"
+            echo "  Wrote $ENV_DIR/env-turnip.sh"
+            ln -sfn "$SLOT" "$KIND_DIR/active"
+            echo "  Activated: $KIND_DIR/active → $SLOT"
         fi
         ;;
 
@@ -313,61 +390,160 @@ EOF
         if [ ! -d "$SLOT_DIR/x32" ] && [ ! -d "$SLOT_DIR/x64" ]; then
             TOP=$(find "$SLOT_DIR" -maxdepth 1 -mindepth 1 -type d | head -1)
             if [ -n "$TOP" ] && { [ -d "$TOP/x32" ] || [ -d "$TOP/x64" ]; }; then
+                echo "  Hoisting nested DXVK layout: $TOP → $SLOT_DIR"
                 mv "$TOP"/* "$SLOT_DIR"/ 2>/dev/null || true
                 rmdir "$TOP" 2>/dev/null || true
             fi
         fi
+
+        # Validate that DXVK dlls are present
+        DXVK_DLLS=$(find "$SLOT_DIR" -name "d3d11.dll" -o -name "dxgi.dll" 2>/dev/null | head -1)
+        if [ -z "$DXVK_DLLS" ]; then
+            echo "ERROR: no DXVK dlls (d3d11.dll / dxgi.dll) found in archive." >&2
+            echo "  Top-level contents:" >&2
+            ls -la "$SLOT_DIR" >&2 | head -20
+            rm -rf "$SLOT_DIR"
+            exit 1
+        fi
+        echo "  DXVK dlls found: $DXVK_DLLS"
         echo "  DXVK at: $SLOT_DIR"
 
         if [ "$ACTIVATE" = "true" ]; then
-            cat > "$PREFIX/share/waylandie/env-dxvk.sh" <<EOF
+            cat > "$ENV_DIR/env-dxvk.sh" <<EOF
 export DXVK_CONFIG_FILE="${DXVK_CONFIG_FILE:-$SLOT_DIR/dxvk.conf}"
 export WINEDLLOVERRIDES="d3d8,d3d9,d3d10core,d3d11,dxgi=native"
 export DXVK_STATE_CACHE_PATH="\$HOME/.dxvk-cache-$SLOT"
 # Path so wine can find DXVK dlls
 export WAYLANDIE_DXVK_DIR="$SLOT_DIR"
 EOF
-            echo "  Wrote $PREFIX/share/waylandie/env-dxvk.sh"
-            ln -sfn "$SLOT" "$SLOTS_ROOT/dxvk/active"
+            echo "  Wrote $ENV_DIR/env-dxvk.sh"
+            ln -sfn "$SLOT" "$KIND_DIR/active"
+            echo "  Activated: $KIND_DIR/active → $SLOT"
         fi
         ;;
 
     proton)
-        # Armec Proton layout: typically has 'proton' script + 'files/' + 'dist/'
-        echo "  Proton at: $SLOT_DIR"
+        # Armec Proton / Winlator .wcp layout: typically has 'proton'
+        # script + 'files/' + 'dist/'. But .wcp packages may have a
+        # nested top-level dir (e.g. proton-11.0-1-arm64ec/). Hoist if
+        # the expected layout isn't at the root.
+        echo "  Proton at: $SLOT_DIR (raw extraction)"
+        ls -la "$SLOT_DIR" | head -10
+
+        # Check for wine binary at expected locations
+        WINE_BIN=""
+        for candidate in \
+            "$SLOT_DIR/files/bin/wine" \
+            "$SLOT_DIR/dist/bin/wine" \
+            "$SLOT_DIR/bin/wine"; do
+            if [ -f "$candidate" ]; then
+                WINE_BIN="$candidate"
+                break
+            fi
+        done
+
+        # If not found, try hoisting a nested top-level dir
+        if [ -z "$WINE_BIN" ]; then
+            TOP=$(find "$SLOT_DIR" -maxdepth 1 -mindepth 1 -type d | head -1)
+            if [ -n "$TOP" ]; then
+                for candidate in \
+                    "$TOP/files/bin/wine" \
+                    "$TOP/dist/bin/wine" \
+                    "$TOP/bin/wine"; do
+                    if [ -f "$candidate" ]; then
+                        WINE_BIN="$candidate"
+                        break
+                    fi
+                done
+                if [ -n "$WINE_BIN" ]; then
+                    echo "  Hoisting nested Proton layout: $TOP → $SLOT_DIR"
+                    # Move all contents (including dotfiles) up one level
+                    mv "$TOP"/* "$SLOT_DIR"/ 2>/dev/null || true
+                    mv "$TOP"/.* "$SLOT_DIR"/ 2>/dev/null || true
+                    rmdir "$TOP" 2>/dev/null || true
+                    # Re-resolve WINE_BIN relative to SLOT_DIR
+                    for candidate in \
+                        "$SLOT_DIR/files/bin/wine" \
+                        "$SLOT_DIR/dist/bin/wine" \
+                        "$SLOT_DIR/bin/wine"; do
+                        if [ -f "$candidate" ]; then
+                            WINE_BIN="$candidate"
+                            break
+                        fi
+                    done
+                fi
+            fi
+        fi
+
+        # Validate — refuse to activate a broken Proton slot
+        if [ -z "$WINE_BIN" ]; then
+            echo "ERROR: wine binary not found in Proton archive." >&2
+            echo "  Looked for (relative to $SLOT_DIR):" >&2
+            echo "    files/bin/wine" >&2
+            echo "    dist/bin/wine" >&2
+            echo "    bin/wine" >&2
+            echo "" >&2
+            echo "  Top-level contents:" >&2
+            ls -la "$SLOT_DIR" >&2 | head -20
+            echo "" >&2
+            echo "  Recursive wine search:" >&2
+            find "$SLOT_DIR" -name "wine*" -type f 2>/dev/null | head -10 >&2
+            echo "" >&2
+            echo "  This .wcp may not be a Proton package, or has an" >&2
+            echo "  unrecognized internal layout. Try a different build." >&2
+            rm -rf "$SLOT_DIR"
+            exit 1
+        fi
+        echo "  Found wine: $WINE_BIN ✓"
+        echo "  Proton at: $SLOT_DIR (final layout)"
         ls -la "$SLOT_DIR" | head -10
 
         if [ "$ACTIVATE" = "true" ]; then
-            cat > "$PREFIX/share/waylandie/env-proton.sh" <<EOF
+            cat > "$ENV_DIR/env-proton.sh" <<EOF
 export WAYLANDIE_PROTON_DIR="$SLOT_DIR"
 export STEAM_COMPAT_CLIENT_INSTALL_PATH="\$HOME/.local/share/Steam"
 export STEAM_COMPAT_DATA_PATH="\$HOME/.proton-$SLOT"
 # Proton 9+ respects this for skipping pressure-vessel (no namespaces in bundled rootfs)
 export STEAM_RUNTIME=0
 EOF
-            echo "  Wrote $PREFIX/share/waylandie/env-proton.sh"
-            ln -sfn "$SLOT" "$SLOTS_ROOT/proton/active"
+            echo "  Wrote $ENV_DIR/env-proton.sh"
+            ln -sfn "$SLOT" "$KIND_DIR/active"
+            echo "  Activated: $KIND_DIR/active → $SLOT"
         fi
         ;;
 
     fex)
+        # FEX-Emu layout: typically has 'bin/' + 'lib/' at root, or
+        # nested under a top-level dir.
         if [ -d "$SLOT_DIR/bin" ]; then
             echo "  FEX bin: $SLOT_DIR/bin"
         else
             TOP=$(find "$SLOT_DIR" -maxdepth 1 -mindepth 1 -type d | head -1)
             if [ -n "$TOP" ] && [ -d "$TOP/bin" ]; then
+                echo "  Hoisting nested FEX layout: $TOP → $SLOT_DIR"
                 mv "$TOP"/* "$SLOT_DIR"/ 2>/dev/null || true
                 rmdir "$TOP" 2>/dev/null || true
             fi
         fi
 
+        # Validate
+        if [ ! -d "$SLOT_DIR/bin" ]; then
+            echo "ERROR: no bin/ directory in FEX archive." >&2
+            echo "  Top-level contents:" >&2
+            ls -la "$SLOT_DIR" >&2 | head -20
+            rm -rf "$SLOT_DIR"
+            exit 1
+        fi
+        echo "  FEX at: $SLOT_DIR"
+
         if [ "$ACTIVATE" = "true" ]; then
-            cat > "$PREFIX/share/waylandie/env-fex.sh" <<EOF
+            cat > "$ENV_DIR/env-fex.sh" <<EOF
 export FEX_ROOT="$SLOT_DIR"
 export PATH="$SLOT_DIR/bin:\$PATH"
 EOF
-            echo "  Wrote $PREFIX/share/waylandie/env-fex.sh"
-            ln -sfn "$SLOT" "$SLOTS_ROOT/fex/active"
+            echo "  Wrote $ENV_DIR/env-fex.sh"
+            ln -sfn "$SLOT" "$KIND_DIR/active"
+            echo "  Activated: $KIND_DIR/active → $SLOT"
         fi
         ;;
 
@@ -378,15 +554,27 @@ EOF
             ICD_DIR="$PREFIX/etc/vulkan/icd.d"
             mkdir -p "$ICD_DIR"
             cp -f "$ICD" "$ICD_DIR/"
+        else
+            echo "WARNING: no ICD json found in Qualcomm archive." >&2
+        fi
+        if [ "$ACTIVATE" = "true" ]; then
+            ln -sfn "$SLOT" "$KIND_DIR/active"
+            echo "  Activated: $KIND_DIR/active → $SLOT"
         fi
         ;;
 
     box86|box64)
         BIN=$(find "$SLOT_DIR" -name "box86" -o -name "box64" -type f 2>/dev/null | head -1)
         echo "  $KIND binary: ${BIN:-<not found>}"
-        if [ -n "$BIN" ] && [ "$ACTIVATE" = "true" ]; then
-            mkdir -p "$PREFIX/bin"
-            ln -sf "$BIN" "$PREFIX/bin/$KIND"
+        if [ -n "$BIN" ]; then
+            if [ "$ACTIVATE" = "true" ]; then
+                ln -sfn "$SLOT" "$KIND_DIR/active"
+                echo "  Activated: $KIND_DIR/active → $SLOT"
+            fi
+        else
+            echo "ERROR: no $KIND binary found in archive." >&2
+            rm -rf "$SLOT_DIR"
+            exit 1
         fi
         ;;
 esac
@@ -406,5 +594,5 @@ echo
 echo "Done."
 if [ "$ACTIVATE" = "true" ]; then
     echo "Slot '$SLOT' activated as default for $KIND."
-    echo "Run waylandie-doctor to verify."
+    echo "  Path: $KIND_DIR/active → $SLOT"
 fi

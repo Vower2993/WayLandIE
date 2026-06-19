@@ -225,9 +225,18 @@ public final class EnvironmentInitializer extends Activity {
         }
 
         // If state is READY but ImageFs is NOT actually valid (interrupted
-        // extraction, partial files), reset and re-extract.
-        if (stateStore.read() == SetupStateStore.State.READY && !imageFs.isValid()) {
-            logToRing("State says READY but ImageFs is invalid — wiping and re-extracting.");
+        // extraction, partial files) OR is outdated (version < LATEST),
+        // reset and re-extract. The outdated check ensures existing installs
+        // get the new rootfs content (e.g., unzip + binutils added in v2)
+        // without manually clearing app data.
+        if (stateStore.read() == SetupStateStore.State.READY
+                && (!imageFs.isValid() || !imageFs.isUpToDate())) {
+            if (!imageFs.isValid()) {
+                logToRing("State says READY but ImageFs is invalid — wiping and re-extracting.");
+            } else {
+                logToRing("ImageFs v" + imageFs.getVersion() + " outdated (latest="
+                        + ImageFsManager.LATEST_VERSION + "). Wiping and re-extracting.");
+            }
             deleteRecursive(imageFs.getRootDir());
         }
 
