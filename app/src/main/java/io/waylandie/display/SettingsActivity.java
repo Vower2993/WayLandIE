@@ -59,6 +59,14 @@ public final class SettingsActivity extends Activity {
     private TextView protonStatus;
     private TextView activeProfileText;
 
+    // Track the currently-running install process so we can destroy it
+    // cleanly if the activity is destroyed (user navigates away, system
+    // kills the app, OOM, task-swipe). Without this, proot child processes
+    // are orphaned and bind mounts left stale, which can cause lockfile
+    // conflicts on the next install attempt.
+    private Process runningInstallProcess;
+    private Thread runningInstallThread;
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -282,27 +290,66 @@ public final class SettingsActivity extends Activity {
                 "[Settings] Installing " + kind + " slot '" + slot + "'…");
         try {
             Process p = runner.exec(inner);
+            runningInstallProcess = p;
             // Capture output line-by-line and append to LogRingBuffer so
             // it appears in crash logs + the diagnostic log. Every line
             // is logged — no silent discard. The install can take 10-30s
             // for large Proton packages, so this runs on a background
             // thread and posts the result back to the UI thread.
-            new Thread(() -> {
+            //
+            // OUTPUT CAP: To guard against log overflow on highly verbose
+            // scripts (e.g. tar listing 100k+ files, debug find output),
+            // we cap captured output at 100KB / 10,000 lines. If the cap
+            // is hit, we keep the FIRST 5,000 lines + a marker + the LAST
+            // 5,000 lines so both the start and the failure point are
+            // visible. This prevents OOM in StringBuilder, UI lag from
+            // drawing huge texts in the failure dialog, and Android
+            // transaction buffer overflow.
+            final int MAX_LINES = 10_000;
+            final int MAX_BYTES = 100_000;
+            Thread t = new Thread(() -> {
                 StringBuilder captured = new StringBuilder();
+                java.util.ArrayDeque<String> tail = new java.util.ArrayDeque<>();
+                int lineCount = 0;
+                boolean truncated = false;
                 try (java.io.BufferedReader reader = new java.io.BufferedReader(
                         new java.io.InputStreamReader(p.getInputStream()))) {
                     String line;
                     while ((line = reader.readLine()) != null) {
-                        captured.append(line).append('\n');
                         android.util.Log.i("WayLandIE/Install", line);
                         io.waylandie.display.shared.util.LogRingBuffer.append(
                                 "[install] " + line);
+                        if (lineCount < MAX_LINES / 2) {
+                            captured.append(line).append('\n');
+                        } else {
+                            tail.addLast(line);
+                            if (tail.size() > MAX_LINES / 2) tail.removeFirst();
+                            truncated = true;
+                        }
+                        lineCount++;
+                        if (captured.length() > MAX_BYTES) {
+                            truncated = true;
+                            break;
+                        }
                     }
                 } catch (java.io.IOException e) {
                     String msg = "install output read failed: " + e.getMessage();
                     android.util.Log.w("WayLandIE/Install", msg);
                     io.waylandie.display.shared.util.LogRingBuffer.append(
                             "[install] " + msg);
+                    captured.append(msg).append('\n');
+                }
+                if (truncated) {
+                    captured.append("\n... [output truncated — ")
+                            .append(lineCount)
+                            .append(" lines total, showing first ")
+                            .append(MAX_LINES / 2)
+                            .append(" + last ")
+                            .append(tail.size())
+                            .append("] ...\n\n");
+                    for (String tailLine : tail) {
+                        captured.append(tailLine).append('\n');
+                    }
                 }
                 int exitCode;
                 try {
@@ -320,16 +367,18 @@ public final class SettingsActivity extends Activity {
                         io.waylandie.display.shared.util.LogRingBuffer.append(
                                 "[Settings] Install succeeded: " + kind + " " + slot);
                     } else {
-                        toast(kind + " '" + slot + "' install FAILED (exit " + code + ")");
                         log("Install FAILED (exit " + code + "): " + kind + " " + slot
                                 + "\n" + output);
                         io.waylandie.display.shared.util.LogRingBuffer.append(
                                 "[Settings] Install FAILED (exit " + code + "): "
                                 + kind + " " + slot);
+                        showInstallFailureDialog(kind, slot, code, output);
                     }
                     refreshAllStatuses();
                 });
-            }, "wl-install-" + kind).start();
+            }, "wl-install-" + kind);
+            runningInstallThread = t;
+            t.start();
         } catch (java.io.IOException error) {
             String msg = "Install failed to start: " + error.getMessage();
             toast(msg);
@@ -337,6 +386,67 @@ public final class SettingsActivity extends Activity {
             io.waylandie.display.shared.util.LogRingBuffer.append("[install] " + msg);
             refreshAllStatuses();
         }
+    }
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        // Kill any running install process to prevent orphaned proot children
+        // and stale bind mounts. On hard crashes (OOM, task-swipe), Android
+        // may not call onDestroy(), but for normal navigation (user backs out
+        // of Settings while install is running), this ensures the proot
+        // process and its children are terminated cleanly.
+        if (runningInstallProcess != null && runningInstallProcess.isAlive()) {
+            log("onDestroy: killing running install process");
+            io.waylandie.display.shared.util.LogRingBuffer.append(
+                    "[Settings] onDestroy: killing running install process");
+            runningInstallProcess.destroyForcibly();
+        }
+        runningInstallProcess = null;
+        runningInstallThread = null;
+    }
+
+    /**
+     * Shows a detailed, scrollable alert dialog when an install fails with a
+     * non-zero exit code. Displays the full stdout/stderr output captured from
+     * the install script so the user can see exactly what went wrong — missing
+     * tools, extraction errors, validation failures, etc. — without having to
+     * dig through logcat or diagnostic logs.
+     */
+    private void showInstallFailureDialog(String kind, String slot, int exitCode, String output) {
+        TextView consoleView = new TextView(this);
+        consoleView.setTypeface(android.graphics.Typeface.MONOSPACE);
+        consoleView.setTextSize(10);
+        consoleView.setTextColor(0xFFA0A0B0);
+        consoleView.setText(output.isEmpty()
+                ? "(no output captured — the script may have crashed before printing anything)"
+                : output);
+        int pad = (int) (getResources().getDisplayMetrics().density * 16);
+        consoleView.setPadding(pad, pad, pad, pad);
+
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(consoleView);
+
+        new AlertDialog.Builder(this)
+                .setTitle("Install failed: " + kind + " '" + slot + "' (exit " + exitCode + ")")
+                .setView(scroll)
+                .setPositiveButton("OK", null)
+                .setNegativeButton("Copy log", (d, w) -> {
+                    try {
+                        String fullLog = "WayLandIE install failure\n"
+                                + "Kind: " + kind + "\nSlot: " + slot + "\nExit: " + exitCode + "\n\n"
+                                + output;
+                        android.content.ClipboardManager clip =
+                                (android.content.ClipboardManager)
+                                        getSystemService(android.content.Context.CLIPBOARD_SERVICE);
+                        clip.setPrimaryClip(android.content.ClipData.newPlainText(
+                                "WayLandIE install log", fullLog));
+                        toast("Log copied to clipboard");
+                    } catch (Exception e) {
+                        toast("Copy failed: " + e.getMessage());
+                    }
+                })
+                .show();
     }
 
     private void refreshAllStatuses() {

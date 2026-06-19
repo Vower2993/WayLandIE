@@ -222,6 +222,8 @@ public final class LogCollector {
                     "WayLandIE:V", "WayLandIEDisplay:V", "WayLandIEBridge:V",
                     "WayLandIEHome:V", "WayLandIE/ImageFs:V", "WayLandIE/Proot:V",
                     "WayLandIE/Tar:V", "WayLandIE/Adrenotools:V",
+                    "WayLandIE/Install:V", "WayLandIE/Settings:V",
+                    "WayLandIE/Assets:V", "WayLandIE/App:V",
                     "WayLandIE/LogCollector:V",
                     "AndroidRuntime:E", "System.err:W",
                     "*:S");

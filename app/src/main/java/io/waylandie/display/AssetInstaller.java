@@ -120,14 +120,42 @@ final class AssetInstaller {
                 out.write(buffer, 0, read);
             }
         }
-        // shell scripts in assets/ may have lost their +x bit — restore it
+        // shell scripts in assets/ may have lost their +x bit — restore it.
+        // CRITICAL: without +x, bash's PATH lookup skips the file and
+        // waylandie-install-driver is "command not found". We verify
+        // success and retry once. If it still fails, log to LogRingBuffer
+        // so the error is visible in diagnostic logs.
         if (fileName.endsWith(".sh") || fileName.startsWith("waylandie-")
                 || fileName.equals("install.sh")) {
-            // best-effort; failure is non-fatal
-            try {
-                new ProcessBuilder("chmod", "+x", outFile.getAbsolutePath())
-                        .redirectErrorStream(true).start().waitFor();
-            } catch (Exception ignored) {
+            boolean chmodOk = false;
+            for (int attempt = 0; attempt < 2 && !chmodOk; attempt++) {
+                try {
+                    Process p = new ProcessBuilder("chmod", "+x",
+                            outFile.getAbsolutePath())
+                            .redirectErrorStream(true).start();
+                    int exit = p.waitFor();
+                    chmodOk = (exit == 0);
+                } catch (Exception e) {
+                    Log.w(TAG, "chmod attempt " + (attempt + 1) + " failed for "
+                            + outFile + ": " + e.getMessage());
+                }
+            }
+            if (!chmodOk) {
+                String msg = "chmod +x FAILED for " + outFile.getAbsolutePath()
+                        + " — script will not be executable in proot."
+                        + " Driver installs will fail with 'command not found'.";
+                Log.e(TAG, msg);
+                io.waylandie.display.shared.util.LogRingBuffer.append(
+                        "[Assets] " + msg);
+            }
+            // Final verification — check canExecute()
+            if (!outFile.canExecute()) {
+                String msg = "Script not executable after chmod: "
+                        + outFile.getAbsolutePath()
+                        + " — proot PATH lookup will skip it.";
+                Log.e(TAG, msg);
+                io.waylandie.display.shared.util.LogRingBuffer.append(
+                        "[Assets] " + msg);
             }
         }
     }

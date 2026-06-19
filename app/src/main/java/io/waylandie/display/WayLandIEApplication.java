@@ -51,6 +51,23 @@ public final class WayLandIEApplication extends Application {
                 Thread.getDefaultUncaughtExceptionHandler());
         Thread.setDefaultUncaughtExceptionHandler(handler);
 
+        // Extract the bundled linux-runtime/ shell scripts (waylandie-install-driver,
+        // waylandie-doctor, etc.) from APK assets into getFilesDir()/linux-runtime/.
+        // ProotRunner bind-mounts linux-runtime/bin/ → /waylandie-scripts inside the
+        // rootfs and adds /waylandie-scripts to PATH. Without this, bash inside proot
+        // fails with "waylandie-install-driver: command not found" and ALL driver
+        // installs silently fail. Safe to call on every launch (idempotent).
+        try {
+            AssetInstaller.installAssets(this);
+            Log.i(TAG, "linux-runtime assets extracted to "
+                    + AssetInstaller.getInstallRoot(this));
+        } catch (java.io.IOException e) {
+            Log.e(TAG, "Failed to extract linux-runtime assets", e);
+            LogRingBuffer.append("[App] FAILED to extract linux-runtime assets: "
+                    + e.getMessage()
+                    + " — driver installs will not work until this is fixed.");
+        }
+
         File logsDir = new File(getExternalFilesDir(null), "logs");
         if (!logsDir.exists()) logsDir.mkdirs();
         shipReadme(getExternalFilesDir(null));

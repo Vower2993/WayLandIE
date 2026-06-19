@@ -132,9 +132,43 @@ public final class ProotRunner {
         argv.add("-b");
         argv.add(contentsDir.getAbsolutePath() + ":/waylandie-contents");
 
-        // Bind-mount user-installed Proton into /opt/proton (if installed)
+        // Bind-mount the waylandie-* helper scripts (waylandie-install-driver,
+        // waylandie-doctor, etc.) from app-private storage into /waylandie-scripts
+        // inside the rootfs. AssetInstaller extracts these from APK assets on
+        // every app launch. Without this bind mount, bash inside proot can't
+        // find waylandie-install-driver and ALL driver installs fail with
+        // "command not found".
+        //
+        // CRITICAL: Do NOT bind to /usr/local/bin — the rootfs build script
+        // (build-imagefs.sh step 3) installs box86 + box64 into /usr/local/bin.
+        // Binding over it would make those emulators invisible inside proot,
+        // breaking x86/x64 emulation that Proton depends on. Use a dedicated
+        // /waylandie-scripts path instead, and add it to PATH in exec().
+        //
+        // Android 16 mount-point safety: create the guest directory inside
+        // the rootfs BEFORE proot starts. On some Android 16 devices, proot
+        // cannot dynamically synthesize new mount points inside the guest
+        // unless the directory already exists.
+        File scriptsHostDir = new File(context.getFilesDir(), "linux-runtime/bin");
+        if (scriptsHostDir.isDirectory()) {
+            File guestScriptsDir = new File(imageFs.getRootDir(), "waylandie-scripts");
+            if (!guestScriptsDir.exists()) guestScriptsDir.mkdirs();
+            File guestContentsDir = new File(imageFs.getRootDir(), "waylandie-contents");
+            if (!guestContentsDir.exists()) guestContentsDir.mkdirs();
+            argv.add("-b");
+            argv.add(scriptsHostDir.getAbsolutePath() + ":/waylandie-scripts");
+        } else {
+            Log.w(TAG, "linux-runtime/bin not found at " + scriptsHostDir
+                    + " — driver installs will fail. AssetInstaller may not have run.");
+        }
+
+        // Bind-mount user-installed Proton into /opt/proton (if installed).
+        // Android 16 safety: create the guest mount-point directory in the
+        // rootfs before proot starts.
         File protonDir = new File(context.getFilesDir(), "contents/proton/active");
         if (protonDir.isDirectory()) {
+            File guestProton = new File(imageFs.getRootDir(), "opt/proton");
+            if (!guestProton.exists()) guestProton.mkdirs();
             argv.add("-b");
             argv.add(protonDir.getAbsolutePath() + ":/opt/proton");
         }
@@ -142,6 +176,8 @@ public final class ProotRunner {
         // Bind-mount user-installed DXVK into /opt/dxvk (if installed)
         File dxvkDir = new File(context.getFilesDir(), "contents/dxvk/active");
         if (dxvkDir.isDirectory()) {
+            File guestDxvk = new File(imageFs.getRootDir(), "opt/dxvk");
+            if (!guestDxvk.exists()) guestDxvk.mkdirs();
             argv.add("-b");
             argv.add(dxvkDir.getAbsolutePath() + ":/opt/dxvk");
         }
@@ -149,6 +185,8 @@ public final class ProotRunner {
         // Bind-mount user-installed Turnip into /opt/turnip (if installed)
         File turnipDir = new File(context.getFilesDir(), "contents/turnip/active");
         if (turnipDir.isDirectory()) {
+            File guestTurnip = new File(imageFs.getRootDir(), "opt/turnip");
+            if (!guestTurnip.exists()) guestTurnip.mkdirs();
             argv.add("-b");
             argv.add(turnipDir.getAbsolutePath() + ":/opt/turnip");
         }
@@ -156,6 +194,8 @@ public final class ProotRunner {
         // Bind-mount user-installed FEX into /opt/fex (if installed)
         File fexDir = new File(context.getFilesDir(), "contents/fex/active");
         if (fexDir.isDirectory()) {
+            File guestFex = new File(imageFs.getRootDir(), "opt/fex");
+            if (!guestFex.exists()) guestFex.mkdirs();
             argv.add("-b");
             argv.add(fexDir.getAbsolutePath() + ":/opt/fex");
         }
@@ -211,7 +251,7 @@ public final class ProotRunner {
         // Always set these
         pb.environment().put("HOME", "/home/xuser");
         pb.environment().put("USER", "xuser");
-        pb.environment().put("PATH", "/usr/bin:/bin:/usr/local/bin:"
+        pb.environment().put("PATH", "/waylandie-scripts:/usr/local/bin:/usr/bin:/bin:"
                 + imageFs.getWineDir().getAbsolutePath() + "/bin");
         pb.environment().put("LD_LIBRARY_PATH", "/usr/lib:/usr/local/lib:"
                 + imageFs.getWineDir().getAbsolutePath() + "/lib");

@@ -51,10 +51,18 @@ public final class ImageFsManager {
 
     public ImageFsManager(Context context) {
         this.context = context;
+        // CRITICAL: rootfs MUST live in app-private internal storage
+        // (getFilesDir() → /data/data/io.waylandie.display/files/imagefs).
+        // Internal storage supports chmod +x and file execution. External
+        // storage (SD card, /sdcard) is mounted noexec on Android 11+,
+        // which would break proot, bash, and all rootfs binaries. Never
+        // change this to getExternalFilesDir() or Environment.getExternalStorage*().
         this.rootDir = new File(context.getFilesDir(), "imagefs");
     }
 
-    public File getRootDir() { return rootDir; }
+    public File getRootDir() {
+        return rootDir;
+    }
     public File getBinDir() { return new File(rootDir, "usr/bin"); }
     public File getLibDir() { return new File(rootDir, "usr/lib"); }
 
