@@ -256,22 +256,33 @@ public final class ProotRunner {
         // Proton is installed via Settings tab → extracted to app-private storage.
         // Wine is NOT in the rootfs — if no Proton, we can't run.
         File protonDir = new File(context.getFilesDir(), "contents/proton/active");
+        if (!protonDir.exists()) {
+            throw new IOException("Proton is not installed. Please go to the Settings tab and install Proton first. "
+                    + "(Wine is not bundled in the rootfs — Proton provides the Wine environment.)");
+        }
+
         File wineFromProton = new File(protonDir, "files/bin/wine");
         File wineFromProtonAlt = new File(protonDir, "dist/bin/wine");
+        File wineFromProtonBin = new File(protonDir, "bin/wine");
 
-        if (useProton || (protonDir.exists() && (wineFromProton.exists() || wineFromProtonAlt.exists()))) {
-            // Use Proton's bundled wine
-            File wineBin = wineFromProton.exists() ? wineFromProton : wineFromProtonAlt;
-            if (!wineBin.exists()) {
-                throw new IOException("Proton installed but wine binary not found at "
-                        + wineFromProton + " or " + wineFromProtonAlt);
-            }
-            cmd.add(wineBin.getAbsolutePath());
-            Log.i(TAG, "Using Proton wine: " + wineBin);
-        } else {
-            throw new IOException("No Proton installed. Install Proton via Settings tab first. "
-                    + "(Wine is not bundled in the rootfs — Proton provides Wine.)");
+        File wineBin = null;
+        if (wineFromProton.exists()) {
+            wineBin = wineFromProton;
+        } else if (wineFromProtonAlt.exists()) {
+            wineBin = wineFromProtonAlt;
+        } else if (wineFromProtonBin.exists()) {
+            wineBin = wineFromProtonBin;
         }
+
+        if (wineBin == null) {
+            throw new IOException("Proton installation found at '" + protonDir.getAbsolutePath()
+                    + "' but no wine binary was found inside it. Checked: "
+                    + "files/bin/wine, dist/bin/wine, and bin/wine. "
+                    + "Please try reinstalling Proton or choose a different Proton build.");
+        }
+
+        cmd.add(wineBin.getAbsolutePath());
+        Log.i(TAG, "Using Proton wine: " + wineBin);
 
         cmd.add(exePath);
         if (extraArgs != null) {
