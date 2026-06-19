@@ -204,8 +204,10 @@ public final class ProotRunner {
         // connect to the abstract socket waylandie.display.bridge.v1
         // (proot allows abstract socket access by default — no bind needed).
 
-        // Pass through the command
-        argv.add("--");
+        // Pass through the command. NOTE: do NOT add "--" before the command —
+        // the bundled proot binary (libproot.so, a static proot build) does NOT
+        // support the "--" option terminator and exits with
+        // "proot error: unknown option '--'". Just append the command directly.
         argv.addAll(Arrays.asList(cmd));
 
         return argv.toArray(new String[0]);
@@ -292,7 +294,6 @@ public final class ProotRunner {
     public Process execWine(String exePath, String[] extraArgs, boolean useProton) throws IOException {
         java.util.List<String> cmd = new java.util.ArrayList<>();
 
-        // Determine whether to use Proton or bare Wine.
         // Proton is installed via Settings tab → extracted to app-private storage.
         // Wine is NOT in the rootfs — if no Proton, we can't run.
         File protonDir = new File(context.getFilesDir(), "contents/proton/active");
@@ -301,28 +302,40 @@ public final class ProotRunner {
                     + "(Wine is not bundled in the rootfs — Proton provides the Wine environment.)");
         }
 
+        // Check for wine binary at known paths (HOST paths for validation)
         File wineFromProton = new File(protonDir, "files/bin/wine");
         File wineFromProtonAlt = new File(protonDir, "dist/bin/wine");
         File wineFromProtonBin = new File(protonDir, "bin/wine");
 
-        File wineBin = null;
+        File wineBinHost = null;
+        String wineGuestPath = null;
         if (wineFromProton.exists()) {
-            wineBin = wineFromProton;
+            wineBinHost = wineFromProton;
+            wineGuestPath = "/opt/proton/files/bin/wine";
         } else if (wineFromProtonAlt.exists()) {
-            wineBin = wineFromProtonAlt;
+            wineBinHost = wineFromProtonAlt;
+            wineGuestPath = "/opt/proton/dist/bin/wine";
         } else if (wineFromProtonBin.exists()) {
-            wineBin = wineFromProtonBin;
+            wineBinHost = wineFromProtonBin;
+            wineGuestPath = "/opt/proton/bin/wine";
         }
 
-        if (wineBin == null) {
+        if (wineBinHost == null) {
             throw new IOException("Proton installation found at '" + protonDir.getAbsolutePath()
                     + "' but no wine binary was found inside it. Checked: "
                     + "files/bin/wine, dist/bin/wine, and bin/wine. "
                     + "Please try reinstalling Proton or choose a different Proton build.");
         }
 
-        cmd.add(wineBin.getAbsolutePath());
-        Log.i(TAG, "Using Proton wine: " + wineBin);
+        // CRITICAL: Use GUEST path (not HOST path) for the command.
+        // The command runs inside proot where the root is imagefs.
+        // The HOST path (/data/user/0/.../contents/proton/active/files/bin/wine)
+        // doesn't exist inside proot — it resolves to rootfs/data/user/0/...
+        // which doesn't exist. The GUEST path /opt/proton/files/bin/wine is
+        // accessible via the bind mount in buildProotCommand().
+        cmd.add(wineGuestPath);
+        Log.i(TAG, "Using Proton wine (guest path): " + wineGuestPath
+                + " (host: " + wineBinHost + ")");
 
         cmd.add(exePath);
         if (extraArgs != null) {
@@ -330,32 +343,40 @@ public final class ProotRunner {
         }
 
         java.util.List<String> env = new java.util.ArrayList<>();
-        env.add("WINEPREFIX"); env.add(imageFs.getWinePrefix().getAbsolutePath());
+        // CRITICAL: WINEPREFIX must be the GUEST path, not the host path.
+        // Inside proot, /home/xuser is bind-mounted from imagefs/home/xuser.
+        env.add("WINEPREFIX"); env.add("/home/xuser/.wine");
         env.add("WINEDLLOVERRIDES"); env.add("d3d9,d3d10core,d3d11,dxgi=native");
         env.add("DXVK_STATE_CACHE_PATH"); env.add("/home/xuser/.dxvk-cache");
         env.add("MESA_VK_WSI_PRESENT_MODE"); env.add("immediate");
 
-        // Proton env vars
-        if (protonDir.exists()) {
-            env.add("PROTONPATH"); env.add(protonDir.getAbsolutePath());
-            env.add("STEAM_COMPAT_CLIENT_INSTALL_PATH");
-            env.add(new File(context.getFilesDir(), "contents/steam").getAbsolutePath());
-            env.add("STEAM_COMPAT_DATA_PATH");
-            env.add(new File(context.getFilesDir(), "contents/steam/compatdata").getAbsolutePath());
-            env.add("STEAM_RUNTIME"); env.add("0");  // no pressure-vessel in proot
+        // Proton env vars — all GUEST paths
+        env.add("PROTONPATH"); env.add("/opt/proton");
+        env.add("STEAM_COMPAT_CLIENT_INSTALL_PATH"); env.add("/home/xuser/.local/share/Steam");
+        env.add("STEAM_COMPAT_DATA_PATH"); env.add("/home/xuser/.proton-prefix");
+        env.add("STEAM_RUNTIME"); env.add("0");  // no pressure-vessel in proot
+
+        // FEX env vars (if installed)
+        File fexDir = new File(context.getFilesDir(), "contents/fex/active");
+        if (fexDir.isDirectory()) {
+            env.add("FEX_ROOT"); env.add("/opt/fex");
+            Log.i(TAG, "FEX enabled: /opt/fex");
         }
 
-        // Use active Adrenotools driver if one is set, otherwise rootfs Turnip
+        // Vulkan driver — Turnip ICD JSON (created by SettingsActivity
+        // during Turnip install, pointing to /opt/turnip/libvulkan_freedreno.so)
+        env.add("VK_ICD_FILENAMES"); env.add("/usr/local/etc/vulkan/icd.d/freedreno_icd.json");
+        env.add("VK_DRIVER_FILES"); env.add("/usr/local/etc/vulkan/icd.d/freedreno_icd.json");
+
+        // Use active Adrenotools driver if one is set (overrides Turnip)
         io.waylandie.display.runtime.content.AdrenotoolsManager atm =
                 new io.waylandie.display.runtime.content.AdrenotoolsManager(context);
         String activeDriverSo = atm.getActiveDriverSoPath();
         if (activeDriverSo != null) {
             env.add("VULKAN_ADRENOTOOLS_DRIVER_SO"); env.add(activeDriverSo);
-            env.add("VK_ICD_FILENAMES"); env.add("/usr/local/etc/vulkan/icd.d/freedreno_icd.json");
             Log.i(TAG, "Using Adrenotools driver: " + activeDriverSo);
         } else {
-            env.add("VK_ICD_FILENAMES"); env.add("/usr/local/etc/vulkan/icd.d/freedreno_icd.json");
-            Log.i(TAG, "Using rootfs default Vulkan driver");
+            Log.i(TAG, "Using rootfs Turnip driver (VK_ICD_FILENAMES=/usr/local/etc/vulkan/icd.d/freedreno_icd.json)");
         }
 
         return exec(cmd.toArray(new String[0]), env.toArray(new String[0]));

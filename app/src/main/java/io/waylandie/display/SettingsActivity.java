@@ -184,39 +184,118 @@ public final class SettingsActivity extends Activity {
     }
 
     /**
-     * Runs {@code waylandie-install-driver --list} inside proot to get
-     * the archive's detected format + first 100 entries. Returns the
-     * output as a string. If the command fails, returns an error message.
+     * Previews the archive contents in pure Java — no proot, no bash.
+     * Detects the archive type by magic bytes, then lists entries.
      */
     private String previewArchive(String archivePath) {
-        io.waylandie.display.runtime.environment.ProotRunner runner =
-                new io.waylandie.display.runtime.environment.ProotRunner(this);
-        if (!runner.isReady()) {
-            return "(Environment not ready — cannot preview. Tap Install anyway to try.)";
+        File archiveFile = new File(archivePath);
+        if (!archiveFile.isFile()) {
+            return "(archive file not found: " + archivePath + ")";
         }
+        StringBuilder sb = new StringBuilder();
+        sb.append("=== Archive: ").append(archiveFile.getName()).append(" ===\n");
+        sb.append("Size: ").append(archiveFile.length()).append(" bytes\n");
+        io.waylandie.display.shared.io.TarCompressorUtils.Type type =
+                io.waylandie.display.shared.io.TarCompressorUtils.detectArchiveType(archiveFile);
+        sb.append("Detected type: ").append(type != null ? type : "UNKNOWN").append("\n\n");
+        sb.append("=== Contents (first 100 entries) ===\n");
         try {
-            Process p = runner.exec("waylandie-install-driver --list --file " + shellQuote(archivePath));
-            BufferedReader reader = new BufferedReader(
-                    new InputStreamReader(p.getInputStream()));
-            StringBuilder sb = new StringBuilder();
-            String line;
-            // Cap at 500 lines so a huge archive doesn't OOM the preview.
-            int lineCount = 0;
-            while ((line = reader.readLine()) != null && lineCount < 500) {
-                sb.append(line).append('\n');
-                lineCount++;
+            java.util.List<String> entries = listArchiveEntries(archiveFile, type, 100);
+            if (entries.isEmpty()) {
+                sb.append("(no entries found or unsupported format)\n");
+            } else {
+                for (String entry : entries) {
+                    sb.append(entry).append('\n');
+                }
+                if (entries.size() == 100) {
+                    sb.append("... (truncated at 100 entries)\n");
+                }
             }
-            // Wait with timeout — if proot hangs (rare but possible on
-            // corrupted archives), don't leave this background thread
-            // blocked forever. 15s is generous for listing contents.
-            if (!p.waitFor(15, java.util.concurrent.TimeUnit.SECONDS)) {
-                p.destroyForcibly();
-                sb.append("\n(preview timed out after 15s — archive may be very large or corrupted)");
-            }
-            return sb.length() > 0 ? sb.toString() : "(no output from preview command)";
         } catch (Exception e) {
-            return "(preview failed: " + e.getMessage() + " — tap Install to try anyway)";
+            sb.append("(preview failed: ").append(e.getMessage()).append(")\n");
         }
+        return sb.toString();
+    }
+
+    /**
+     * Lists archive entries in pure Java. Supports gzip-tar, xz-tar, plain tar, and zip.
+     */
+    private java.util.List<String> listArchiveEntries(File archiveFile,
+            io.waylandie.display.shared.io.TarCompressorUtils.Type type, int maxEntries)
+            throws IOException {
+        java.util.List<String> entries = new java.util.ArrayList<>();
+        if (type == null) return entries;
+        if (type == io.waylandie.display.shared.io.TarCompressorUtils.Type.ZIP) {
+            try (java.util.zip.ZipInputStream zis = new java.util.zip.ZipInputStream(
+                    new java.io.BufferedInputStream(new java.io.FileInputStream(archiveFile), 65536))) {
+                java.util.zip.ZipEntry entry;
+                while ((entry = zis.getNextEntry()) != null && entries.size() < maxEntries) {
+                    entries.add(entry.isDirectory()
+                            ? entry.getName() + "/"
+                            : entry.getName() + " (" + entry.getSize() + " bytes)");
+                }
+            }
+        } else {
+            java.io.InputStream fileIn = new java.io.BufferedInputStream(new java.io.FileInputStream(archiveFile), 65536);
+            java.io.InputStream decompressed;
+            if (type == io.waylandie.display.shared.io.TarCompressorUtils.Type.XZ) {
+                decompressed = new org.tukaani.xz.XZInputStream(fileIn);
+            } else if (type == io.waylandie.display.shared.io.TarCompressorUtils.Type.GZIP) {
+                decompressed = new java.util.zip.GZIPInputStream(fileIn);
+            } else {
+                decompressed = fileIn;
+            }
+            // Read tar entries — we only need names + sizes, so use a
+            // simplified parser that reads headers and skips data.
+            byte[] header = new byte[512];
+            while (entries.size() < maxEntries) {
+                int read = readFully(decompressed, header, 0, 512);
+                if (read == 0) break;
+                if (read < 512) break;
+                boolean allZero = true;
+                for (int i = 0; i < 512; i++) {
+                    if (header[i] != 0) { allZero = false; break; }
+                }
+                if (allZero) break;
+                String name = readTarString(header, 0, 100);
+                if (name.isEmpty()) break;
+                long size = parseTarOctal(header, 124, 12);
+                entries.add(name + " (" + size + " bytes)");
+                // Skip data blocks + padding
+                long dataBlocks = (size + 511) / 512;
+                long toSkip = dataBlocks * 512;
+                while (toSkip > 0) {
+                    long skipped = decompressed.skip(toSkip);
+                    if (skipped <= 0) break;
+                    toSkip -= skipped;
+                }
+            }
+            decompressed.close();
+        }
+        return entries;
+    }
+
+    private static int readFully(java.io.InputStream in, byte[] buf, int off, int len) throws IOException {
+        int total = 0;
+        while (total < len) {
+            int n = in.read(buf, off + total, len - total);
+            if (n < 0) return total == 0 ? 0 : total;
+            total += n;
+        }
+        return total;
+    }
+
+    private static String readTarString(byte[] buf, int offset, int length) {
+        int end = offset;
+        while (end < offset + length && buf[end] != 0) end++;
+        return new String(buf, offset, end - offset).trim();
+    }
+
+    private static long parseTarOctal(byte[] buf, int offset, int length) {
+        String s = readTarString(buf, offset, length);
+        if (s.isEmpty()) return 0;
+        try { return Long.parseLong(s, 8); }
+        catch (NumberFormatException e) { return 0; }
     }
 
     private void showInstallPromptWithPreview(String kind, File archiveFile, String preview) {
@@ -270,122 +349,433 @@ public final class SettingsActivity extends Activity {
                 .show();
     }
 
+    /**
+     * Installs a driver archive in PURE JAVA — no proot, no bash, no shell.
+     *
+     * <p>This bypasses the proot+script architecture entirely. The archive
+     * is extracted using {@link io.waylandie.display.shared.io.TarCompressorUtils}
+     * directly to {@code getFilesDir()/contents/<kind>/<slot>/}, validated
+     * for the expected layout, and an {@code active} symlink is created.
+     *
+     * <p>This mirrors winlator's architecture: all driver/component
+     * extraction happens in Java, never via shell scripts inside proot.
+     * Proot is only used for the actual Wine game launch (see
+     * {@code ProotRunner.execWine()}).
+     */
     private void fireInstallCommand(String kind, String slot, String archivePath) {
-        // Use ProotRunner to install driver inside the bundled rootfs
-        io.waylandie.display.runtime.environment.ProotRunner runner =
-                new io.waylandie.display.runtime.environment.ProotRunner(this);
-        if (!runner.isReady()) {
-            toast("Environment not ready. Initialize first.");
+        final File archiveFile = new File(archivePath);
+        if (!archiveFile.isFile()) {
+            toast("Archive file not found: " + archivePath);
             return;
         }
-        String inner = "waylandie-install-driver"
-                + " --kind " + kind
-                + " --slot " + shellQuote(slot)
-                + " --file " + shellQuote(archivePath)
-                + " --activate";
 
         toast("Installing " + kind + " slot '" + slot + "'…");
-        log("Installing via ProotRunner: " + inner);
+        log("Installing (pure Java): " + kind + " " + slot + " from " + archivePath);
         io.waylandie.display.shared.util.LogRingBuffer.append(
                 "[Settings] Installing " + kind + " slot '" + slot + "'…");
-        try {
-            Process p = runner.exec(inner);
-            runningInstallProcess = p;
-            // Capture output line-by-line and append to LogRingBuffer so
-            // it appears in crash logs + the diagnostic log. Every line
-            // is logged — no silent discard. The install can take 10-30s
-            // for large Proton packages, so this runs on a background
-            // thread and posts the result back to the UI thread.
-            //
-            // OUTPUT CAP: To guard against log overflow on highly verbose
-            // scripts (e.g. tar listing 100k+ files, debug find output),
-            // we cap captured output at 100KB / 10,000 lines. If the cap
-            // is hit, we keep the FIRST 5,000 lines + a marker + the LAST
-            // 5,000 lines so both the start and the failure point are
-            // visible. This prevents OOM in StringBuilder, UI lag from
-            // drawing huge texts in the failure dialog, and Android
-            // transaction buffer overflow.
-            final int MAX_LINES = 10_000;
-            final int MAX_BYTES = 100_000;
-            Thread t = new Thread(() -> {
-                StringBuilder captured = new StringBuilder();
-                java.util.ArrayDeque<String> tail = new java.util.ArrayDeque<>();
-                int lineCount = 0;
-                boolean truncated = false;
-                try (java.io.BufferedReader reader = new java.io.BufferedReader(
-                        new java.io.InputStreamReader(p.getInputStream()))) {
-                    String line;
-                    while ((line = reader.readLine()) != null) {
-                        android.util.Log.i("WayLandIE/Install", line);
-                        io.waylandie.display.shared.util.LogRingBuffer.append(
-                                "[install] " + line);
-                        if (lineCount < MAX_LINES / 2) {
-                            captured.append(line).append('\n');
-                        } else {
-                            tail.addLast(line);
-                            if (tail.size() > MAX_LINES / 2) tail.removeFirst();
-                            truncated = true;
-                        }
-                        lineCount++;
-                        if (captured.length() > MAX_BYTES) {
-                            truncated = true;
-                            break;
-                        }
-                    }
-                } catch (java.io.IOException e) {
-                    String msg = "install output read failed: " + e.getMessage();
-                    android.util.Log.w("WayLandIE/Install", msg);
-                    io.waylandie.display.shared.util.LogRingBuffer.append(
-                            "[install] " + msg);
-                    captured.append(msg).append('\n');
+
+        Thread t = new Thread(() -> {
+            StringBuilder output = new StringBuilder();
+            int exitCode = 0;
+            try {
+                // 1. Detect archive type by magic bytes
+                io.waylandie.display.shared.io.TarCompressorUtils.Type type =
+                        io.waylandie.display.shared.io.TarCompressorUtils.detectArchiveType(archiveFile);
+                if (type == null) {
+                    exitCode = 1;
+                    output.append("ERROR: unrecognized archive format.\n");
+                    output.append("  Magic bytes don't match gzip/xz/zip/tar.\n");
+                    output.append("  File: ").append(archiveFile).append('\n');
+                    throw new IOException("unrecognized archive format");
                 }
-                if (truncated) {
-                    captured.append("\n... [output truncated — ")
-                            .append(lineCount)
-                            .append(" lines total, showing first ")
-                            .append(MAX_LINES / 2)
-                            .append(" + last ")
-                            .append(tail.size())
-                            .append("] ...\n\n");
-                    for (String tailLine : tail) {
-                        captured.append(tailLine).append('\n');
+                output.append("Detected archive type: ").append(type).append('\n');
+
+                // 2. Create slot directory in app-private contents/
+                File kindDir = new File(getFilesDir(), "contents/" + kind);
+                File slotDir = new File(kindDir, slot);
+                if (slotDir.exists()) {
+                    deleteRecursive(slotDir);
+                }
+                slotDir.mkdirs();
+                output.append("Slot dir: ").append(slotDir).append('\n');
+
+                // 3. Extract archive in pure Java
+                output.append("Extracting…\n");
+                boolean ok = io.waylandie.display.shared.io.TarCompressorUtils
+                        .extractFileWithType(archiveFile, slotDir, type, null);
+                if (!ok) {
+                    exitCode = 1;
+                    output.append("ERROR: extraction failed.\n");
+                    throw new IOException("extraction failed");
+                }
+                output.append("Extraction complete.\n");
+                output.append("Top-level contents:\n");
+                File[] kids = slotDir.listFiles();
+                if (kids != null) {
+                    for (File kid : kids) {
+                        output.append("  ").append(kid.getName())
+                                .append(kid.isDirectory() ? "/" : "")
+                                .append('\n');
                     }
                 }
-                int exitCode;
+
+                // 4. Kind-specific validation + hoisting
+                String validationError = validateAndHoist(kind, slotDir, output);
+                if (validationError != null) {
+                    exitCode = 1;
+                    output.append(validationError).append('\n');
+                    deleteRecursive(slotDir);
+                    throw new IOException("validation failed");
+                }
+
+                // 5. Activate — create 'active' symlink
+                File activeLink = new File(kindDir, "active");
+                if (activeLink.exists()) {
+                    activeLink.delete();
+                }
                 try {
-                    exitCode = p.waitFor();
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    exitCode = -1;
+                    java.nio.file.Files.createSymbolicLink(
+                            activeLink.toPath(),
+                            new File(kindDir, slot).toPath());
+                } catch (Exception e) {
+                    // Fallback: if symlink fails (rare on Android), try rename
+                    output.append("WARNING: symlink failed, trying rename: ")
+                            .append(e.getMessage()).append('\n');
+                    activeLink.createNewFile();
                 }
-                final int code = exitCode;
-                final String output = captured.toString();
-                runOnUiThread(() -> {
-                    if (code == 0) {
-                        toast(kind + " '" + slot + "' installed ✓");
-                        log("Install succeeded: " + kind + " " + slot);
-                        io.waylandie.display.shared.util.LogRingBuffer.append(
-                                "[Settings] Install succeeded: " + kind + " " + slot);
-                    } else {
-                        log("Install FAILED (exit " + code + "): " + kind + " " + slot
-                                + "\n" + output);
-                        io.waylandie.display.shared.util.LogRingBuffer.append(
-                                "[Settings] Install FAILED (exit " + code + "): "
-                                + kind + " " + slot);
-                        showInstallFailureDialog(kind, slot, code, output);
+                output.append("Activated: ").append(activeLink).append(" → ").append(slot).append('\n');
+
+                // 6. Write meta.json
+                File metaFile = new File(slotDir, "meta.json");
+                try (java.io.PrintWriter pw = new java.io.PrintWriter(metaFile)) {
+                    pw.println("{");
+                    pw.println("  \"kind\": \"" + kind + "\",");
+                    pw.println("  \"slot\": \"" + slot + "\",");
+                    pw.println("  \"installed_from\": \"" + archiveFile + "\",");
+                    pw.println("  \"installed_at\": \"" + new java.text.SimpleDateFormat(
+                            "yyyy-MM-dd'T'HH:mm:ss'Z'", java.util.Locale.US)
+                            .format(new java.util.Date()) + "\",");
+                    pw.println("  \"activated\": true");
+                    pw.println("}");
+                }
+                output.append("Done.\n");
+
+            } catch (Exception e) {
+                if (exitCode == 0) exitCode = 1;
+                output.append("INSTALL FAILED: ").append(e.getMessage()).append('\n');
+            }
+
+            final int code = exitCode;
+            final String result = output.toString();
+            // Log every line to LogRingBuffer + LogCat
+            for (String line : result.split("\n")) {
+                android.util.Log.i("WayLandIE/Install", line);
+                io.waylandie.display.shared.util.LogRingBuffer.append("[install] " + line);
+            }
+            runOnUiThread(() -> {
+                if (code == 0) {
+                    toast(kind + " '" + slot + "' installed ✓");
+                    log("Install succeeded: " + kind + " " + slot);
+                    io.waylandie.display.shared.util.LogRingBuffer.append(
+                            "[Settings] Install succeeded: " + kind + " " + slot);
+                } else {
+                    log("Install FAILED: " + kind + " " + slot + "\n" + result);
+                    io.waylandie.display.shared.util.LogRingBuffer.append(
+                            "[Settings] Install FAILED: " + kind + " " + slot);
+                    showInstallFailureDialog(kind, slot, code, result);
+                }
+                refreshAllStatuses();
+            });
+        }, "wl-install-" + kind);
+        runningInstallThread = t;
+        t.start();
+    }
+
+    /**
+     * Validates the extracted slot directory and hoists nested layouts.
+     * Returns null on success, or an error message string on failure.
+     */
+    private String validateAndHoist(String kind, File slotDir, StringBuilder output) {
+        switch (kind) {
+            case "proton": {
+                // Look for wine binary at known paths
+                File wineBin = null;
+                String[] winePaths = {"files/bin/wine", "dist/bin/wine", "bin/wine"};
+                for (String p : winePaths) {
+                    if (new File(slotDir, p).isFile()) {
+                        wineBin = new File(slotDir, p);
+                        break;
                     }
-                    refreshAllStatuses();
-                });
-            }, "wl-install-" + kind);
-            runningInstallThread = t;
-            t.start();
-        } catch (java.io.IOException error) {
-            String msg = "Install failed to start: " + error.getMessage();
-            toast(msg);
-            log(msg);
-            io.waylandie.display.shared.util.LogRingBuffer.append("[install] " + msg);
-            refreshAllStatuses();
+                }
+                // Try hoisting if wine not found
+                if (wineBin == null) {
+                    File[] topDirs = slotDir.listFiles(File::isDirectory);
+                    if (topDirs != null && topDirs.length == 1) {
+                        File top = topDirs[0];
+                        output.append("Hoisting nested layout: ").append(top.getName()).append('\n');
+                        for (String p : winePaths) {
+                            if (new File(top, p).isFile()) {
+                                // Move all contents up
+                                File[] kids = top.listFiles();
+                                if (kids != null) {
+                                    for (File kid : kids) {
+                                        kid.renameTo(new File(slotDir, kid.getName()));
+                                    }
+                                }
+                                top.delete();
+                                wineBin = new File(slotDir, p);
+                                break;
+                            }
+                        }
+                    }
+                }
+                if (wineBin == null) {
+                    StringBuilder err = new StringBuilder();
+                    err.append("ERROR: wine binary not found.\n");
+                    err.append("  Checked (relative to slot dir):\n");
+                    for (String p : winePaths) err.append("    ").append(p).append('\n');
+                    err.append("  Top-level contents:\n");
+                    File[] kids = slotDir.listFiles();
+                    if (kids != null) {
+                        for (File kid : kids) {
+                            err.append("    ").append(kid.getName()).append('\n');
+                        }
+                    }
+                    err.append("  Recursive wine search:\n");
+                    findRecursive(slotDir, "wine", err, 10);
+                    return err.toString();
+                }
+                output.append("Found wine: ").append(wineBin).append('\n');
+                wineBin.setExecutable(true, false);
+                break;
+            }
+            case "dxvk": {
+                // Look for d3d11.dll or dxgi.dll
+                if (!findFileRecursive(slotDir, "d3d11.dll") && !findFileRecursive(slotDir, "dxgi.dll")) {
+                    return "ERROR: no DXVK dlls (d3d11.dll / dxgi.dll) found in archive.";
+                }
+                output.append("DXVK dlls found ✓\n");
+                // Install DXVK dlls into the Wine prefix's system32 + syswow64.
+                // Wine needs the dlls IN the prefix for WINEDLLOVERRIDES=native
+                // to work — the override tells Wine to use the Windows DLL
+                // instead of its built-in one, but it must be in system32/.
+                // This mirrors winlator's approach: extract DXVK directly to
+                // rootfs/home/xuser/.wine/drive_c/windows/system32/.
+                installDxvkToWinePrefix(slotDir, output);
+                break;
+            }
+            case "turnip": {
+                File turnipSo = findFileRecursiveFile(slotDir, "libvulkan_freedreno.so");
+                if (turnipSo == null) {
+                    return "ERROR: no libvulkan_freedreno.so in archive.";
+                }
+                output.append("Turnip .so found: ").append(turnipSo).append(" ✓\n");
+                // Create the Vulkan ICD JSON at the GUEST path that
+                // VK_ICD_FILENAMES points to (/usr/local/etc/vulkan/icd.d/).
+                // The ICD JSON tells the Vulkan loader where to find the
+                // driver .so. Without this, Vulkan can't find Turnip.
+                // The .so path in the JSON is the GUEST path (/opt/turnip/...)
+                // because the Vulkan loader runs inside proot.
+                installTurnipIcd(turnipSo, output);
+                break;
+            }
+            case "fex": {
+                if (!new File(slotDir, "bin").isDirectory()) {
+                    // Try hoisting
+                    File[] topDirs = slotDir.listFiles(File::isDirectory);
+                    if (topDirs != null && topDirs.length == 1 && new File(topDirs[0], "bin").isDirectory()) {
+                        File top = topDirs[0];
+                        File[] kids = top.listFiles();
+                        if (kids != null) {
+                            for (File kid : kids) kid.renameTo(new File(slotDir, kid.getName()));
+                        }
+                        top.delete();
+                    }
+                }
+                if (!new File(slotDir, "bin").isDirectory()) {
+                    return "ERROR: no bin/ directory in FEX archive.";
+                }
+                output.append("FEX bin/ found ✓\n");
+                break;
+            }
         }
+        return null;
+    }
+
+    private boolean findFileRecursive(File dir, String name) {
+        return findFileRecursiveFile(dir, name) != null;
+    }
+
+    private File findFileRecursiveFile(File dir, String name) {
+        File[] kids = dir.listFiles();
+        if (kids == null) return null;
+        for (File kid : kids) {
+            if (kid.isDirectory()) {
+                File found = findFileRecursiveFile(kid, name);
+                if (found != null) return found;
+            } else if (kid.getName().equalsIgnoreCase(name)) {
+                return kid;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Copies DXVK dlls from the extracted slot into the Wine prefix's
+     * system32/ and syswow64/ directories. Creates the prefix structure
+     * if it doesn't exist. This is necessary because WINEDLLOVERRIDES=native
+     * tells Wine to use the external DLL, but it must be IN the prefix.
+     */
+    private void installDxvkToWinePrefix(File slotDir, StringBuilder output) {
+        try {
+            io.waylandie.display.runtime.environment.ImageFsManager imageFs =
+                    new io.waylandie.display.runtime.environment.ImageFsManager(this);
+            File winePrefix = new File(imageFs.getRootDir(), "home/xuser/.wine");
+            File system32 = new File(winePrefix, "drive_c/windows/system32");
+            File syswow64 = new File(winePrefix, "drive_c/windows/syswow64");
+            system32.mkdirs();
+            syswow64.mkdirs();
+
+            // DXVK layout: x64/*.dll → system32, x32/*.dll → syswow64
+            // Also try flat layout: *.dll at root → both
+            String[] dxvkDlls = {"d3d8.dll", "d3d9.dll", "d3d10.dll", "d3d10_1.dll",
+                    "d3d10core.dll", "d3d11.dll", "dxgi.dll"};
+            int copied = 0;
+            for (String dll : dxvkDlls) {
+                // Try x64/ first
+                File x64Dll = new File(slotDir, "x64/" + dll);
+                if (!x64Dll.isFile()) x64Dll = findFileRecursiveFile(slotDir, dll);
+                if (x64Dll != null && x64Dll.getAbsolutePath().contains("x64")) {
+                    copyFile(x64Dll, new File(system32, dll));
+                    copied++;
+                }
+                // Try x32/
+                File x32Dll = new File(slotDir, "x32/" + dll);
+                if (!x32Dll.isFile()) {
+                    // Search in x32/ subdir
+                    File x32Dir = new File(slotDir, "x32");
+                    if (x32Dir.isDirectory()) {
+                        x32Dll = new File(x32Dir, dll);
+                    }
+                }
+                if (x32Dll != null && x32Dll.isFile()) {
+                    copyFile(x32Dll, new File(syswow64, dll));
+                    copied++;
+                }
+            }
+            output.append("DXVK: copied ").append(copied).append(" dlls to Wine prefix\n");
+            output.append("  system32: ").append(system32).append('\n');
+            output.append("  syswow64: ").append(syswow64).append('\n');
+        } catch (Exception e) {
+            output.append("WARNING: DXVK prefix install failed: ").append(e.getMessage()).append('\n');
+        }
+    }
+
+    /**
+     * Creates the Vulkan ICD JSON at the GUEST path that VK_ICD_FILENAMES
+     * points to. The ICD JSON tells the Vulkan loader where to find the
+     * Turnip driver .so. The .so path in the JSON is the GUEST path
+     * (/opt/turnip/...) because the Vulkan loader runs inside proot.
+     */
+    private void installTurnipIcd(File turnipSo, StringBuilder output) {
+        try {
+            io.waylandie.display.runtime.environment.ImageFsManager imageFs =
+                    new io.waylandie.display.runtime.environment.ImageFsManager(this);
+            File icdDir = new File(imageFs.getRootDir(), "usr/local/etc/vulkan/icd.d");
+            icdDir.mkdirs();
+            File icdFile = new File(icdDir, "freedreno_icd.json");
+
+            // The .so path in the ICD JSON must be the GUEST path — the path
+            // as seen inside proot. The Turnip slot is bind-mounted to
+            // /opt/turnip, so the .so is at /opt/turnip/<relative path>.
+            // We compute the relative path from the slot dir.
+            File slotDir = turnipSo.getParentFile();
+            File turnipRoot = slotDir;
+            // Walk up to find the slot root (contents/turnip/<slot>/)
+            while (turnipRoot != null && !turnipRoot.getName().equals("active")
+                    && !turnipRoot.getParentFile().getName().equals("turnip")) {
+                turnipRoot = turnipRoot.getParentFile();
+                if (turnipRoot == null) break;
+            }
+            // The guest path is /opt/turnip/ + relative path from slot root
+            String relativePath = "";
+            if (turnipRoot != null) {
+                relativePath = turnipSo.getAbsolutePath().substring(
+                        turnipRoot.getAbsolutePath().length() + 1);
+            } else {
+                relativePath = turnipSo.getName();
+            }
+            String guestSoPath = "/opt/turnip/" + relativePath;
+
+            // Write ICD JSON
+            try (java.io.PrintWriter pw = new java.io.PrintWriter(icdFile)) {
+                pw.println("{");
+                pw.println("    \"file_format_version\": \"1.0.0\",");
+                pw.println("    \"ICD\": {");
+                pw.println("        \"library_path\": \"" + guestSoPath + "\",");
+                pw.println("        \"api_version\": \"1.3.0\"");
+                pw.println("    }");
+                pw.println("}");
+            }
+            output.append("Turnip ICD JSON: ").append(icdFile).append('\n');
+            output.append("  → library_path: ").append(guestSoPath).append('\n');
+
+            // Also copy the .so to the rootfs lib path (belt + suspenders)
+            File libDir = new File(imageFs.getRootDir(), "usr/local/lib");
+            libDir.mkdirs();
+            File destSo = new File(libDir, "libvulkan_freedreno.so");
+            copyFile(turnipSo, destSo);
+            output.append("  Also copied .so to: ").append(destSo).append('\n');
+
+            // Disable llvmpipe ICD if present (so Turnip wins)
+            File lvpIcd = new File(icdDir, "lvp_icd.json");
+            if (lvpIcd.exists()) {
+                lvpIcd.renameTo(new File(icdDir, "lvp_icd.json.disabled"));
+                output.append("  Disabled llvmpipe ICD\n");
+            }
+        } catch (Exception e) {
+            output.append("WARNING: Turnip ICD install failed: ").append(e.getMessage()).append('\n');
+        }
+    }
+
+    private void copyFile(File src, File dst) throws IOException {
+        dst.getParentFile().mkdirs();
+        try (java.io.InputStream in = new java.io.FileInputStream(src);
+             java.io.OutputStream out = new java.io.FileOutputStream(dst)) {
+            byte[] buf = new byte[65536];
+            int n;
+            while ((n = in.read(buf)) > 0) {
+                out.write(buf, 0, n);
+            }
+        }
+    }
+
+    private void findRecursive(File dir, String pattern, StringBuilder out, int maxResults) {
+        File[] kids = dir.listFiles();
+        if (kids == null) return;
+        int found = 0;
+        for (File kid : kids) {
+            if (found >= maxResults) {
+                out.append("    ... (truncated)\n");
+                return;
+            }
+            if (kid.isDirectory()) {
+                findRecursive(kid, pattern, out, maxResults - found);
+            } else if (kid.getName().toLowerCase().contains(pattern.toLowerCase())) {
+                out.append("    ").append(kid.getAbsolutePath()).append('\n');
+                found++;
+            }
+        }
+    }
+
+    private void deleteRecursive(File f) {
+        if (f.isDirectory()) {
+            File[] kids = f.listFiles();
+            if (kids != null) {
+                for (File kid : kids) deleteRecursive(kid);
+            }
+        }
+        f.delete();
     }
 
     @Override

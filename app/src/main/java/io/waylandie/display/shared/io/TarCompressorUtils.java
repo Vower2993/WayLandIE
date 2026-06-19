@@ -16,6 +16,8 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.zip.GZIPInputStream;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipInputStream;
 
 /**
  * TarCompressorUtils — extract .tar.xz, .tar.gz, and .tar archives
@@ -35,8 +37,9 @@ public final class TarCompressorUtils {
 
     public enum Type {
         XZ,      // .tar.xz / .txz
-        GZIP,    // .tar.gz / .tgz
-        TAR      // uncompressed .tar
+        GZIP,    // .tar.gz / .tgz / .wcp (Winlator Container Package = gzip tar)
+        TAR,     // uncompressed .tar
+        ZIP      // .zip
     }
 
     public interface OnExtractFileListener {
@@ -48,6 +51,162 @@ public final class TarCompressorUtils {
     }
 
     private TarCompressorUtils() {}
+
+    // ------------------------------------------------------------------
+    // Magic-byte detection — detects archive format from file content,
+    // not extension. Used by SettingsActivity to auto-detect .wcp (gzip),
+    // .zip, .tar.xz, etc. without relying on proot/shell.
+    // ------------------------------------------------------------------
+
+    /**
+     * Detects archive type by reading the first 6 bytes (magic bytes).
+     * Returns the detected Type, or null if unrecognized.
+     *
+     * Magic bytes reference:
+     *   1f 8b           → gzip (tar.gz, .wcp, .tgz)
+     *   fd 37 7a 58 5a  → xz (tar.xz)
+     *   50 4b 03 04     → zip
+     *   75 73 74 61 72  → ustar (plain tar, at offset 257)
+     */
+    public static Type detectArchiveType(File archiveFile) {
+        if (archiveFile == null || !archiveFile.isFile()) return null;
+        try (InputStream in = new BufferedInputStream(new FileInputStream(archiveFile), 65536)) {
+            byte[] magic = new byte[6];
+            int read = in.read(magic);
+            if (read < 4) return null;
+            // gzip: 1f 8b
+            if ((magic[0] & 0xFF) == 0x1f && (magic[1] & 0xFF) == 0x8b) return Type.GZIP;
+            // xz: fd 37 7a 58 5a
+            if ((magic[0] & 0xFF) == 0xfd && (magic[1] & 0xFF) == 0x37
+                    && (magic[2] & 0xFF) == 0x7a && (magic[3] & 0xFF) == 0x58
+                    && (magic[4] & 0xFF) == 0x5a) return Type.XZ;
+            // zip: 50 4b 03 04
+            if ((magic[0] & 0xFF) == 0x50 && (magic[1] & 0xFF) == 0x4b
+                    && (magic[2] & 0xFF) == 0x03 && (magic[3] & 0xFF) == 0x04) return Type.ZIP;
+            // Check for ustar magic at offset 257 (plain tar)
+            if (archiveFile.length() > 263) {
+                try (InputStream in2 = new BufferedInputStream(new FileInputStream(archiveFile), 65536)) {
+                    in2.skip(257);
+                    byte[] ustar = new byte[5];
+                    int r2 = in2.read(ustar);
+                    if (r2 == 5 && new String(ustar).equals("ustar")) return Type.TAR;
+                }
+            }
+        } catch (IOException e) {
+            Log.e(TAG, "detectArchiveType failed for " + archiveFile, e);
+        }
+        return null;
+    }
+
+    // ------------------------------------------------------------------
+    // File-based extraction (for user-picked driver archives).
+    // These are the pure-Java equivalents of the shell script's
+    // extract_archive() — no proot, no bash, no shell commands.
+    // ------------------------------------------------------------------
+
+    /**
+     * Extracts an archive file (auto-detected type) to outDir.
+     * Pure Java — no shell commands. Returns true on success.
+     */
+    public static boolean extractFile(File archiveFile, File outDir) {
+        return extractFile(archiveFile, outDir, null);
+    }
+
+    /**
+     * Extracts an archive file (auto-detected type) to outDir with
+     * progress callbacks. Pure Java.
+     */
+    public static boolean extractFile(File archiveFile, File outDir, OnExtractFileListener listener) {
+        Type type = detectArchiveType(archiveFile);
+        if (type == null) {
+            Log.e(TAG, "Unrecognized archive format: " + archiveFile);
+            return false;
+        }
+        Log.i(TAG, "Detected archive type: " + type + " for " + archiveFile);
+        return extractFileWithType(archiveFile, outDir, type, listener);
+    }
+
+    /**
+     * Extracts an archive file with a known type to outDir.
+     */
+    public static boolean extractFileWithType(File archiveFile, File outDir, Type type,
+                                               OnExtractFileListener listener) {
+        if (archiveFile == null || !archiveFile.isFile()) return false;
+        if (!outDir.exists() && !outDir.mkdirs()) {
+            Log.e(TAG, "Failed to mkdir " + outDir);
+            return false;
+        }
+        try {
+            if (type == Type.ZIP) {
+                extractZip(archiveFile, outDir, listener);
+            } else {
+                InputStream fileIn = new BufferedInputStream(new FileInputStream(archiveFile), 65536);
+                InputStream decompressed;
+                if (type == Type.XZ) {
+                    decompressed = new org.tukaani.xz.XZInputStream(fileIn);
+                } else if (type == Type.GZIP) {
+                    decompressed = new GZIPInputStream(fileIn);
+                } else {
+                    decompressed = fileIn;
+                }
+                extractTarStream(decompressed, outDir, listener, archiveFile.length());
+                decompressed.close();
+            }
+            Log.i(TAG, "Extracted " + archiveFile + " → " + outDir);
+            return true;
+        } catch (Exception e) {
+            Log.e(TAG, "Extraction failed for " + archiveFile, e);
+            return false;
+        }
+    }
+
+    /**
+     * Extracts a .zip archive using java.util.zip.ZipInputStream.
+     * Pure Java — no shell unzip needed.
+     */
+    private static void extractZip(File zipFile, File outDir, OnExtractFileListener listener)
+            throws IOException {
+        long totalExtracted = 0;
+        try (InputStream fis = new BufferedInputStream(new FileInputStream(zipFile), 65536);
+             ZipInputStream zis = new ZipInputStream(fis)) {
+            ZipEntry entry;
+            while ((entry = zis.getNextEntry()) != null) {
+                String name = entry.getName();
+                if (name == null || name.isEmpty()) continue;
+                // Security: prevent path traversal (../../etc/passwd)
+                File outFile = new File(outDir, name);
+                String outDirCanonical = outDir.getCanonicalPath();
+                String outFileCanonical = outFile.getCanonicalPath();
+                if (!outFileCanonical.startsWith(outDirCanonical + File.separator)
+                        && !outFileCanonical.equals(outDirCanonical)) {
+                    Log.w(TAG, "Skipping zip entry with path traversal: " + name);
+                    continue;
+                }
+                if (entry.isDirectory()) {
+                    outFile.mkdirs();
+                } else {
+                    outFile.getParentFile().mkdirs();
+                    try (OutputStream out = new BufferedOutputStream(new FileOutputStream(outFile), 65536)) {
+                        byte[] buf = new byte[65536];
+                        int n;
+                        while ((n = zis.read(buf)) > 0) {
+                            out.write(buf, 0, n);
+                            totalExtracted += n;
+                            if (listener != null && (totalExtracted % (1024 * 1024)) < 65536) {
+                                listener.onExtractedBytes(totalExtracted);
+                            }
+                        }
+                    }
+                    // Set executable for bin/ entries
+                    if (name.contains("/bin/") || name.startsWith("bin/")) {
+                        outFile.setExecutable(true, false);
+                    }
+                }
+                zis.closeEntry();
+            }
+        }
+        Log.i(TAG, "Zip extraction complete. Total extracted: " + totalExtracted + " bytes");
+    }
 
     public static boolean extractSync(Type type, Context context, String assetName,
                                       File outDir, OnExtractFileListener listener) {
