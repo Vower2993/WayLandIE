@@ -4,7 +4,7 @@
     android:layout_height="match_parent"
     android:background="@color/bg_dark"
     android:orientation="vertical"
-    android:gravity="center"
+    android:gravity="top|center_horizontal"
     android:padding="32dp">
 
     <TextView
@@ -14,7 +14,8 @@
         android:textColor="@color/accent"
         android:textSize="32sp"
         android:textStyle="bold"
-        android:layout_marginBottom="8dp" />
+        android:layout_marginBottom="8dp"
+        android:layout_marginTop="20dp" />
 
     <TextView
         android:layout_width="wrap_content"
@@ -22,7 +23,7 @@
         android:text="Zero-copy Windows games on Android"
         android:textColor="@color/text_secondary"
         android:textSize="14sp"
-        android:layout_marginBottom="48dp" />
+        android:layout_marginBottom="32dp" />
 
     <ProgressBar
         android:id="@+id/progressBar"
@@ -31,7 +32,7 @@
         android:layout_height="wrap_content"
         android:max="100"
         android:progress="0"
-        android:layout_marginBottom="16dp" />
+        android:layout_marginBottom="12dp" />
 
     <TextView
         android:id="@+id/statusText"
@@ -40,7 +41,7 @@
         android:text="Initializing…"
         android:textColor="@color/text_primary"
         android:textSize="16sp"
-        android:layout_marginBottom="8dp" />
+        android:layout_marginBottom="6dp" />
 
     <TextView
         android:id="@+id/percentText"
@@ -50,7 +51,47 @@
         android:textColor="@color/text_secondary"
         android:textSize="14sp"
         android:fontFamily="monospace"
-        android:layout_marginBottom="32dp" />
+        android:layout_marginBottom="16dp" />
+
+    <!-- Activity log — restored 2026-06-19.
+         Previously this screen had NO log TextView, which is why the
+         user reported "first page no longer shows log". The log is a
+         release-build feature, not a debug toggle: it is the user's
+         only signal that setup is healthy.
+
+         Reference pattern: HomeActivity.java:208 already had this
+         TextView in activity_home.xml — the initializer layout had
+         lost it during a refactor. We restore it here as a ScrollView
+         with layout_weight=1 so it fills the available vertical space
+         between the percentText and the buttons. -->
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Activity log"
+        android:textColor="@color/text_secondary"
+        android:textSize="12sp"
+        android:layout_marginBottom="4dp"
+        android:layout_gravity="start" />
+
+    <ScrollView
+        android:id="@+id/logScroll"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:background="@color/bg_dark"
+        android:fillViewport="true"
+        android:layout_marginBottom="16dp">
+
+        <TextView
+            android:id="@+id/logText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:fontFamily="monospace"
+            android:padding="8dp"
+            android:textColor="@color/text_tertiary"
+            android:textSize="11sp"
+            android:text="(no events yet)" />
+    </ScrollView>
 
     <Button
         android:id="@+id/btnContinue"
@@ -98,6 +139,6 @@
         android:text="This happens once. Next launch will be instant."
         android:textColor="@color/text_tertiary"
         android:textSize="11sp"
-        android:layout_marginTop="32dp" />
+        android:layout_marginTop="16dp" />
 
 </LinearLayout>

@@ -137,8 +137,22 @@ public final class MainActivity extends Activity
     private static final float CONTROLLER_MOUSE_DEADZONE = 0.18f;
     private static final float CONTROLLER_MOUSE_SPEED_PX_PER_SECOND = 1850.0f;
     private static volatile boolean nativeLibraryAvailable;
-    private static final String NATIVE_STATUS_TEXT = loadNativeStatusText();
-    private static final String VULKAN_STATUS_TEXT = loadNativeVulkanStatusText();
+    // Lazy-initialized: previously these were eager `static final` fields
+    // (lines 140-141 in the pre-fix source) that triggered
+    // `loadNativeStatusText()` + `loadNativeVulkanStatusText()` at class
+    // load time. If `nativeVulkanProbe()` threw anything outside
+    // `RuntimeException | UnsatisfiedLinkError` (e.g.
+    // `ExceptionInInitializerError` from a chained `NoClassDefFoundError`,
+    // or `OutOfMemoryError`), the class init failed, propagating to
+    // `HomeActivity.updateNativeStatus()` which only caught
+    // `UnsatisfiedLinkError` → process kill → force-close.
+    //
+    // Now they are computed on first access via `getNativeStatusText()`
+    // / `getVulkanStatusText()` with double-checked locking, and the
+    // load methods catch `Throwable` so no failure can poison the class.
+    private static volatile String nativeStatusText = null;
+    private static volatile String vulkanStatusText = null;
+    private static final Object statusTextLock = new Object();
     private static final Object ACTIVE_BRIDGE_OWNER_LOCK = new Object();
     private static WeakReference<MainActivity> activeBridgeOwnerRef =
             new WeakReference<>(null);
@@ -1417,7 +1431,7 @@ public final class MainActivity extends Activity
                     bridgeValueToken(bridgeDmaBufDriverStatusText),
                     bridgeValueToken(bridgeDmaBufPresentStatusText));
         } else if ("vulkan".equals(commandName)) {
-            response = "waylandie-bridge vulkan " + compactBridgeText(VULKAN_STATUS_TEXT);
+            response = "waylandie-bridge vulkan " + compactBridgeText(getVulkanStatusText());
         } else if ("adrenotools".equals(commandName)) {
             response = "waylandie-bridge adrenotools " + handleBridgeAdrenoToolsProbe(rawCommand);
         } else if ("contract".equals(commandName)) {
@@ -4215,7 +4229,7 @@ public final class MainActivity extends Activity
             canvas.drawText(String.format(Locale.US, "Measured %.1f fps", measuredFps), 48.0f, 250.0f, smallPaint);
             canvas.drawText(String.format(Locale.US, "Layer %dx%d @ %.1f Hz", width, height, getDisplayRefreshRate()),
                     48.0f, 304.0f, smallPaint);
-            canvas.drawText(NATIVE_STATUS_TEXT, 48.0f, 358.0f, smallPaint);
+            canvas.drawText(getNativeStatusText(), 48.0f, 358.0f, smallPaint);
             canvas.drawText(producerStatusText, 48.0f, 412.0f, smallPaint);
 
             smallPaint.setColor(Color.rgb(255, 220, 120));
@@ -5866,9 +5880,20 @@ public final class MainActivity extends Activity
             System.loadLibrary(NATIVE_LIBRARY);
             nativeLibraryAvailable = true;
             return "native: " + nativeStatus();
-        } catch (SecurityException | UnsatisfiedLinkError ignored) {
+        } catch (Throwable error) {
+            // Catches Throwable — see class-level comment. Previously
+            // this caught only SecurityException | UnsatisfiedLinkError,
+            // which missed ExceptionInInitializerError, NoClassDefFoundError,
+            // OutOfMemoryError, StackOverflowError. Any of those would
+            // propagate out of the static initializer (when this method
+            // was called eagerly) and kill the process via
+            // ExceptionInInitializerError at HomeActivity.updateNativeStatus.
             nativeLibraryAvailable = false;
-            return "native: unavailable";
+            try {
+                io.waylandie.display.shared.util.LogRingBuffer.append(
+                        "[MainActivity.loadNativeStatusText] " + error);
+            } catch (Throwable ignored) {}
+            return "native: unavailable " + error.getClass().getSimpleName();
         }
     }
 
@@ -5879,15 +5904,54 @@ public final class MainActivity extends Activity
 
         try {
             return nativeVulkanProbe();
-        } catch (RuntimeException | UnsatisfiedLinkError error) {
+        } catch (Throwable error) {
+            // Catches Throwable — see loadNativeStatusText() above.
             if (error instanceof UnsatisfiedLinkError) {
                 nativeLibraryAvailable = false;
             }
+            try {
+                io.waylandie.display.shared.util.LogRingBuffer.append(
+                        "[MainActivity.loadNativeVulkanStatusText] " + error);
+            } catch (Throwable ignored) {}
             return "vulkan: unavailable " + error.getClass().getSimpleName();
         }
     }
 
+    /** Lazy accessor — double-checked locking. Never throws. */
+    public static String getNativeStatusText() {
+        if (nativeStatusText != null) return nativeStatusText;
+        synchronized (statusTextLock) {
+            if (nativeStatusText == null) {
+                nativeStatusText = loadNativeStatusText();
+            }
+            return nativeStatusText;
+        }
+    }
+
+    /** Lazy accessor — double-checked locking. Never throws. */
+    public static String getVulkanStatusText() {
+        if (vulkanStatusText != null) return vulkanStatusText;
+        synchronized (statusTextLock) {
+            if (vulkanStatusText == null) {
+                vulkanStatusText = loadNativeVulkanStatusText();
+            }
+            return vulkanStatusText;
+        }
+    }
+
     public static native String nativeStatus();
+
+    /**
+     * Lightweight in-process probe. Returns "ok" if all critical symbols
+     * resolve and {@code vkCreateInstance} succeeds (probe instance is
+     * destroyed immediately). Returns "fail: <reason>" otherwise.
+     *
+     * <p>Called by {@code EnvironmentInitializer} before showing the
+     * {@code Continue} button. If this returns non-{@code "ok"}, the
+     * user sees the reason in the visible log and Continue is refused —
+     * no force-close.
+     */
+    public static native String nativeProbeCompositor();
 
     private static native String nativeVulkanProbe();
 

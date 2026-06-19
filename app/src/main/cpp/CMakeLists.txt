@@ -46,6 +46,7 @@ add_link_options(
 add_library(waylandie_display_native SHARED
     waylandie_display_native.c
     surface_control_cpp_shim.cpp
+    crash_handler.c
 )
 
 # Android platform libraries that the native presenter links against.
@@ -53,12 +54,15 @@ add_library(waylandie_display_native SHARED
 # - libvulkan:  VK_ANDROID_external_memory_android_hardware_buffer
 # - liblog:     __android_log_print
 # - libnativewindow: ANativeWindow_fromSurface
+# - libdl:      dlsym/dladdr for crash_handler.c backtrace_symbols_fd
+#               (also already pulled in transitively, but explicit > implicit)
 target_link_libraries(waylandie_display_native
     android
     vulkan
     log
     nativewindow
     EGL
+    dl
 )
 
 # Make sure the Vulkan header from NDK picks up the Android platform extension.

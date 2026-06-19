@@ -30,6 +30,7 @@
     <!-- Everything is self-contained. -->
 
     <application
+        android:name=".WayLandIEApplication"
         android:allowBackup="false"
         android:appCategory="game"
         android:debuggable="false"
@@ -93,6 +94,16 @@
             android:exported="false"
             android:screenOrientation="portrait"
             android:theme="@style/AppTheme" />
+
+        <!-- Crash report viewer — shown when WayLandIEApplication detects
+             a fresh crash-<ts>.txt file on launch. Not exported: only
+             reachable from inside the app. -->
+        <activity
+            android:name=".CrashReportActivity"
+            android:exported="false"
+            android:screenOrientation="portrait"
+            android:theme="@style/AppTheme"
+            android:launchMode="singleTask" />
 
         <!-- FileProvider for sharing log files -->
         <provider

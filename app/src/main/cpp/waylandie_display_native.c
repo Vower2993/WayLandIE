@@ -31,6 +31,137 @@
 #endif
 #include <vulkan/vulkan.h>
 #include "ahb_vk_3d_shaders.h"
+#include "crash_handler.h"
+
+/* ------------------------------------------------------------------
+ * JNI_OnLoad — installs the native crash handler (sigaction + sigaltstack)
+ * as soon as the library is loaded. The crash directory is obtained from
+ * WayLandIEApplication.getNativeCrashDir() via JNI so we don't hardcode
+ * the path. If the Java call fails (early load, context not ready), we
+ * fall back to /data/data/io.waylandie.display/files/logs/ which is the
+ * app-private path that always exists.
+ * ------------------------------------------------------------------ */
+JNIEXPORT jint JNICALL
+JNI_OnLoad(JavaVM *vm, void *reserved) {
+    (void)reserved;
+    JNIEnv *env = NULL;
+    if ((*vm)->GetEnv(vm, (void **)&env, JNI_VERSION_1_6) != JNI_OK) {
+        return JNI_ERR;
+    }
+
+    const char *crash_dir = NULL;
+    jstring crash_dir_jstr = NULL;
+
+    /* Try to fetch the crash dir from WayLandIEApplication. */
+    jclass appClass = (*env)->FindClass(env,
+            "io/waylandie/display/WayLandIEApplication");
+    if (appClass != NULL) {
+        jmethodID getter = (*env)->GetStaticMethodID(env, appClass,
+                "getNativeCrashDir", "()Ljava/lang/String;");
+        if (getter != NULL) {
+            crash_dir_jstr = (jstring)(*env)->CallStaticObjectMethod(env,
+                    appClass, getter);
+        }
+        (*env)->DeleteLocalRef(env, appClass);
+    }
+    if (crash_dir_jstr != NULL) {
+        crash_dir = (*env)->GetStringUTFChars(env, crash_dir_jstr, NULL);
+    }
+
+    if (crash_dir == NULL || crash_dir[0] == '\0') {
+        /* Fallback — app-private path always exists. */
+        crash_dir = "/data/data/io.waylandie.display/files/logs";
+    }
+
+    install_native_crash_handler(crash_dir);
+
+    if (crash_dir_jstr != NULL && crash_dir != NULL) {
+        (*env)->ReleaseStringUTFChars(env, crash_dir_jstr, crash_dir);
+    }
+    return JNI_VERSION_1_6;
+}
+
+/* ------------------------------------------------------------------
+ * nativeProbeCompositor — lightweight in-process probe.
+ * Returns a status string suitable for display in the visible log.
+ *   "ok"                    — all critical symbols resolve and
+ *                            vkCreateInstance succeeds (probe instance
+ *                            is destroyed immediately).
+ *   "fail: <reason>"        — first failing check, with reason.
+ *
+ * This is the gate the EnvironmentInitializer.Continue button calls
+ * BEFORE launching HomeActivity. If the probe fails, the user sees the
+ * reason in the log and Continue is refused — no force-close.
+ * ------------------------------------------------------------------ */
+JNIEXPORT jstring JNICALL
+Java_io_waylandie_display_MainActivity_nativeProbeCompositor(JNIEnv *env, jclass clazz) {
+    (void)clazz;
+
+    /* 1. libwaylandie_display_native.so is loaded (we're in it) — pass. */
+
+    /* 2. dlopen libvulkan.so and resolve vkCreateInstance. */
+    void *vulkan = dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL);
+    if (vulkan == NULL) {
+        const char *err = dlerror();
+        char buf[256];
+        snprintf(buf, sizeof(buf), "fail: dlopen libvulkan.so: %s",
+                err == NULL ? "unknown" : err);
+        return (*env)->NewStringUTF(env, buf);
+    }
+    PFN_vkCreateInstance pfn_create =
+            (PFN_vkCreateInstance)dlsym(vulkan, "vkCreateInstance");
+    PFN_vkDestroyInstance pfn_destroy =
+            (PFN_vkDestroyInstance)dlsym(vulkan, "vkDestroyInstance");
+    if (pfn_create == NULL || pfn_destroy == NULL) {
+        dlclose(vulkan);
+        return (*env)->NewStringUTF(env,
+                "fail: vkCreateInstance/vkDestroyInstance symbol missing");
+    }
+
+    /* 3. Probe vkCreateInstance with a minimal VkInstanceCreateInfo.
+     * No extensions enabled — we just want to confirm Vulkan is usable
+     * on this device. The real MainActivity uses adrenotools-loaded
+     * Vulkan, but that's a runtime concern; the probe just checks the
+     * system loader path. */
+    VkApplicationInfo app_info = {0};
+    app_info.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
+    app_info.pApplicationName = "waylandie-probe";
+    app_info.applicationVersion = 1;
+    app_info.pEngineName = "waylandie-probe";
+    app_info.engineVersion = 1;
+    app_info.apiVersion = VK_API_VERSION_1_1;
+
+    VkInstanceCreateInfo ci = {0};
+    ci.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+    ci.pApplicationInfo = &app_info;
+
+    VkInstance inst = NULL;
+    VkResult vr = pfn_create(&ci, NULL, &inst);
+    if (vr != VK_SUCCESS) {
+        char buf[256];
+        snprintf(buf, sizeof(buf), "fail: vkCreateInstance returned %d", (int)vr);
+        dlclose(vulkan);
+        return (*env)->NewStringUTF(env, buf);
+    }
+    pfn_destroy(inst, NULL);
+    dlclose(vulkan);
+
+    /* 4. ANativeWindow_fromSurface — resolve from libnativewindow.so.
+     * We don't actually call it (we have no Surface yet), just confirm
+     * the symbol exists. */
+    void *nw = dlopen("libnativewindow.so", RTLD_NOW | RTLD_LOCAL);
+    if (nw == NULL) {
+        return (*env)->NewStringUTF(env, "fail: dlopen libnativewindow.so");
+    }
+    void *fromSurface = dlsym(nw, "ANativeWindow_fromSurface");
+    dlclose(nw);
+    if (fromSurface == NULL) {
+        return (*env)->NewStringUTF(env,
+                "fail: ANativeWindow_fromSurface symbol missing");
+    }
+
+    return (*env)->NewStringUTF(env, "ok");
+}
 
 JNIEXPORT jstring JNICALL
 Java_io_waylandie_display_MainActivity_nativeStatus(JNIEnv *env, jclass clazz) {

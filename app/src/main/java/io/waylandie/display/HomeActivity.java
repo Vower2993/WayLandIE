@@ -84,6 +84,16 @@ public final class HomeActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+
+        // If WayLandIEApplication detected a fresh crash file, route to
+        // CrashReportActivity BEFORE setContentView. This breaks the
+        // relaunch-into-same-crash loop the user reported.
+        if (WayLandIEApplication.freshCrashFilePresent()) {
+            startActivity(new Intent(this, CrashReportActivity.class));
+            finish();
+            return;
+        }
+
         setContentView(R.layout.activity_home);
 
         getWindow().setNavigationBarColor(0xFF0F0F12);
@@ -464,8 +474,26 @@ public final class HomeActivity extends Activity {
             String s = MainActivity.nativeStatus();
             nativeStatusText.setText(String.format(Locale.US, "native: %s", s));
             log("native: " + s);
-        } catch (UnsatisfiedLinkError error) {
-            nativeStatusText.setText("native: libwaylandie_display_native.so not loaded");
+        } catch (Throwable error) {
+            // Previously this caught only UnsatisfiedLinkError. That missed
+            // ExceptionInInitializerError (thrown when MainActivity's class
+            // init fails — which is exactly the bug that caused the
+            // Continue → force-close), NoClassDefFoundError,
+            // OutOfMemoryError, StackOverflowError, etc.
+            //
+            // Catching Throwable here means: even if MainActivity's class
+            // init blows up, HomeActivity stays alive long enough for the
+            // global CrashHandler (installed by WayLandIEApplication) to
+            // write a tombstone. The user sees "native: unavailable
+            // <ExceptionClass>" instead of a force-close.
+            String msg = "native: unavailable " + error.getClass().getSimpleName()
+                    + ": " + error.getMessage();
+            nativeStatusText.setText(msg);
+            log(msg);
+            try {
+                io.waylandie.display.shared.util.LogRingBuffer.append(
+                        "[HomeActivity.updateNativeStatus] " + error);
+            } catch (Throwable ignored) {}
         }
     }
 
