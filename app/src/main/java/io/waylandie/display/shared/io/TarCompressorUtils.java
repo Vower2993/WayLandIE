@@ -163,12 +163,40 @@ public final class TarCompressorUtils {
             int dataBlocks = (int) ((size + 511) / 512);
             long remaining = size;
 
-            // Only extract regular files, directories, and symlinks
+            // Only extract regular files, directories, and symlinks.
+            //
+            // Per POSIX 1003.1 ustar:
+            //   '0' or '\0' or '7'  regular file
+            //   '1'                  hard link (skip — has size 0)
+            //   '2'                  symlink (skip — has size 0)
+            //   '3'                  char device (skip — has size 0)
+            //   '4'                  block device (skip — has size 0)
+            //   '5'                  directory (skip — has size 0)
+            //   '6'                  FIFO (skip — has size 0)
+            //   'x'                  PAX header (HAS data — must skip)
+            //   'g'                  PAX global header (HAS data — must skip)
+            //   'L'                  GNU long name (HAS data — must skip)
+            //   'K'                  GNU long link (HAS data — must skip)
+            //
+            // PRE-BUG: only '5', '2', '0', '\0', '7' were handled.
+            // 'x', 'g', 'L', 'K' fell into the else branch at line ~213
+            // which logged "Skipping tar entry type X" — but the skip-data
+            // logic was duplicated (one skip in the if/else, one at the
+            // bottom), causing the parser to skip the NEXT entry's header
+            // as if it were data. Result: total misalignment, every
+            // subsequent entry was misread as a tar header (type 't' is
+            // not a real tar type — that was file content being parsed
+            // as a header). All extraction was silently dropped.
+            //
+            // FIX: extract regular files / dirs / symlinks inline (consuming
+            // their data), then for ALL OTHER types ('x', 'g', 'L', 'K',
+            // and any unknown type) skip exactly `size` bytes of data
+            // ONCE at the end. No double-skip.
             if (typeFlag == '5') {
                 // Directory
                 File dir = new File(outDir, fullName);
                 dir.mkdirs();
-                // No data blocks for directories
+                // No data blocks for directories (size is 0)
             } else if (typeFlag == '2') {
                 // Symlink
                 String linkTarget = readString(header, 157, 100);
@@ -211,28 +239,56 @@ public final class TarCompressorUtils {
                     outFile.setExecutable(true, false);
                 }
             } else {
-                // Skip other types (hardlinks, char devices, etc.)
-                Log.w(TAG, "Skipping tar entry type " + (char) typeFlag + ": " + fullName);
+                // PAX headers ('x', 'g'), GNU long-name ('L', 'K'), and any
+                // unknown type. We don't extract these to disk, but we MUST
+                // skip their data blocks so the parser stays aligned with
+                // the next tar entry header.
+                if (typeFlag != '1' && typeFlag != '3' && typeFlag != '4'
+                        && typeFlag != '6' && typeFlag != 'x' && typeFlag != 'g'
+                        && typeFlag != 'L' && typeFlag != 'K') {
+                    Log.w(TAG, "Skipping unknown tar entry type "
+                            + (char) typeFlag + " (0x" + Integer.toHexString(typeFlag & 0xFF)
+                            + "): " + fullName);
+                }
             }
 
-            // Skip remaining data blocks (padding to 512-byte boundary)
+            // Skip any remaining data bytes (for non-file entries, this is
+            // the entire data payload; for files this is 0 because the
+            // extraction loop consumed everything).
             if (remaining > 0) {
                 long toSkip = remaining;
                 while (toSkip > 0) {
                     long skipped = in.skip(toSkip);
-                    if (skipped <= 0) break;
-                    toSkip -= skipped;
+                    if (skipped <= 0) {
+                        // If skip returns 0, fall back to a single-byte read
+                        // to make progress (some InputStreams don't support
+                        // skip natively).
+                        int b = in.read();
+                        if (b < 0) break;
+                        toSkip--;
+                    } else {
+                        toSkip -= skipped;
+                    }
                 }
             }
 
-            // Skip padding (already handled by reading in 512-byte blocks above for files,
-            // but for non-file entries we need to skip the data blocks)
-            if (typeFlag != '0' && typeFlag != 0 && typeFlag != '7' && typeFlag != '5' && typeFlag != '2') {
-                long padBytes = dataBlocks * 512L;
-                while (padBytes > 0) {
-                    long skipped = in.skip(padBytes);
-                    if (skipped <= 0) break;
-                    padBytes -= skipped;
+            // Skip padding to 512-byte boundary. For files this is the
+            // (dataBlocks * 512 - size) bytes of zero-padding at the end
+            // of the last data block. For non-file entries, same math.
+            // PRE-BUG: this block was conditionally skipped for files
+            // (because the extraction loop was assumed to consume full
+            // blocks), but the loop actually consumed exactly `size` bytes,
+            // not `dataBlocks * 512`. So padding was never skipped for
+            // ANY entry, causing misalignment on the next header.
+            long padding = (dataBlocks * 512L) - size;
+            while (padding > 0) {
+                long skipped = in.skip(padding);
+                if (skipped <= 0) {
+                    int b = in.read();
+                    if (b < 0) break;
+                    padding--;
+                } else {
+                    padding -= skipped;
                 }
             }
         }
