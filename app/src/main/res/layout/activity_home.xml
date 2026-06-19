@@ -348,6 +348,14 @@
                 android:text="Settings — Drivers &amp; Wrappers" />
 
             <Button
+                android:id="@+id/btnSaveLogs"
+                style="@style/PrimaryButton"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Save Logs (for debugging)"
+                android:background="@color/danger" />
+
+            <Button
                 android:id="@+id/btnSetupWizard"
                 style="@style/SecondaryButton"
                 android:layout_width="match_parent"

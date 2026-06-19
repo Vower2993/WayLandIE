@@ -102,34 +102,36 @@ public final class TarCompressorUtils {
             Log.i(TAG, "Copied " + assetName + " → " + tmpArchive
                     + " (" + totalBytes + " bytes)");
 
-            // Decompress + untar via the system tar binary (toybox on Android).
-            // toybox supports -J (xz), -z (gzip), and plain tar.
-            // For zstd, we need a separate zstd binary.
+            // Use a pipe-based approach for better reliability with large archives.
+            // Android's toybox tar -xJf can fail silently on 100+ MB xz files,
+            // but `xz -dc | tar -xf -` is more robust.
             String[] cmd;
-            if (type == Type.ZSTD) {
-                // Try zstd first, fall back to tar with --use-compress-program
-                File zstdBin = new File(context.getApplicationInfo().nativeLibraryDir, "libzstd.so");
-                if (zstdBin.exists()) {
-                    cmd = new String[]{
-                            "tar", "--use-compress-program=" + zstdBin.getAbsolutePath() + " -d",
-                            "-xf", tmpArchive.getAbsolutePath(),
-                            "-C", outDir.getAbsolutePath()
-                    };
-                } else {
-                    // Fallback: try system zstd
-                    cmd = new String[]{
-                            "sh", "-c",
-                            "zstd -dc " + shellQuote(tmpArchive.getAbsolutePath())
-                                    + " | tar -xf - -C " + shellQuote(outDir.getAbsolutePath())
-                    };
-                }
-            } else if (type == Type.XZ) {
-                cmd = new String[]{"tar", "-xJf", tmpArchive.getAbsolutePath(),
-                        "-C", outDir.getAbsolutePath()};
+            if (type == Type.XZ) {
+                // Pipe approach: xz decompresses to stdout, tar reads from stdin
+                cmd = new String[]{
+                        "sh", "-c",
+                        "xz -dc " + shellQuote(tmpArchive.getAbsolutePath())
+                                + " | tar -xf - -C " + shellQuote(outDir.getAbsolutePath())
+                };
             } else if (type == Type.GZIP) {
-                cmd = new String[]{"tar", "-xzf", tmpArchive.getAbsolutePath(),
-                        "-C", outDir.getAbsolutePath()};
+                cmd = new String[]{
+                        "sh", "-c",
+                        "gzip -dc " + shellQuote(tmpArchive.getAbsolutePath())
+                                + " | tar -xf - -C " + shellQuote(outDir.getAbsolutePath())
+                };
+            } else if (type == Type.ZSTD) {
+                // Try zstd pipe, fall back to tar's built-in
+                File zstdBin = new File(context.getApplicationInfo().nativeLibraryDir, "libzstd.so");
+                String zstdCmd = zstdBin.exists()
+                        ? zstdBin.getAbsolutePath() + " -dc"
+                        : "zstd -dc";
+                cmd = new String[]{
+                        "sh", "-c",
+                        zstdCmd + " " + shellQuote(tmpArchive.getAbsolutePath())
+                                + " | tar -xf - -C " + shellQuote(outDir.getAbsolutePath())
+                };
             } else {
+                // Plain tar
                 cmd = new String[]{"tar", "-xf", tmpArchive.getAbsolutePath(),
                         "-C", outDir.getAbsolutePath()};
             }
@@ -138,18 +140,23 @@ public final class TarCompressorUtils {
             pb.redirectErrorStream(true);
             Process proc = pb.start();
 
-            // Drain stdout/stderr to prevent buffer deadlock
+            // Capture ALL output so we can see the error if tar fails
+            StringBuilder procOutput = new StringBuilder();
             byte[] buf = new byte[4096];
             InputStream procIn = proc.getInputStream();
             int n;
             while ((n = procIn.read(buf)) > 0) {
-                // Discard — we just need to drain
+                procOutput.append(new String(buf, 0, n));
             }
             int exit = proc.waitFor();
             if (exit != 0) {
-                throw new IOException("tar exited with " + exit + " for " + assetName);
+                String errMsg = procOutput.toString().trim();
+                Log.e(TAG, "Extraction failed (exit " + exit + "): " + errMsg);
+                throw new IOException("tar/xz exited with " + exit
+                        + " for " + assetName + ": " + errMsg);
             }
             Log.i(TAG, "Extracted " + assetName + " → " + outDir);
+            Log.i(TAG, "Extraction output: " + procOutput.toString().trim());
 
             if (listener != null) {
                 listener.onExtractedBytes(totalBytes);

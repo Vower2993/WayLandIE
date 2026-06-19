@@ -108,7 +108,22 @@ public final class ImageFsManager {
         if (listener != null) listener.onProgress(0);
 
         if (!rootDir.exists() && !rootDir.mkdirs()) {
-            Log.e(TAG, "Failed to mkdir " + rootDir);
+            lastError = "Failed to create root dir: " + rootDir;
+            Log.e(TAG, lastError);
+            if (listener != null) listener.onFinished(false);
+            return false;
+        }
+
+        // Verify the asset exists before trying to extract
+        try {
+            java.io.InputStream testStream = context.getAssets().open(IMAGEFS_ARCHIVE);
+            testStream.close();
+        } catch (IOException e) {
+            lastError = "Rootfs asset not found in APK: " + IMAGEFS_ARCHIVE
+                    + "\n  The APK may not have been built with the rootfs bundled."
+                    + "\n  Check the GitHub Actions build log — the 'Build imagefs rootfs' step"
+                    + " should produce a 100+ MB tarball.";
+            Log.e(TAG, lastError);
             if (listener != null) listener.onFinished(false);
             return false;
         }
@@ -138,7 +153,10 @@ public final class ImageFsManager {
                 extractListener);
 
         if (!ok) {
-            Log.e(TAG, "ImageFs extraction failed");
+            lastError = "Rootfs tarball extraction failed."
+                    + "\n  This is likely an xz decompression error."
+                    + "\n  Tap 'Save Logs' to see the detailed error.";
+            Log.e(TAG, lastError);
             if (listener != null) listener.onFinished(false);
             return false;
         }
@@ -147,7 +165,8 @@ public final class ImageFsManager {
         try {
             createVersionFile(LATEST_VERSION);
         } catch (IOException e) {
-            Log.e(TAG, "Failed to write version file", e);
+            lastError = "Failed to write version file: " + e.getMessage();
+            Log.e(TAG, lastError);
         }
 
         // Make all binaries executable
@@ -159,6 +178,15 @@ public final class ImageFsManager {
         }
         return true;
     }
+
+    /**
+     * Returns the last error message from {@link #install}, or null if
+     * no error occurred. Used by LogCollector.
+     */
+    public String getLastError() {
+        return lastError;
+    }
+    private String lastError = null;
 
     private void makeBinariesExecutable(File dir) {
         if (dir == null || !dir.isDirectory()) return;

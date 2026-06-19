@@ -8,22 +8,24 @@ import android.view.View;
 import android.widget.Button;
 import android.widget.ProgressBar;
 import android.widget.TextView;
+import android.widget.Toast;
+
+import java.io.File;
 
 import io.waylandie.display.HomeActivity;
 import io.waylandie.display.R;
+import io.waylandie.display.shared.util.LogCollector;
 
 /**
  * EnvironmentInitializer — first-run activity that extracts the bundled
  * rootfs (ImageFs) from APK assets into app-private storage.
  *
- * <p>This replaces the old Termux-based setup wizard. The user just sees:
- * <ol>
- *   <li>"Initializing environment…" with a progress bar (1-3 min)</li>
- *   <li>"Environment ready" → tap Continue → goes to HomeActivity</li>
- * </ol>
- *
- * <p>No Termux, no package installs, no missing repos. Everything the
- * app needs ships inside the APK.
+ * <p>If extraction fails, the user sees three buttons:
+ * <ul>
+ *   <li><b>Retry</b> — try extraction again</li>
+ *   <li><b>Save Logs</b> — collect diagnostic info for debugging</li>
+ *   <li><b>Skip</b> — go to Home anyway (limited functionality without rootfs)</li>
+ * </ul>
  */
 public final class EnvironmentInitializer extends Activity {
 
@@ -32,6 +34,8 @@ public final class EnvironmentInitializer extends Activity {
     private TextView percentText;
     private Button btnContinue;
     private Button btnRetry;
+    private Button btnSaveLogs;
+    private Button btnSkip;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -43,19 +47,27 @@ public final class EnvironmentInitializer extends Activity {
         percentText = findViewById(R.id.percentText);
         btnContinue = findViewById(R.id.btnContinue);
         btnRetry = findViewById(R.id.btnRetry);
+        btnSaveLogs = findViewById(R.id.btnSaveLogs);
+        btnSkip = findViewById(R.id.btnSkip);
 
-        btnContinue.setOnClickListener(v -> {
-            startActivity(new Intent(this, HomeActivity.class));
-            finish();
-        });
+        btnContinue.setOnClickListener(v -> goToHome());
         btnRetry.setOnClickListener(v -> startExtraction());
+        btnSaveLogs.setOnClickListener(v -> saveLogs());
+        btnSkip.setOnClickListener(v -> goToHome());
 
         startExtraction();
+    }
+
+    private void goToHome() {
+        startActivity(new Intent(this, HomeActivity.class));
+        finish();
     }
 
     private void startExtraction() {
         btnRetry.setVisibility(View.GONE);
         btnContinue.setVisibility(View.GONE);
+        btnSaveLogs.setVisibility(View.GONE);
+        btnSkip.setVisibility(View.GONE);
         progressBar.setProgress(0);
         statusText.setText("Extracting bundled environment…");
         percentText.setText("0%");
@@ -88,19 +100,65 @@ public final class EnvironmentInitializer extends Activity {
                                     + imageFs.getFormattedVersion() + ")");
                             btnContinue.setVisibility(View.VISIBLE);
                         } else {
-                            statusText.setText("Extraction failed. Check storage space "
+                            showFailureButtons("Extraction failed. Check storage space "
                                     + "(need ~500 MB free) and retry.");
-                            btnRetry.setVisibility(View.VISIBLE);
                         }
                     });
                 }
             });
             if (!ok) {
                 runOnUiThread(() -> {
-                    statusText.setText("Extraction failed. Tap Retry.");
-                    btnRetry.setVisibility(View.VISIBLE);
+                    showFailureButtons("Extraction failed. Tap Retry, Save Logs, or Skip.");
                 });
             }
+        }).start();
+    }
+
+    /**
+     * Shows the Retry + Save Logs + Skip buttons when extraction fails.
+     */
+    private void showFailureButtons(String message) {
+        statusText.setText(message);
+        btnRetry.setVisibility(View.VISIBLE);
+        btnSaveLogs.setVisibility(View.VISIBLE);
+        btnSkip.setVisibility(View.VISIBLE);
+    }
+
+    /**
+     * Collects all diagnostic logs and saves to /sdcard/Download/WayLandIE/logs/.
+     */
+    private void saveLogs() {
+        Toast.makeText(this, "Collecting logs…", Toast.LENGTH_SHORT).show();
+        new Thread(() -> {
+            final File logFile = LogCollector.collect(this, null);
+            runOnUiThread(() -> {
+                if (logFile != null && logFile.exists()) {
+                    new AlertDialog.Builder(this)
+                            .setTitle("Logs saved")
+                            .setMessage("Log file saved to:\n"
+                                    + logFile.getAbsolutePath()
+                                    + "\n\nSize: " + logFile.length() + " bytes\n\n"
+                                    + "Share it so I can diagnose the extraction failure.")
+                            .setPositiveButton("Share", (d, w) -> {
+                                Intent shareIntent = new Intent(Intent.ACTION_SEND);
+                                shareIntent.setType("text/plain");
+                                shareIntent.putExtra(Intent.EXTRA_SUBJECT,
+                                        "WayLandIE diagnostic log");
+                                shareIntent.putExtra(Intent.EXTRA_STREAM,
+                                        androidx.core.content.FileProvider.getUriForFile(
+                                                this,
+                                                getPackageName() + ".fileprovider",
+                                                logFile));
+                                shareIntent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                                startActivity(Intent.createChooser(shareIntent, "Share log file"));
+                            })
+                            .setNegativeButton("OK", null)
+                            .show();
+                } else {
+                    Toast.makeText(this, "Failed to save logs.",
+                            Toast.LENGTH_LONG).show();
+                }
+            });
         }).start();
     }
 }

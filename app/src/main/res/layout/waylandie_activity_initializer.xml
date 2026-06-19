@@ -67,8 +67,28 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:text="Retry"
-        android:background="@color/bg_card_active"
+        android:background="@color/accent"
         android:textColor="@color/text_primary"
+        android:padding="16dp"
+        android:visibility="gone" />
+
+    <Button
+        android:id="@+id/btnSaveLogs"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Save Logs (for debugging)"
+        android:background="@color/danger"
+        android:textColor="@color/text_primary"
+        android:padding="16dp"
+        android:visibility="gone" />
+
+    <Button
+        android:id="@+id/btnSkip"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Skip — go to Home anyway"
+        android:background="@color/bg_card_active"
+        android:textColor="@color/text_secondary"
         android:padding="16dp"
         android:visibility="gone" />
 

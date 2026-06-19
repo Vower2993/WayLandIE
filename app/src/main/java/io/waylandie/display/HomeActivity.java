@@ -83,6 +83,7 @@ public final class HomeActivity extends Activity {
     private Button btnStartDisplay;
     private Button btnStopDisplay;
     private Button btnSettings;
+    private Button btnSaveLogs;
     private Button btnSetupWizard;
     private Button btnOpenTerminal;
     private Button btnAbout;
@@ -147,6 +148,7 @@ public final class HomeActivity extends Activity {
         btnStartDisplay = findViewById(R.id.btnStartDisplay);
         btnStopDisplay = findViewById(R.id.btnStopDisplay);
         btnSettings = findViewById(R.id.btnSettings);
+        btnSaveLogs = findViewById(R.id.btnSaveLogs);
         btnSetupWizard = findViewById(R.id.btnSetupWizard);
         btnOpenTerminal = findViewById(R.id.btnOpenTerminal);
         btnAbout = findViewById(R.id.btnAbout);
@@ -160,6 +162,7 @@ public final class HomeActivity extends Activity {
         btnStopDisplay.setOnClickListener(v -> stopDisplay());
         btnSettings.setOnClickListener(v ->
                 startActivity(new Intent(this, SettingsActivity.class)));
+        btnSaveLogs.setOnClickListener(v -> saveLogs());
         btnSetupWizard.setOnClickListener(v ->
                 startActivity(new Intent(this, SetupWizardActivity.class)));
         btnOpenTerminal.setOnClickListener(v -> openTerminal());
@@ -508,6 +511,61 @@ public final class HomeActivity extends Activity {
         // No external terminal — open the bundled rootfs shell via ProotRunner.
         // For now, just toast. A full in-app terminal is future work.
         toast("In-app terminal coming soon. Use the display activity to see game output.");
+    }
+
+    /**
+     * Collects all diagnostic logs + system state and saves to
+     * /sdcard/Download/WayLandIE/logs/waylandie-log-<timestamp>.txt.
+     * Also offers to share via Android share intent.
+     */
+    private void saveLogs() {
+        toast("Collecting logs…");
+        new Thread(() -> {
+            // Build the in-app log buffer string
+            StringBuilder logBuf = new StringBuilder();
+            for (String l : logBuffer) {
+                logBuf.append(l).append('\n');
+            }
+            final File logFile = io.waylandie.display.shared.util.LogCollector
+                    .collect(this, logBuf.toString());
+            runOnUiThread(() -> {
+                if (logFile != null && logFile.exists()) {
+                    log("Logs saved to: " + logFile.getAbsolutePath());
+                    // Offer to share
+                    new AlertDialog.Builder(this)
+                            .setTitle("Logs saved")
+                            .setMessage("Log file saved to:\n"
+                                    + logFile.getAbsolutePath()
+                                    + "\n\nSize: " + logFile.length() + " bytes\n\n"
+                                    + "Share it via email, message, or upload?")
+                            .setPositiveButton("Share", (d, w) -> {
+                                Intent shareIntent = new Intent(Intent.ACTION_SEND);
+                                shareIntent.setType("text/plain");
+                                shareIntent.putExtra(Intent.EXTRA_SUBJECT,
+                                        "WayLandIE diagnostic log");
+                                shareIntent.putExtra(Intent.EXTRA_TEXT,
+                                        "WayLandIE log file attached.");
+                                // Use FileProvider for secure sharing
+                                androidx.core.content.FileProvider.getUriForFile(
+                                        this,
+                                        getPackageName() + ".fileprovider",
+                                        logFile);
+                                shareIntent.putExtra(Intent.EXTRA_STREAM,
+                                        androidx.core.content.FileProvider.getUriForFile(
+                                                this,
+                                                getPackageName() + ".fileprovider",
+                                                logFile));
+                                shareIntent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                                startActivity(Intent.createChooser(shareIntent, "Share log file"));
+                            })
+                            .setNegativeButton("OK", null)
+                            .show();
+                } else {
+                    toast("Failed to save logs. Check storage permission.");
+                    log("Log save FAILED — check MANAGE_EXTERNAL_STORAGE permission");
+                }
+            });
+        }).start();
     }
 
     private void showAbout() {
