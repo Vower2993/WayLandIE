@@ -246,8 +246,11 @@ public final class HomeActivity extends Activity {
 
         startDisplay();
 
-        ProotRunner runner = new ProotRunner(this);
-        if (!runner.isReady()) {
+        // Use WineRunner (glibc-native, no proot) for game launch.
+        // Falls back to ProotRunner if WineRunner fails to initialize.
+        io.waylandie.display.runtime.environment.WineRunner wineRunner =
+                new io.waylandie.display.runtime.environment.WineRunner(this);
+        if (!wineRunner.isReady()) {
             new AlertDialog.Builder(this)
                     .setTitle("Environment not ready")
                     .setMessage("The bundled Linux environment hasn't been extracted yet. "
@@ -257,11 +260,11 @@ public final class HomeActivity extends Activity {
             return;
         }
 
-        log("Launching " + exePath + " via ProotRunner (gamescope=" + gamescope
-                + ", proton=" + useProton + ")…");
+        log("Launching " + exePath + " via WineRunner (glibc-native, gamescope="
+                + gamescope + ", proton=" + useProton + ")…");
         try {
             String[] extraArgs = gamescope ? new String[]{"--gamescope"} : new String[0];
-            Process p = runner.execWine(exePath, extraArgs, useProton);
+            Process p = wineRunner.execWine(exePath, extraArgs, useProton);
             log("Wine process started (pid=" + getPid(p) + ")");
         } catch (IOException error) {
             log("Launch failed: " + error.getMessage());
