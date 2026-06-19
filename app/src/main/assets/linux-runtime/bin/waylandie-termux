@@ -1,0 +1,63 @@
+#!/data/data/com.termux/files/usr/bin/sh
+# waylandie-termux — wrapper for running commands in the WayLandIE
+# Termux-native (bionic) environment with the right GPU + audio env.
+#
+# This is the bionic equivalent of waylandie-proot. Since termux-native
+# has no proot to wrap, this script just sets up the environment and
+# execs the user's command directly.
+#
+# Environment set up:
+#   - Sources $PREFIX/share/waylandie/backend.conf
+#   - Sources $PREFIX/share/waylandie/env-turnip.sh if present (Turnip ICD)
+#   - Sources $PREFIX/share/waylandie/env-dxvk.sh if present (Armec DXVK)
+#   - Sources $PREFIX/share/waylandie/env-proton.sh if present (Armec Proton)
+#   - Sources $PREFIX/share/waylandie/env-fex.sh if present (FEX-Emu)
+#   - Exports WAYLANDIE_BRIDGE_* and zero-copy env vars
+#   - Starts PulseAudio if not running (for audio bridge)
+#
+# Usage:
+#   waylandie-termux bash                # interactive shell
+#   waylandie-termux waylandie-doctor    # run a helper
+#   waylandie-termux bash -lc 'vkcube --wsi wayland'
+
+PREFIX="${WAYLANDIE_PREFIX:-/data/data/com.termux/files/usr}"
+
+# Load backend config
+if [ -f "$PREFIX/share/waylandie/backend.conf" ]; then
+    . "$PREFIX/share/waylandie/backend.conf"
+fi
+
+# Source optional driver env files
+for envfile in env-turnip.sh env-dxvk.sh env-proton.sh env-fex.sh; do
+    if [ -f "$PREFIX/share/waylandie/$envfile" ]; then
+        . "$PREFIX/share/waylandie/$envfile"
+    fi
+done
+
+# Bridge env — abstract socket for termux-native (NOT proot, so we can see it)
+export WAYLANDIE_BRIDGE_SOCKET="${WAYLANDIE_BRIDGE_SOCKET:-waylandie.display.bridge.v1}"
+export WAYLANDIE_BRIDGE_PORT="${WAYLANDIE_BRIDGE_PORT:-57391}"
+export WAYLANDIE_BRIDGE_PREFER="${WAYLANDIE_BRIDGE_PREFER:-abstract}"
+export WAYLANDIE_FINAL_COPY="${WAYLANDIE_FINAL_COPY:-forbidden}"
+export WAYLANDIE_AUDIO_PORT="${WAYLANDIE_AUDIO_PORT:-57392}"
+export _WAYLANDIE_ACTIVE=1
+
+# Wayland env
+export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-waylandie}"
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-$PREFIX/tmp}"
+mkdir -p "$XDG_RUNTIME_DIR" 2>/dev/null
+
+# Mesa Turnip / present mode hints for zero-copy
+export MESA_VK_WSI_PRESENT_MODE="${MESA_VK_WSI_PRESENT_MODE:-immediate}"
+export RADV_PERFTEST="${RADV_PERFTEST:-nooverflow}"
+
+# Start PulseAudio in background if not running (audio bridge)
+if ! pgrep -x pulseaudio >/dev/null 2>&1; then
+    if [ -x "$PREFIX/bin/pulseaudio" ]; then
+        "$PREFIX/bin/pulseaudio" --start --disallow-exit --exit-idle-time=-1 2>/dev/null &
+        sleep 1
+    fi
+fi
+
+# Exec the user's command
+exec "$@"

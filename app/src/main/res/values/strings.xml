@@ -1,0 +1,124 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">WayLandIE</string>
+    <string name="app_subtitle">Linux &amp; Steam on Android — no root</string>
+
+    <!-- Home screen -->
+    <string name="home_title">WayLandIE Bridge</string>
+    <string name="home_bridge_status_label">Bridge status</string>
+    <string name="home_bridge_status_unknown">Unknown</string>
+    <string name="home_bridge_status_listening">Listening — socket ready</string>
+    <string name="home_bridge_status_off">Off — display app not started</string>
+    <string name="home_bridge_status_error">Error: %1$s</string>
+    <string name="home_start_display">Start display</string>
+    <string name="home_stop_display">Stop display</string>
+    <string name="home_open_terminal">Open Termux</string>
+    <string name="home_run_setup_wizard">Run setup wizard</string>
+    <string name="home_launch_steam">Launch Steam session</string>
+    <string name="home_launch_game">Launch a Windows game</string>
+    <string name="home_install_driver">Install a driver (DXVK / Turnip / FEX)</string>
+    <string name="home_driver_slots">Driver slots</string>
+    <string name="home_about">About / zero-copy path</string>
+    <string name="home_socket_label">Bridge socket:</string>
+    <string name="home_socket_value">waylandie.display.bridge.v1</string>
+
+    <!-- Setup wizard -->
+    <string name="setup_title">No-root setup</string>
+    <string name="setup_intro">
+        WayLandIE needs Termux + a small Debian proot to run Linux / Steam games.
+        Nothing here requires root. The wizard will walk you through each step,
+        trigger it inside Termux for you, and then verify it succeeded.
+    </string>
+    <string name="setup_step_install_termux">1. Install Termux</string>
+    <string name="setup_step_install_termux_help">
+        Termux is the no-root Linux shell for Android. Tap below to open the
+        Play Store / F-Droid entry, or install the APK from termux.dev.
+    </string>
+    <string name="setup_step_grant_storage">2. Grant Termux storage access</string>
+    <string name="setup_step_grant_storage_help">
+        Termux needs storage permission so WayLandIE can copy installer scripts
+        into the shared Downloads folder. We will run `termux-setup-storage`
+        for you.
+    </string>
+    <string name="setup_step_install_proot">3. Install proot-distro + Debian</string>
+    <string name="setup_step_install_proot_help">
+        Installs proot-distro, then `proot-distro install debian`. This pulls
+        ~80 MB. No root needed — proot runs as a normal user.
+    </string>
+    <string name="setup_step_push_scripts">4. Push WayLandIE scripts</string>
+    <string name="setup_step_push_scripts_help">
+        Copies the WayLandIE linux-runtime installer scripts into
+        ~/Downloads/WayLandIE so the Debian proot can see them.
+    </string>
+    <string name="setup_step_install_waylandie">5. Install WayLandIE inside Debian</string>
+    <string name="setup_step_install_waylandie_help">
+        Logs into the Debian proot and runs `sh install.sh --backend proot`.
+        Installs Wayland, mesa, Vulkan loader, weston-simple-egl, gamescope.
+    </string>
+    <string name="setup_step_start_display">6. Start the WayLandIE display</string>
+    <string name="setup_step_start_display_help">
+        Starts the bridge on the Android side so the Debian proot can connect
+        to it. The display activity opens and shows the presenter surface.
+    </string>
+    <string name="setup_step_run_doctor">7. Run waylandie-doctor</string>
+    <string name="setup_step_run_doctor_help">
+        Final sanity check: socket exists, Vulkan loader finds a driver, and a
+        test render of vkcube completes. If doctor passes, you are ready.
+    </string>
+
+    <string name="setup_action_run">Run this step</string>
+    <string name="setup_action_open_termux">Open Termux</string>
+    <string name="setup_action_install_termux">Install Termux</string>
+    <string name="setup_action_mark_done">I did this — verify</string>
+    <string name="setup_action_next">Next step</string>
+    <string name="setup_action_done">Finish</string>
+    <string name="setup_state_pending">Pending</string>
+    <string name="setup_state_running">Running…</string>
+    <string name="setup_state_done">Done</string>
+    <string name="setup_state_failed">Failed</string>
+    <string name="setup_state_skipped">Skipped</string>
+
+    <!-- Termux bridge -->
+    <string name="termux_not_installed">
+        Termux is not installed. Install it from F-Droid (termux.dev) and try
+        again. The Play Store version is unmaintained.
+    </string>
+
+    <!-- Driver slots -->
+    <string name="drivers_title">Driver slots</string>
+    <string name="drivers_intro">
+        Turnip (Mesa Vulkan for Adreno), DXVK (DirectX → Vulkan), and Qualcomm
+        proprietary driver slots are managed inside Debian. Tap a slot to
+        activate it for the next Steam launch.
+    </string>
+    <string name="drivers_open_in_termux">Open driver manager in Termux</string>
+
+    <!-- About / zero-copy -->
+    <string name="about_title">About — the zero-copy path</string>
+    <string name="about_body">
+        WayLandIE preserves the original GPU-first zero-copy path:
+
+        Linux Wayland client (game / gamescope) → dmabuf fd →
+        waylandie.display.bridge.v1 abstract socket →
+        Android app imports the dmabuf as AHardwareBuffer via
+        VK_ANDROID_external_memory_android_hardware_buffer →
+        presented through SurfaceControl with USAGE_COMPOSITOR_OVERLAY.
+
+        No CPU copy on the hot path. proot does NOT break this because:
+        • dmabuf fds are kernel-level; proot syscall translation does not
+          affect SCM_RIGHTS fd passing.
+        • Abstract sockets are not filesystem-based, so they work across
+          proot.
+        • AHardwareBuffer is an Android framework API; no root needed.
+
+        If `final-copy=forbidden` is set (default), the bridge will refuse to
+        fall back to CPU-copy paths and will report an error instead of
+        silently degrading.
+    </string>
+
+    <!-- Common -->
+    <string name="ok">OK</string>
+    <string name="cancel">Cancel</string>
+    <string name="copy">Copy</string>
+    <string name="copied">Copied to clipboard</string>
+</resources>

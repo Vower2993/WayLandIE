@@ -1,0 +1,400 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/bg_dark"
+    android:fillViewport="true">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="20dp">
+
+        <!-- App header -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/app_name"
+            android:textColor="@color/text_primary"
+            android:textSize="28sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/app_subtitle"
+            android:textColor="@color/text_secondary"
+            android:textSize="13sp"
+            android:layout_marginBottom="20dp" />
+
+        <!-- HERO CARD: primary action = pick .exe -->
+        <LinearLayout style="@style/HeroCard"
+            android:orientation="vertical"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Play a game"
+                android:textColor="@color/text_primary"
+                android:textSize="22sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Pick any Windows .exe from your Downloads folder. It launches automatically through WaylandIE + Wine."
+                android:textColor="@color/text_secondary"
+                android:textSize="13sp"
+                android:lineSpacingExtra="2dp"
+                android:layout_marginTop="4dp"
+                android:layout_marginBottom="16dp" />
+
+            <!-- Selected exe path display -->
+            <TextView
+                android:id="@+id/selectedExePath"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="No game selected"
+                android:textColor="@color/accent_secondary"
+                android:fontFamily="monospace"
+                android:textSize="12sp"
+                android:maxLines="3"
+                android:ellipsize="middle"
+                android:background="@color/bg_dark"
+                android:padding="10dp"
+                android:layout_marginBottom="12dp" />
+
+            <!-- Gamescope toggle -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:background="@color/bg_dark"
+                android:padding="12dp"
+                android:layout_marginBottom="8dp">
+
+                <CheckBox
+                    android:id="@+id/chkGamescope"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:buttonTint="@color/accent" />
+
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:orientation="vertical"
+                    android:layout_marginStart="8dp">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="Wrap in Gamescope"
+                        android:textColor="@color/text_primary"
+                        android:textSize="14sp"
+                        android:textStyle="bold" />
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="Nested compositor, forces fullscreen 1280x720@60"
+                        android:textColor="@color/text_secondary"
+                        android:textSize="11sp" />
+                </LinearLayout>
+            </LinearLayout>
+
+            <!-- Use Proton toggle -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:background="@color/bg_dark"
+                android:padding="12dp"
+                android:layout_marginBottom="14dp">
+
+                <CheckBox
+                    android:id="@+id/chkUseProton"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:buttonTint="@color/accent" />
+
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:orientation="vertical"
+                    android:layout_marginStart="8dp">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="Use Armec Proton"
+                        android:textColor="@color/text_primary"
+                        android:textSize="14sp"
+                        android:textStyle="bold" />
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="Run game through Armec Proton instead of bare Wine. Install Proton via Settings tab first."
+                        android:textColor="@color/text_secondary"
+                        android:textSize="11sp" />
+                </LinearLayout>
+            </LinearLayout>
+
+            <!-- Primary CTA: Select .exe -->
+            <Button
+                android:id="@+id/btnPickExe"
+                style="@style/HeroButton"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Select .exe to launch" />
+
+            <!-- Auto-launch button (visible once exe picked) -->
+            <Button
+                android:id="@+id/btnLaunchGame"
+                style="@style/HeroButton"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Launch game"
+                android:visibility="gone" />
+        </LinearLayout>
+
+        <!-- STEAM: prominent separate button -->
+        <LinearLayout style="@style/Card"
+            android:orientation="vertical"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content">
+
+            <TextView style="@style/CardTitle"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Steam" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Boot directly into Steam Big Picture. ARM64 client + FEX-Emu for x86 games. No Snap, no root."
+                android:textColor="@color/text_secondary"
+                android:textSize="12sp"
+                android:lineSpacingExtra="2dp"
+                android:layout_marginBottom="12dp" />
+
+            <Button
+                android:id="@+id/btnLaunchSteam"
+                style="@style/SteamButton"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Launch Steam" />
+        </LinearLayout>
+
+        <!-- Bridge status -->
+        <LinearLayout style="@style/Card"
+            android:orientation="vertical"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content">
+
+            <TextView style="@style/CardTitle"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="System status" />
+
+            <!-- Bridge row -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:layout_marginBottom="6dp">
+
+                <View
+                    android:id="@+id/bridgeStatusDot"
+                    android:layout_width="10dp"
+                    android:layout_height="10dp"
+                    android:background="@color/text_tertiary"
+                    android:layout_marginEnd="8dp" />
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_weight="1"
+                    android:layout_height="wrap_content"
+                    android:text="Bridge"
+                    android:textColor="@color/text_secondary"
+                    android:textSize="13sp" />
+
+                <TextView
+                    android:id="@+id/bridgeStatusText"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/home_bridge_status_unknown"
+                    android:textColor="@color/text_secondary"
+                    android:textSize="13sp" />
+            </LinearLayout>
+
+            <!-- Controller row -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:layout_marginBottom="6dp">
+
+                <View
+                    android:id="@+id/controllerStatusDot"
+                    android:layout_width="10dp"
+                    android:layout_height="10dp"
+                    android:background="@color/text_tertiary"
+                    android:layout_marginEnd="8dp" />
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_weight="1"
+                    android:layout_height="wrap_content"
+                    android:text="Controller"
+                    android:textColor="@color/text_secondary"
+                    android:textSize="13sp" />
+
+                <TextView
+                    android:id="@+id/controllerStatusText"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="none"
+                    android:textColor="@color/text_secondary"
+                    android:textSize="13sp" />
+            </LinearLayout>
+
+            <!-- Audio row -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:layout_marginBottom="10dp">
+
+                <View
+                    android:id="@+id/audioStatusDot"
+                    android:layout_width="10dp"
+                    android:layout_height="10dp"
+                    android:background="@color/text_tertiary"
+                    android:layout_marginEnd="8dp" />
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_weight="1"
+                    android:layout_height="wrap_content"
+                    android:text="Audio"
+                    android:textColor="@color/text_secondary"
+                    android:textSize="13sp" />
+
+                <TextView
+                    android:id="@+id/audioStatusText"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="off"
+                    android:textColor="@color/text_secondary"
+                    android:textSize="13sp" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal">
+
+                <Button
+                    android:id="@+id/btnStartDisplay"
+                    style="@style/SecondaryButton"
+                    android:layout_width="0dp"
+                    android:layout_weight="1"
+                    android:layout_height="wrap_content"
+                    android:layout_marginEnd="6dp"
+                    android:text="@string/home_start_display" />
+
+                <Button
+                    android:id="@+id/btnStopDisplay"
+                    style="@style/SecondaryButton"
+                    android:layout_width="0dp"
+                    android:layout_weight="1"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="6dp"
+                    android:text="@string/home_stop_display" />
+            </LinearLayout>
+
+            <TextView
+                android:id="@+id/nativeStatusText"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:textColor="@color/text_tertiary"
+                android:textSize="11sp"
+                android:fontFamily="monospace"
+                android:layout_marginTop="6dp" />
+        </LinearLayout>
+
+        <!-- Secondary actions -->
+        <LinearLayout style="@style/Card"
+            android:orientation="vertical"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content">
+
+            <Button
+                android:id="@+id/btnSettings"
+                style="@style/PrimaryButton"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Settings — Drivers &amp; Wrappers" />
+
+            <Button
+                android:id="@+id/btnSetupWizard"
+                style="@style/SecondaryButton"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/home_run_setup_wizard" />
+
+            <Button
+                android:id="@+id/btnOpenTerminal"
+                style="@style/SecondaryButton"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/home_open_terminal" />
+
+            <Button
+                android:id="@+id/btnAbout"
+                style="@style/SecondaryButton"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/home_about" />
+        </LinearLayout>
+
+        <!-- Bridge log -->
+        <LinearLayout style="@style/Card"
+            android:orientation="vertical"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content">
+
+            <TextView style="@style/CardTitle"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Activity log" />
+
+            <ScrollView
+                android:layout_width="match_parent"
+                android:layout_height="160dp"
+                android:background="@color/bg_dark">
+
+                <TextView
+                    android:id="@+id/logText"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:fontFamily="monospace"
+                    android:padding="8dp"
+                    android:textColor="@color/text_tertiary"
+                    android:textSize="11sp"
+                    android:text="(no events yet)" />
+            </ScrollView>
+        </LinearLayout>
+    </LinearLayout>
+</ScrollView>

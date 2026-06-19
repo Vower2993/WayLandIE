@@ -1,0 +1,56 @@
+#!/bin/sh
+# waylandie-import-qcom-adreno-driver — import a Qualcomm proprietary
+# Adreno driver package into a named slot for a Steam AppID.
+#
+# Qualcomm driver packages are NOT shipped by WayLandIE. The user must
+# legally obtain one (e.g. from the Qualcomm Linux release).
+#
+# Usage:
+#   waylandie-import-qcom-adreno-driver --name qcom-251009 --appid 287390 --activate ~/Downloads/qcom-adreno-0.1_arm64.deb
+
+set -e
+NAME=""
+APPID=""
+ARCHIVE=""
+ACTIVATE=false
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --name)   NAME="$2"; shift 2 ;;
+        --appid)  APPID="$2"; shift 2 ;;
+        --activate) ARCHIVE="$2"; ACTIVATE=true; shift 2 ;;
+        *) echo "unknown arg: $1" >&2; exit 2 ;;
+    esac
+done
+
+[ -z "$NAME" ]   && { echo "--name required"   >&2; exit 2; }
+[ -z "$APPID" ]  && { echo "--appid required"  >&2; exit 2; }
+[ -z "$ARCHIVE" ] && { echo "--activate FILE required" >&2; exit 2; }
+
+ROOT="${XDG_DATA_HOME:-$HOME/.local/share}/waylandie/steam-profiles/$APPID/qcom/$NAME"
+mkdir -p "$ROOT"
+
+case "$ARCHIVE" in
+    *.deb)
+        # Extract .deb contents: ar x to get data.tar, then untar.
+        TMP=$(mktemp -d)
+        cp "$ARCHIVE" "$TMP/"
+        (cd "$TMP" && ar x "$(basename "$ARCHIVE")" && tar -xf data.tar.* -C "$ROOT")
+        rm -rf "$TMP"
+        ;;
+    *.tar.gz|*.tgz)  tar -xzf "$ARCHIVE" -C "$ROOT" ;;
+    *.tar)           tar -xf  "$ARCHIVE" -C "$ROOT" ;;
+    *)               tar -xf  "$ARCHIVE" -C "$ROOT" 2>/dev/null || unzip -q "$ARCHIVE" -d "$ROOT" ;;
+esac
+echo "imported Qualcomm Adreno driver '$NAME' for AppID $APPID → $ROOT"
+
+ICD=$(find "$ROOT" -name "*icd*.json" -type f 2>/dev/null | head -1)
+if [ -n "$ICD" ]; then
+    echo "ICD JSON: $ICD"
+    if [ "$ACTIVATE" = "true" ]; then
+        echo "to activate, add to Steam Launch Options:"
+        echo "  VK_ICD_FILENAMES=$ICD %command%"
+    fi
+else
+    echo "WARNING: no ICD JSON found in slot. Activate manually."
+fi
