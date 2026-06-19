@@ -104,7 +104,16 @@ public final class LogCollector {
             }
             out.println("  Bin dir:  " + imageFs.getBinDir() + " (exists=" + imageFs.getBinDir().exists() + ")");
             out.println("  Lib dir:  " + imageFs.getLibDir() + " (exists=" + imageFs.getLibDir().exists() + ")");
+            out.println("  Etc dir:  " + imageFs.getEtcDir() + " (exists=" + imageFs.getEtcDir().exists() + ")");
+            out.println("  Share dir:" + imageFs.getShareDir() + " (exists=" + imageFs.getShareDir().exists() + ")");
+            out.println("  Opt dir:  " + imageFs.getOptDir() + " (exists=" + imageFs.getOptDir().exists() + ")");
             out.println("  Wine dir: " + imageFs.getWineDir() + " (exists=" + imageFs.getWineDir().exists() + ")");
+            if (!imageFs.isValid()) {
+                out.println("  --- Validity detail ---");
+                for (String line : imageFs.describeValidity().split("\n")) {
+                    out.println("    " + line);
+                }
+            }
             if (imageFs.getLastError() != null) {
                 out.println("  LAST ERROR:");
                 for (String line : imageFs.getLastError().split("\n")) {

@@ -53,9 +53,45 @@ public final class ImageFsManager {
     public File getRootDir() { return rootDir; }
     public File getBinDir() { return new File(rootDir, "usr/bin"); }
     public File getLibDir() { return new File(rootDir, "usr/lib"); }
-    public File getEtcDir() { return new File(rootDir, "usr/etc"); }
+
+    /**
+     * Returns the /etc directory of the rootfs.
+     *
+     * <p>Debian {@code debootstrap --variant=minbase} produces a top-level
+     * {@code /etc} directory (NOT {@code /usr/etc}). Modern merged-/usr
+     * systems may symlink {@code /etc → /usr/etc}, but the rootfs built by
+     * {@code tools/build-imagefs.sh} uses the non-merged layout — see
+     * {@code $ROOTFS_DIR/etc/apt/sources.list} in the build script.
+     *
+     * <p>PRE-BUG: this method always returned {@code new File(rootDir,
+     * "usr/etc")}, which never existed on a real debootstrap rootfs. This
+     * caused {@link #isValid()} to return false even when the rootfs was
+     * perfectly healthy, blocking Continue and triggering the
+     * "Extraction reported success but rootfs is invalid" error path.
+     *
+     * <p>FIX: try {@code usr/etc} first (for merged-/usr layouts), then
+     * fall back to top-level {@code etc} (for traditional debootstrap
+     * layouts). Callers that need to read a specific file should use
+     * {@link #findEtcFile(String)} to handle both layouts.
+     */
+    public File getEtcDir() {
+        File usrEtc = new File(rootDir, "usr/etc");
+        if (usrEtc.isDirectory()) return usrEtc;
+        return new File(rootDir, "etc");
+    }
+
     public File getShareDir() { return new File(rootDir, "usr/share"); }
     public File getTmpDir() { return new File(rootDir, "usr/tmp"); }
+
+    /**
+     * Returns the /opt directory of the rootfs.
+     *
+     * <p>The build script creates {@code /opt/proton}, {@code /opt/dxvk},
+     * {@code /opt/turnip}, {@code /opt/fex}. Wine is intentionally NOT
+     * bundled (commit 798ff41: "Proton-only architecture"). So
+     * {@code /opt/wine} not existing is BY DESIGN and should not cause
+     * {@link #isValid()} to fail.
+     */
     public File getOptDir() { return new File(rootDir, "opt"); }
     public File getHomeDir() { return new File(rootDir, "home/xuser"); }
     public File getWineDir() { return new File(rootDir, "opt/wine"); }
@@ -63,6 +99,17 @@ public final class ImageFsManager {
 
     public File getConfigDir() { return new File(rootDir, ".waylandie"); }
     public File getVersionFile() { return new File(getConfigDir(), ".img_version"); }
+
+    /**
+     * Returns the first existing path among {@code usr/<sub>} and
+     * {@code <sub>} (for non-merged-/usr rootfs). Used for finding
+     * specific files like {@code etc/vulkan/icd.d/freedreno_icd.json}.
+     */
+    public File findEtcFile(String relativePath) {
+        File usrEtc = new File(new File(rootDir, "usr/etc"), relativePath);
+        if (usrEtc.exists()) return usrEtc;
+        return new File(new File(rootDir, "etc"), relativePath);
+    }
 
     public boolean isValid() {
         return rootDir.isDirectory()
@@ -72,6 +119,31 @@ public final class ImageFsManager {
                 && getEtcDir().isDirectory()
                 && getShareDir().isDirectory()
                 && getOptDir().isDirectory();
+    }
+
+    /**
+     * Returns a human-readable string listing which {@link #isValid()}
+     * checks pass and which fail. Used by {@code LogCollector} and
+     * {@code EnvironmentInitializer} so we never have to guess which
+     * directory is missing again.
+     */
+    public String describeValidity() {
+        StringBuilder sb = new StringBuilder();
+        sb.append("rootDir.isDirectory()=").append(rootDir.isDirectory())
+          .append(" (").append(rootDir).append(")\n");
+        sb.append("getVersionFile().exists()=").append(getVersionFile().exists())
+          .append(" (").append(getVersionFile()).append(")\n");
+        sb.append("getBinDir().isDirectory()=").append(getBinDir().isDirectory())
+          .append(" (").append(getBinDir()).append(")\n");
+        sb.append("getLibDir().isDirectory()=").append(getLibDir().isDirectory())
+          .append(" (").append(getLibDir()).append(")\n");
+        sb.append("getEtcDir().isDirectory()=").append(getEtcDir().isDirectory())
+          .append(" (").append(getEtcDir()).append(")\n");
+        sb.append("getShareDir().isDirectory()=").append(getShareDir().isDirectory())
+          .append(" (").append(getShareDir()).append(")\n");
+        sb.append("getOptDir().isDirectory()=").append(getOptDir().isDirectory())
+          .append(" (").append(getOptDir()).append(")");
+        return sb.toString();
     }
 
     public boolean isUpToDate() {
