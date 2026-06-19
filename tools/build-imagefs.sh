@@ -137,10 +137,34 @@ chroot_run apt-get install -y --no-install-recommends \
 chroot_run locale-gen en_US.UTF-8 2>/dev/null || true
 
 # ---------------------------------------------------------------------
-# 3. Install box86 + box64 (x86/x64 emulators — needed for Proton)
+# 3. Install box64 (BIONIC build — Android-native, no glibc needed)
 # ---------------------------------------------------------------------
-echo "[3/7] Installing box86 + box64…"
-chroot_run bash -c 'mkdir -p /usr/local/bin && cd /tmp && wget -qO box86.tgz "https://github.com/ptitSeb/box86/releases/latest/download/box86-Rootfs-aarch64.tgz" && tar -xzf box86.tgz -C /usr/local/bin --strip-components=1 && chmod +x /usr/local/bin/box86 2>/dev/null && echo "  box86 installed" || echo "  box86 skipped"; wget -qO box64.tgz "https://github.com/ptitSeb/box64/releases/latest/download/box64-Rootfs-aarch64.tgz" && tar -xzf box64.tgz -C /usr/local/bin --strip-components=1 && chmod +x /usr/local/bin/box64 2>/dev/null && echo "  box64 installed" || echo "  box64 skipped"; rm -f box86.tgz box64.tgz' 2>&1 | tail -5
+# We use the BIONIC box64 from StevenMXZ/Winlator-Ludashi (MIT license).
+# This runs directly on Android without a glibc linker wrapper — same
+# architecture as winlator. box64 then loads glibc libraries from this
+# rootfs for the emulated Wine process.
+# NOTE: box64 is only needed for x86_64 Wine. arm64ec Wine runs natively
+# and uses FEXCore (libarm64ecfex.dll) for x86_64 game code instead.
+echo "[3/7] Installing bionic box64 (Android-native, for x86_64 Wine fallback)…"
+chroot_run bash -c 'mkdir -p /usr/bin && cd /tmp && \
+    wget -qO box64.tzst "https://github.com/StevenMXZ/Winlator-Ludashi/raw/main/app/src/main/assets/box64/box64-0.4.1.tzst" && \
+    if command -v zstd >/dev/null 2>&1; then \
+        zstd -d box64.tzst -o box64.tar && tar -xf box64.tar -C / && chmod +x /usr/bin/box64 && echo "  bionic box64 installed (zstd)"; \
+    else \
+        apt-get install -y -qq zstd && zstd -d box64.tzst -o box64.tar && tar -xf box64.tar -C / && chmod +x /usr/bin/box64 && echo "  bionic box64 installed (zstd apt)"; \
+    fi || echo "  box64 install failed — arm64ec Wine will still work without it"; \
+    rm -f box64.tzst box64.tar' 2>&1 | tail -5
+
+# Verify box64 is bionic (interpreter should be /system/bin/linker64)
+if [ -f "$ROOTFS_DIR/usr/bin/box64" ]; then
+    BOX64_INTERP=$(file "$ROOTFS_DIR/usr/bin/box64" 2>/dev/null || echo "unknown")
+    echo "  box64: $BOX64_INTERP"
+    if echo "$BOX64_INTERP" | grep -q "linker64"; then
+        echo "  ✓ bionic box64 confirmed"
+    else
+        echo "  ⚠ WARNING: box64 is NOT bionic — may not work without glibc linker"
+    fi
+fi
 
 # ---------------------------------------------------------------------
 # 4. Disable llvmpipe ICD so user-installed Turnip wins by default

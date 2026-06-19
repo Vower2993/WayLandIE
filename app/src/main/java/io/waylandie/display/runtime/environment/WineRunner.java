@@ -11,31 +11,26 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * WineRunner — launches Wine directly using glibc-native execution.
+ * WineRunner — launches Wine directly, no proot, no glibc linker wrapper.
  *
- * <p><b>Architecture:</b> No proot. Wine runs directly on the device's
- * CPU via box64 (x86_64 emulation). The rootfs provides glibc libraries
- * that box64 loads for the emulated Wine process. This is the same
- * architecture used by winlator (StevenMXZ/Winlator-Ludashi) and is
- * 10-30% faster than proot (no syscall translation overhead).
+ * <p><b>Architecture:</b> Detects the Wine binary's ELF architecture and
+ * chooses the right launch path:
+ * <ul>
+ *   <li><b>arm64ec Wine</b> (ELF e_machine == EM_AARCH64 == 183): launches
+ *       the Wine binary directly — it is an Android-native ARM64 binary.
+ *       FEXCore (libarm64ecfex.dll) provides WoW64 hooks so x86_64 game
+ *       code is translated on the fly. No box64, no glibc linker needed.</li>
+ *   <li><b>x86_64 Wine</b> (ELF e_machine == EM_X86_64 == 62): wraps the
+ *       Wine binary with the BIONIC box64 installed at
+ *       {@code rootfs/usr/bin/box64}. The bionic box64 runs directly on
+ *       Android (interpreter {@code /system/bin/linker64}) and loads glibc
+ *       from the rootfs for the emulated Wine process. No glibc linker
+ *       wrapper needed.</li>
+ * </ul>
  *
- * <p><b>How it works:</b>
- * <ol>
- *   <li>The glibc dynamic linker ({@code rootfs/lib/ld-linux-aarch64.so.1})
- *       is invoked explicitly. This is necessary because our box64 is a
- *       glibc binary (from ptitSeb's Rootfs release), not a bionic binary.
- *       Android's linker can't load it directly — we need glibc's linker.</li>
- *   <li>The glibc linker loads glibc from {@code rootfs/usr/lib}, then
- *       loads box64 from {@code rootfs/usr/local/bin/box64}.</li>
- *   <li>box64 emulates x86_64 and loads Wine from the Proton installation
- *       at {@code contents/proton/active/files/bin/wine}.</li>
- *   <li>Wine runs the .exe, using glibc + Vulkan libraries from the rootfs.</li>
- * </ol>
- *
- * <p><b>Path model:</b> Unlike proot, there is ONE path space — host paths.
- * The rootfs at {@code getFilesDir()/imagefs/} is accessed via direct
- * absolute paths (e.g. {@code /data/.../imagefs/usr/lib}). No bind mounts,
- * no guest/host translation, no {@code --} option issues.
+ * <p><b>Path model:</b> One path space — host paths. The rootfs at
+ * {@code getFilesDir()/imagefs/} is accessed via direct absolute paths.
+ * No bind mounts, no guest/host translation, no {@code --} option issues.
  *
  * <p><b>Driver integration:</b>
  * <ul>
@@ -86,22 +81,7 @@ public final class WineRunner {
 
         File rootDir = imageFs.getRootDir();
 
-        // 1. Find the glibc dynamic linker in the rootfs.
-        // debootstrap trixie installs it at /lib/ld-linux-aarch64.so.1
-        File linker = new File(rootDir, "lib/ld-linux-aarch64.so.1");
-        if (!linker.isFile()) {
-            // Fallback: some rootfs layouts use /lib64/
-            linker = new File(rootDir, "lib64/ld-linux-aarch64.so.1");
-        }
-        if (!linker.isFile()) {
-            throw new IOException("glibc dynamic linker not found in rootfs. "
-                    + "Looked for: " + rootDir + "/lib/ld-linux-aarch64.so.1 "
-                    + "and " + rootDir + "/lib64/ld-linux-aarch64.so.1. "
-                    + "The rootfs may be corrupt or incomplete. Try clearing "
-                    + "app data to re-extract.");
-        }
-
-        // 2. Find Proton's Wine binary (HOST path — direct, no translation)
+        // 1. Find Proton's Wine binary (HOST path — direct, no translation)
         File protonDir = new File(context.getFilesDir(), "contents/proton/active");
         if (!protonDir.exists()) {
             throw new IOException("Proton is not installed. Please go to the "
@@ -134,38 +114,47 @@ public final class WineRunner {
         // Make wine executable
         wineBin.setExecutable(true, false);
 
-        // 3. Find box64 (x86_64 emulator). Our rootfs installs it at
-        // /usr/local/bin/box64 (glibc binary from ptitSeb's Rootfs release).
-        File box64 = new File(rootDir, "usr/local/bin/box64");
+        // 2. Detect Wine architecture — arm64ec vs x86_64
+        boolean isArm64ec = isArm64ecWine(wineBin);
+        Log.i(TAG, "Wine architecture: " + (isArm64ec ? "arm64ec (native)" : "x86_64 (needs box64)"));
+
+        // 3. Locate the bionic box64 (only needed for x86_64 Wine).
+        //    Installed at rootfs/usr/bin/box64 by tools/build-imagefs.sh
+        //    (BIONIC build from StevenMXZ/Winlator-Ludashi — Android native).
+        File box64 = new File(rootDir, "usr/bin/box64");
         if (!box64.exists()) {
-            box64 = new File(rootDir, "usr/bin/box64");
+            // Legacy fallback location (older rootfs layouts)
+            box64 = new File(rootDir, "usr/local/bin/box64");
         }
-        // Make box64 executable
         if (box64.exists()) {
             box64.setExecutable(true, false);
         }
 
         // 4. Build the command:
-        //    [linker] --library-path [libs] [box64] [wine] [exePath] [args]
-        //
-        // The glibc linker loads glibc from rootfs/usr/lib, then loads box64.
-        // box64 then loads Wine (x86_64 binary) and emulates it.
-        //
-        // If box64 doesn't exist (e.g., Wine is arm64ec native), we try
-        // launching wine directly through the linker. This may or may not
-        // work depending on the Wine binary's architecture.
+        //    arm64ec Wine : [wine] [exePath] [args]            (direct)
+        //    x86_64  Wine : [box64] [wine] [exePath] [args]    (bionic box64)
         List<String> cmd = new ArrayList<>();
-        cmd.add(linker.getAbsolutePath());
-        cmd.add("--library-path");
-        cmd.add(new File(rootDir, "usr/lib").getAbsolutePath() + ":"
-                + new File(rootDir, "usr/local/lib").getAbsolutePath());
-        if (box64.exists()) {
-            cmd.add(box64.getAbsolutePath());
-            Log.i(TAG, "Using box64: " + box64);
+        if (isArm64ec) {
+            // arm64ec Wine is an Android-native ARM64 binary — launch directly.
+            // FEXCore (libarm64ecfex.dll) inside the Proton prefix handles
+            // x86_64 game code translation at the WoW64 boundary.
+            cmd.add(wineBin.getAbsolutePath());
+            Log.i(TAG, "Launching arm64ec Wine directly (no box64, no glibc linker)");
         } else {
-            Log.w(TAG, "box64 not found — launching wine directly (may fail for x86_64 binaries)");
+            // x86_64 Wine — needs x86_64 emulation. Use the bionic box64
+            // from rootfs/usr/bin/box64. Bionic box64 runs directly on
+            // Android (interpreter /system/bin/linker64) and loads glibc
+            // libraries from this rootfs for the emulated Wine process.
+            if (!box64.exists()) {
+                throw new IOException("x86_64 Wine requires box64, but box64 "
+                        + "was not found in rootfs. Looked at: " + box64 + ". "
+                        + "Install an arm64ec Proton (no box64 needed) or "
+                        + "rebuild the imagefs to download bionic box64.");
+            }
+            cmd.add(box64.getAbsolutePath());
+            cmd.add(wineBin.getAbsolutePath());
+            Log.i(TAG, "Using bionic box64: " + box64);
         }
-        cmd.add(wineBin.getAbsolutePath());
         cmd.add(exePath);
         if (extraArgs != null) {
             cmd.addAll(Arrays.asList(extraArgs));
@@ -219,11 +208,21 @@ public final class WineRunner {
                 new File(context.getFilesDir(), "contents/steam/compatdata").getAbsolutePath());
         env.put("STEAM_RUNTIME", "0");  // no pressure-vessel
 
-        // FEX environment (if installed)
+        // FEX environment (architecture-dependent)
+        //   arm64ec + FEXCore: set HODLL=libarm64ecfex.dll — FEXCore hooks
+        //     the WoW64 layer inside the Proton prefix and translates x86_64
+        //     game code on the fly. No FEX_ROOT needed.
+        //   x86_64 + standalone FEX: set FEX_ROOT — box64 + FEX work together
+        //     for whole-process x86_64 emulation.
         File fexDir = new File(context.getFilesDir(), "contents/fex/active");
-        if (fexDir.isDirectory()) {
+        if (isArm64ec) {
+            // FEXCore is shipped inside the Proton prefix (libarm64ecfex.dll).
+            // Tell Wine to load it as the HODLL (host optimizer DLL).
+            env.put("HODLL", "libarm64ecfex.dll");
+            Log.i(TAG, "FEXCore enabled (arm64ec HODLL=libarm64ecfex.dll)");
+        } else if (fexDir.isDirectory()) {
             env.put("FEX_ROOT", fexDir.getAbsolutePath());
-            Log.i(TAG, "FEX enabled: " + fexDir);
+            Log.i(TAG, "FEX enabled (x86_64 path): " + fexDir);
         }
 
         // Vulkan driver — ICD JSON (direct HOST path, no bind mount needed)
@@ -294,6 +293,49 @@ public final class WineRunner {
             Log.i(TAG, "Synced adrenotools driver to rootfs: " + destSo);
         } catch (Exception e) {
             Log.e(TAG, "Failed to sync adrenotools driver to rootfs", e);
+        }
+    }
+
+    /**
+     * Detects whether a Wine binary is an arm64ec build by reading the ELF
+     * e_machine field. arm64ec Wine is an ARM64 ELF (e_machine == EM_AARCH64
+     * == 183) — Android runs it natively. x86_64 Wine has e_machine ==
+     * EM_X86_64 == 62 and requires box64 emulation.
+     *
+     * <p>ELF header layout (first 64 bytes for ELF64):
+     * <pre>
+     *   offset 0x00 : 0x7F 'E' 'L' 'F'  (magic)
+     *   offset 0x04 : EI_CLASS  (1 = 32-bit, 2 = 64-bit)
+     *   offset 0x12 : e_machine (little-endian uint16)  ← what we read
+     * </pre>
+     *
+     * @param wineBin the Wine executable to inspect
+     * @return true if wineBin is an ELF with e_machine == EM_AARCH64 (arm64ec)
+     */
+    private static boolean isArm64ecWine(File wineBin) {
+        try (java.io.RandomAccessFile raf = new java.io.RandomAccessFile(wineBin, "r")) {
+            if (raf.length() < 20) return false;
+            // Verify ELF magic: 0x7F 'E' 'L' 'F'
+            byte[] magic = new byte[4];
+            raf.readFully(magic);
+            if (magic[0] != 0x7F || magic[1] != 'E' || magic[2] != 'L' || magic[3] != 'F') {
+                Log.w(TAG, "Wine binary is not an ELF: " + wineBin);
+                return false;
+            }
+            // Read e_machine at offset 0x12 (little-endian uint16)
+            raf.seek(0x12);
+            int lo = raf.readUnsignedByte();
+            int hi = raf.readUnsignedByte();
+            int eMachine = (hi << 8) | lo;
+            // EM_AARCH64 = 183 (arm64ec is an AArch64 ELF)
+            // EM_X86_64  =  62 (needs box64)
+            Log.i(TAG, "Wine ELF e_machine=" + eMachine
+                    + (eMachine == 183 ? " (EM_AARCH64 / arm64ec)"
+                       : eMachine == 62 ? " (EM_X86_64)" : " (unknown)"));
+            return eMachine == 183;  // EM_AARCH64
+        } catch (Exception e) {
+            Log.w(TAG, "Failed to read Wine ELF header: " + wineBin, e);
+            return false;  // assume x86_64 (will try box64)
         }
     }
 
