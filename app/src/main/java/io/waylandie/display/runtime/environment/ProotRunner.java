@@ -363,23 +363,93 @@ public final class ProotRunner {
             Log.i(TAG, "FEX enabled: /opt/fex");
         }
 
-        // Vulkan driver — Turnip ICD JSON (created by SettingsActivity
-        // during Turnip install, pointing to /opt/turnip/libvulkan_freedreno.so)
+        // Vulkan driver — ICD JSON approach.
+        //
+        // ARCHITECTURE NOTE: WayLandIE runs Wine inside proot. The Vulkan
+        // loader runs INSIDE the proot guest, not on the Android host.
+        // adrenotools hooking (adrenotools_open_libvulkan) hooks libvulkan.so
+        // on the HOST and returns a handle for the host's Vulkan renderer.
+        // Wine inside proot loads its OWN libvulkan.so from the rootfs —
+        // it has no connection to host-side hooks. So adrenotools hooking
+        // CANNOT work in this architecture.
+        //
+        // Instead, ALL Vulkan drivers (Turnip, adrenotools, Qualcomm) use
+        // the standard ICD JSON mechanism:
+        //   1. The .so is copied into the rootfs at /usr/local/lib/
+        //   2. An ICD JSON at /usr/local/etc/vulkan/icd.d/ points to it
+        //   3. VK_ICD_FILENAMES tells the Vulkan loader where to find the JSON
+        //
+        // The ICD JSON is created during driver install (SettingsActivity
+        // installTurnipIcd). If an adrenotools driver is installed, its .so
+        // is synced into the rootfs + ICD JSON updated (see
+        // syncAdrenotoolsDriverToRootfs below).
         env.add("VK_ICD_FILENAMES"); env.add("/usr/local/etc/vulkan/icd.d/freedreno_icd.json");
         env.add("VK_DRIVER_FILES"); env.add("/usr/local/etc/vulkan/icd.d/freedreno_icd.json");
 
-        // Use active Adrenotools driver if one is set (overrides Turnip)
+        // If an adrenotools driver is active, sync its .so into the rootfs
+        // + update ICD JSON. This makes the adrenotools driver available to
+        // Wine via the standard ICD mechanism (since adrenotools hooking
+        // can't work inside proot).
         io.waylandie.display.runtime.content.AdrenotoolsManager atm =
                 new io.waylandie.display.runtime.content.AdrenotoolsManager(context);
         String activeDriverSo = atm.getActiveDriverSoPath();
         if (activeDriverSo != null) {
-            env.add("VULKAN_ADRENOTOOLS_DRIVER_SO"); env.add(activeDriverSo);
-            Log.i(TAG, "Using Adrenotools driver: " + activeDriverSo);
+            syncAdrenotoolsDriverToRootfs(activeDriverSo);
+            Log.i(TAG, "Using Adrenotools driver (synced to rootfs): " + activeDriverSo);
         } else {
             Log.i(TAG, "Using rootfs Turnip driver (VK_ICD_FILENAMES=/usr/local/etc/vulkan/icd.d/freedreno_icd.json)");
         }
 
         return exec(cmd.toArray(new String[0]), env.toArray(new String[0]));
+    }
+
+    /**
+     * Copies the active adrenotools driver .so into the rootfs and updates
+     * the ICD JSON to point to it. Necessary because adrenotools hooking
+     * (adrenotools_open_libvulkan) cannot work inside proot — Wine loads
+     * its own libvulkan.so from the rootfs with no connection to host-side
+     * hooks. Standard ICD JSON mechanism is used instead.
+     */
+    private void syncAdrenotoolsDriverToRootfs(String driverSoHostPath) {
+        try {
+            File srcSo = new File(driverSoHostPath);
+            if (!srcSo.isFile()) {
+                Log.w(TAG, "Adrenotools driver .so not found: " + driverSoHostPath);
+                return;
+            }
+            File libDir = new File(imageFs.getRootDir(), "usr/local/lib");
+            libDir.mkdirs();
+            File destSo = new File(libDir, "libvulkan_freedreno.so");
+            copyFile(srcSo, destSo);
+            // Update ICD JSON to point to rootfs-internal path
+            File icdDir = new File(imageFs.getRootDir(), "usr/local/etc/vulkan/icd.d");
+            icdDir.mkdirs();
+            File icdFile = new File(icdDir, "freedreno_icd.json");
+            try (java.io.PrintWriter pw = new java.io.PrintWriter(icdFile)) {
+                pw.println("{");
+                pw.println("    \"file_format_version\": \"1.0.0\",");
+                pw.println("    \"ICD\": {");
+                pw.println("        \"library_path\": \"/usr/local/lib/libvulkan_freedreno.so\",");
+                pw.println("        \"api_version\": \"1.3.0\"");
+                pw.println("    }");
+                pw.println("}");
+            }
+            Log.i(TAG, "Synced adrenotools driver to rootfs: " + destSo);
+        } catch (Exception e) {
+            Log.e(TAG, "Failed to sync adrenotools driver to rootfs", e);
+        }
+    }
+
+    private static void copyFile(File src, File dst) throws IOException {
+        dst.getParentFile().mkdirs();
+        try (java.io.InputStream in = new java.io.FileInputStream(src);
+             java.io.OutputStream out = new java.io.FileOutputStream(dst)) {
+            byte[] buf = new byte[65536];
+            int n;
+            while ((n = in.read(buf)) > 0) {
+                out.write(buf, 0, n);
+            }
+        }
     }
 
     /** @deprecated Use {@link #execWine(String, String[], boolean)} */
