@@ -164,6 +164,14 @@ public final class EnvironmentInitializer extends Activity {
         new Thread(() -> {
             String probeResult;
             try {
+                // Force the native library to load BEFORE calling
+                // nativeProbeCompositor(). Without this, the first
+                // native method call would throw UnsatisfiedLinkError
+                // because System.loadLibrary is only called from
+                // MainActivity.loadNativeStatusText() (lazy). Calling
+                // getNativeStatusText() here triggers the lazy load +
+                // installs the native crash handler via JNI_OnLoad.
+                MainActivity.getNativeStatusText();
                 probeResult = MainActivity.nativeProbeCompositor();
             } catch (Throwable t) {
                 probeResult = "fail: probe-threw " + t.getClass().getSimpleName()

@@ -2,7 +2,6 @@ package io.waylandie.display.shared.util;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.List;
 
 /**

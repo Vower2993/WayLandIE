@@ -32,7 +32,12 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <time.h>
+#include <errno.h>
+#include <stdarg.h>
+#include <stdint.h>
+#include <limits.h>
 #include <sys/stat.h>
+#include <sys/types.h>
 #include <dlfcn.h>
 #include <execinfo.h>
 
