@@ -161,6 +161,12 @@
                 android:textColor="@color/text_tertiary" android:textSize="11sp"
                 android:fontFamily="monospace" android:layout_marginTop="4dp" />
 
+            <TextView android:id="@+id/envStatusText"
+                android:layout_width="wrap_content" android:layout_height="wrap_content"
+                android:textColor="@color/text_tertiary" android:textSize="11sp"
+                android:fontFamily="monospace" android:layout_marginTop="2dp"
+                android:text="Environment: checking…" />
+
             <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
                 android:orientation="horizontal" android:layout_marginTop="10dp">
                 <Button android:id="@+id/btnStartDisplay" style="@style/SecondaryButton"

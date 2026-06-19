@@ -247,6 +247,31 @@ public final class EnvironmentInitializer extends Activity {
                 public void onFinished(boolean success) {
                     runOnUiThread(() -> {
                         if (success) {
+                            // CRITICAL: install() returning true does NOT mean
+                            // the rootfs is actually usable. TarCompressorUtils
+                            // can silently succeed on a placeholder/empty
+                            // tarball, and ImageFsManager.createVersionFile()
+                            // writes the marker regardless. Verify isValid()
+                            // explicitly before showing Continue — otherwise
+                            // the user advances into HomeActivity with a
+                            // corrupt rootfs and we get a confusing crash
+                            // later.
+                            if (!imageFs.isValid()) {
+                                String reason = "Extraction reported success but rootfs is invalid. "
+                                        + "Likely cause: APK was built without the real imagefs.tar.xz "
+                                        + "(placeholder README.txt was extracted instead). "
+                                        + "Use the 'Build Self-Contained APK' workflow, not 'Build APK'. "
+                                        + "Checked: rootDir=" + imageFs.getRootDir().exists()
+                                        + ", bin=" + imageFs.getBinDir().exists()
+                                        + ", lib=" + imageFs.getLibDir().exists()
+                                        + ", etc=" + imageFs.getEtcDir().exists()
+                                        + ", share=" + imageFs.getShareDir().exists()
+                                        + ", opt=" + imageFs.getOptDir().exists()
+                                        + ", version=" + imageFs.getVersion();
+                                stateStore.markFailed(reason);
+                                showFailureButtons("Extraction incomplete.\n\n" + reason);
+                                return;
+                            }
                             statusText.setText("Environment ready (v"
                                     + imageFs.getFormattedVersion() + ")");
                             logToRing("Extraction finished successfully. Ready for probe.");

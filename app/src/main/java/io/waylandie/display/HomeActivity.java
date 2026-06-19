@@ -126,6 +126,7 @@ public final class HomeActivity extends Activity {
         audioStatusDot = findViewById(R.id.audioStatusDot);
         audioStatusText = findViewById(R.id.audioStatusText);
         logText = findViewById(R.id.logText);
+        envStatusText = findViewById(R.id.envStatusText);
         btnLaunchSteam = findViewById(R.id.btnLaunchSteam);
         btnStartDisplay = findViewById(R.id.btnStartDisplay);
         btnStopDisplay = findViewById(R.id.btnStopDisplay);
@@ -376,6 +377,8 @@ public final class HomeActivity extends Activity {
             String status = probeBridge();
             boolean listening = status.equals(getString(R.string.home_bridge_status_listening));
             main.post(() -> {
+                // Defensive null check — see updateEnvStatus() comment for rationale.
+                if (bridgeStatusText == null || bridgeStatusDot == null) return;
                 bridgeStatusText.setText(status);
                 bridgeStatusDot.setBackgroundColor(listening ? 0xFF4ADE80 : 0xFF666674);
                 log("bridge: " + status);
@@ -407,6 +410,8 @@ public final class HomeActivity extends Activity {
     }
 
     private void refreshControllerStatus() {
+        // Defensive null check — see updateEnvStatus() comment for rationale.
+        if (controllerStatusDot == null || controllerStatusText == null) return;
         int[] deviceIds = InputDevice.getDeviceIds();
         List<String> gamepads = new ArrayList<>();
         for (int id : deviceIds) {
@@ -441,6 +446,8 @@ public final class HomeActivity extends Activity {
             }
             final boolean finalListening = listening;
             main.post(() -> {
+                // Defensive null check — see updateEnvStatus() comment for rationale.
+                if (audioStatusDot == null || audioStatusText == null) return;
                 if (finalListening) {
                     audioStatusDot.setBackgroundColor(0xFF4ADE80);
                     audioStatusText.setText("PulseAudio :57392");
@@ -453,6 +460,13 @@ public final class HomeActivity extends Activity {
     }
 
     private void updateEnvStatus() {
+        // Defensive null check — envStatusText was missing from the layout
+        // in a prior version, causing an NPE that crashed HomeActivity
+        // immediately after the probe succeeded. Now bound in bindViews()
+        // from R.id.envStatusText (added to activity_home.xml), but we keep
+        // the null check so a future layout regression can't take down the
+        // whole activity.
+        if (envStatusText == null) return;
         io.waylandie.display.runtime.environment.ImageFsManager imageFs =
                 new io.waylandie.display.runtime.environment.ImageFsManager(this);
         ProotRunner runner = new ProotRunner(this);
@@ -470,6 +484,8 @@ public final class HomeActivity extends Activity {
     }
 
     private void updateNativeStatus() {
+        // Defensive null check — see updateEnvStatus() comment for rationale.
+        if (nativeStatusText == null) return;
         try {
             String s = MainActivity.nativeStatus();
             nativeStatusText.setText(String.format(Locale.US, "native: %s", s));
