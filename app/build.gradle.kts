@@ -118,6 +118,11 @@ dependencies {
     implementation("androidx.annotation:annotation:1.8.0")
     implementation("androidx.activity:activity:1.9.0")
 
+    // Pure-Java XZ decompression — Android doesn't ship an `xz` binary,
+    // so we can't use `tar -xJf` or `xz -dc | tar`. This library lets us
+    // decompress .tar.xz entirely in Java.
+    implementation("org.tukaani:xz:1.10")
+
     // Force Kotlin stdlib to a consistent version. androidx.activity:1.9.0
     // pulls in the modern kotlin-stdlib:1.8.22 (which absorbed the old
     // jdk7/jdk8 splits), but other AndroidX deps transitively pull in the

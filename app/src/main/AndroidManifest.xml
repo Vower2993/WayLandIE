@@ -6,7 +6,7 @@
     <uses-permission android:name="android.permission.INTERNET" />
 
     <!-- Foreground service keeps the Wayland bridge alive while the user is
-         inside Termux / proot / Steam. -->
+         inside the bundled rootfs. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
 
@@ -27,7 +27,7 @@
          proot rootfs can access /sdcard for game .exe files. -->
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
 
-    <!-- No Termux queries needed — everything is self-contained. -->
+    <!-- Everything is self-contained. -->
 
     <application
         android:allowBackup="false"
@@ -87,39 +87,14 @@
             android:resizeableActivity="true"
             android:theme="@style/WindowAppTheme" />
 
-        <!-- First-run setup wizard. Walks the user through installing Termux,
-             proot-distro, Debian, then running waylandie install. -->
-        <activity
-            android:name=".SetupWizardActivity"
-            android:exported="false"
-            android:screenOrientation="portrait"
-            android:theme="@style/AppTheme" />
-
-        <!-- Settings — central hub for driver/wrapper install + toggle. -->
+        <!-- Settings — driver/wrapper install UI -->
         <activity
             android:name=".SettingsActivity"
             android:exported="false"
             android:screenOrientation="portrait"
             android:theme="@style/AppTheme" />
 
-        <!-- Legacy game launcher — kept for backward compat but not
-             reachable from the new home screen. -->
-        <activity
-            android:name=".GameLauncherActivity"
-            android:exported="false"
-            android:screenOrientation="portrait"
-            android:theme="@style/AppTheme" />
-
-        <!-- Legacy driver installer — kept for backward compat but
-             superseded by SettingsActivity. -->
-        <activity
-            android:name=".DriverInstallerActivity"
-            android:exported="false"
-            android:screenOrientation="portrait"
-            android:theme="@style/AppTheme" />
-
-        <!-- FileProvider so we can share bundled installer scripts to Termux
-             via content:// URIs (Termux can read content URIs). -->
+        <!-- FileProvider for sharing log files -->
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"

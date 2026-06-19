@@ -1,12 +1,12 @@
 #!/bin/sh
 # waylandie-run — wrap a command with the WayLandIE environment set up.
-# Termux-native (bionic). No proot.
+# bundled rootfs-native (bionic). No proot.
 #
 # Usage:
 #   waylandie-run vkcube --wsi wayland
 #   waylandie-run weston-simple-egl
 
-PREFIX="${WAYLANDIE_PREFIX:-/data/data/com.termux/files/usr}"
+PREFIX="${WAYLANDIE_PREFIX:-/usr/local}"
 
 RC_DIR="${XDG_RUNTIME_DIR:-$PREFIX/tmp}/waylandie"
 if [ -f "$RC_DIR/env.sh" ]; then

@@ -1,9 +1,9 @@
 #!/bin/sh
-# waylandie-steam-session — manage Steam ARM64 + FEX in Termux-native (bionic).
+# waylandie-steam-session — manage Steam ARM64 + FEX in bundled rootfs-native (bionic).
 #
-# No proot, no Debian. Steam runs directly in Termux. Per-game
+# No proot, no Debian. Steam runs directly in bundled rootfs. Per-game
 # containerization (pressure-vessel + bubblewrap) does NOT work in
-# Termux-native because Termux can't create unprivileged user
+# bundled rootfs-native because bundled rootfs can't create unprivileged user
 # namespaces either — so we force STEAM_RUNTIME=0.
 #
 # For Armec Proton integration, install Armec Proton via Settings tab
@@ -38,7 +38,7 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-PREFIX="${WAYLANDIE_PREFIX:-/data/data/com.termux/files/usr}"
+PREFIX="${WAYLANDIE_PREFIX:-/usr/local}"
 SESSION_DIR="${XDG_RUNTIME_DIR:-$PREFIX/tmp}/waylandie"
 SESSION_PID_FILE="$SESSION_DIR/steam-session.pid"
 SESSION_LOG_FILE="$SESSION_DIR/steam-session.log"
@@ -57,12 +57,12 @@ case "$ACTION" in
             exit 0
         fi
 
-        # Force STEAM_RUNTIME=0 — pressure-vessel won't work in Termux
+        # Force STEAM_RUNTIME=0 — pressure-vessel won't work in bundled rootfs
         case "$RUNTIME" in
             0|host)  export STEAM_RUNTIME=0; export STEAM_RUNTIME_PREFER_HOST_LIBS=1 ;;
             scout)   export STEAM_RUNTIME=scout; export STEAM_RUNTIME_PREFER_HOST_LIBS=1 ;;
             *)
-                echo "ERROR: runtime '$RUNTIME' uses pressure-vessel (not supported in Termux)" >&2
+                echo "ERROR: runtime '$RUNTIME' uses pressure-vessel (not supported in bundled rootfs)" >&2
                 echo "Use --runtime=0 (default) or --runtime=scout" >&2
                 exit 1
                 ;;
@@ -77,7 +77,7 @@ case "$ACTION" in
             fi
         done
         if [ -z "$STEAM_BIN" ]; then
-            echo "ERROR: steam not found in Termux." >&2
+            echo "ERROR: steam not found in bundled rootfs." >&2
             echo "  Install Steam ARM64 client from repo.steampowered.com" >&2
             echo "  or via box86 + Steam Linux i386 build." >&2
             exit 1

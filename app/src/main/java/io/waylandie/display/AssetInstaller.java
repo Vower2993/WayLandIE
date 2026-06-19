@@ -13,13 +13,13 @@ import java.io.OutputStream;
 /**
  * AssetInstaller extracts the bundled {@code linux-runtime/} shell scripts
  * from the APK's {@code assets/} directory into app-private storage so the
- * SetupWizard can share them to Termux.
+ * SetupWizard can share them to bundled rootfs.
  *
  * <p>The extracted scripts live at {@code getFilesDir()/linux-runtime/}. The
- * SetupWizard then asks Android to make them readable by Termux via a
+ * SetupWizard then asks Android to make them readable by bundled rootfs via a
  * FileProvider content URI, or — for the simpler path — copies them into
- * the public Downloads folder which Termux can read after
- * {@code termux-setup-storage}.
+ * the public Downloads folder which bundled rootfs can read after
+ * {@code app launch}.
  */
 final class AssetInstaller {
 
@@ -52,12 +52,12 @@ final class AssetInstaller {
         AssetManager am = context.getAssets();
         copyAssetTree(am, ASSET_ROOT, root);
 
-        // Also push the scripts to the public Downloads folder so Termux can
-        // see them after termux-setup-storage has been run. On Android 13+
+        // Also push the scripts to the public Downloads folder so bundled rootfs can
+        // see them after app launch has been run. On Android 13+
         // this requires MANAGE_EXTERNAL_STORAGE to be granted to WayLandIE.
         // If the permission is not granted, fall back to app-private external
         // storage at /sdcard/Android/data/io.waylandie.display/files/Download/
-        // which Termux can still read after termux-setup-storage.
+        // which bundled rootfs can still read after app launch.
         File publicRoot = new File(
                 android.os.Environment.getExternalStorageDirectory(),
                 "Download/WayLandIE/linux-runtime");

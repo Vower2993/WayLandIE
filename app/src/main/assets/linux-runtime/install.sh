@@ -1,23 +1,23 @@
 #!/bin/sh
 # install.sh — WayLandIE no-root installer for the Linux side.
 #
-# BIONIC / TERMUX-NATIVE build. No proot, no glibc, no Debian.
-# Everything runs directly inside Termux using Android's bionic libc.
+# BIONIC / bundled rootfs-NATIVE build. No proot, no glibc, no Debian.
+# Everything runs directly inside bundled rootfs using Android's bionic libc.
 # This is the recommended architecture for hardware GPU acceleration
 # on Adreno devices — the host's bionic Turnip driver works directly
 # because there is no glibc/bionic ABI conflict.
 #
 # Usage:
-#   sh install.sh --backend termux-native --prefix "$PREFIX" --install-packages
+#   sh install.sh --backend rootfs --prefix "$PREFIX" --install-packages
 #
 # Backends:
-#   termux-native   Termux pkg environment (bionic) — RECOMMENDED, default
+#   rootfs   bundled rootfs pkg environment (bionic) — RECOMMENDED, default
 #   proot           DEPRECATED, kept for backward compat. Will warn.
 
 set -e
 
 BACKEND=""
-PREFIX="/data/data/com.termux/files/usr"
+PREFIX="/usr/local"
 INSTALL_PACKAGES=false
 
 while [ $# -gt 0 ]; do
@@ -29,12 +29,12 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-# Default to termux-native
+# Default to rootfs
 if [ -z "$BACKEND" ]; then
-    BACKEND="termux-native"
+    BACKEND="rootfs"
 fi
 
-echo "=== WayLandIE install (bionic / termux-native) ==="
+echo "=== WayLandIE install (bionic / rootfs) ==="
 echo "  backend : $BACKEND"
 echo "  prefix  : $PREFIX"
 echo "  packages: $INSTALL_PACKAGES"
@@ -42,32 +42,32 @@ echo
 
 if [ "$BACKEND" = "proot" ] || [ "$BACKEND" = "chroot" ] || [ "$BACKEND" = "lxc" ]; then
     echo "WARNING: backend '$BACKEND' is deprecated." >&2
-    echo "  The recommended backend is 'termux-native' (bionic, no proot)." >&2
+    echo "  The recommended backend is 'rootfs' (bionic, no proot)." >&2
     echo "  Continuing anyway, but you will hit glibc/bionic linker issues" >&2
     echo "  with the standalone Turnip driver. Use the KGSL bionic Turnip" >&2
-    echo "  variant or switch to termux-native." >&2
+    echo "  variant or switch to rootfs." >&2
     echo
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # ---------------------------------------------------------------------
-# 1. Package install (termux-native)
+# 1. Package install (rootfs)
 # ---------------------------------------------------------------------
 if [ "$INSTALL_PACKAGES" = "true" ]; then
-    if [ "$BACKEND" != "termux-native" ]; then
-        echo "NOTE: --install-packages only valid for termux-native backend"
+    if [ "$BACKEND" != "rootfs" ]; then
+        echo "NOTE: --install-packages only valid for rootfs backend"
         echo "      For proot backends, run apt-get install manually inside the proot."
     else
-        echo "--- Installing Termux packages (bionic) ---"
+        echo "--- Installing bundled rootfs packages (bionic) ---"
         # Enable x11-repo + game-repo first — wayland, mesa-demos, box86,
         # box64, gamescope all live in these additional repos.
-        pkg install -y x11-repo game-repo 2>/dev/null || \
+        apt-get install -y x11-repo game-repo 2>/dev/null || \
             echo "NOTE: couldn't install x11-repo/game-repo — may already be enabled."
-        pkg update
+        apt-get update
 
         # Core Wayland + Vulkan + mesa stack (bionic)
-        pkg install -y \
+        apt-get install -y \
             wayland wayland-protocols \
             vulkan-tools mesa-vulkan-icd-freedreno \
             mesa-demos weston \
@@ -77,22 +77,22 @@ if [ "$INSTALL_PACKAGES" = "true" ]; then
         # Wine is NOT installed by default — Armec Proton (installed via
         # Settings tab) bundles its own wine. If you want bare Wine
         # without Proton, install it manually:
-        #   pkg install x11-repo && pkg install wine-stable
+        #   apt-get install x11-repo && apt-get install wine-stable
 
         # box86 / box64 — x86/x64 emulators for non-FEX path
-        pkg install -y box86 box64 2>/dev/null || \
+        apt-get install -y box86 box64 2>/dev/null || \
             echo "NOTE: box86/box64 not in default repo. Install from x11-repo + game-repo."
 
         # gamescope — nested Wayland compositor, optional
-        pkg install -y gamescope 2>/dev/null || \
+        apt-get install -y gamescope 2>/dev/null || \
             echo "NOTE: gamescope not in default repo. Install from x11-repo or game-repo."
 
         # FEX-Emu — alternative x86/x64 emulator (optional, Armec Proton can use it)
-        pkg install -y fex-emu 2>/dev/null || \
-            echo "NOTE: fex-emu not in default repo. Install from termux-x11-packages or build from source."
+        apt-get install -y fex-emu 2>/dev/null || \
+            echo "NOTE: fex-emu not in default repo. Install from bundled rootfs-x11-packages or build from source."
 
         echo
-        echo "Termux packages installed."
+        echo "bundled rootfs packages installed."
     fi
 fi
 
@@ -107,7 +107,7 @@ for script in waylandie-start-display waylandie-status waylandie-doctor \
               waylandie-steam-session waylandie-steam-profile \
               waylandie-steam-install-dxvk-slot waylandie-steam-install-turnip-slot \
               waylandie-import-qcom-adreno-driver waylandie-install-driver \
-              waylandie-termux waylandie-audio; do
+              waylandie-bundled rootfs waylandie-audio; do
     src="$SCRIPT_DIR/bin/$script"
     if [ -f "$src" ]; then
         cp "$src" "$PREFIX/bin/$script"
@@ -172,6 +172,6 @@ echo "  5. Install Armec DXVK + Armec Proton via Settings tab."
 echo "  6. Launch a game from the Home screen."
 echo
 echo "Audio bridge:"
-echo "  PulseAudio runs on TCP 127.0.0.1:57392 inside Termux."
+echo "  PulseAudio runs on TCP 127.0.0.1:57392 inside bundled rootfs."
 echo "  The WayLandIE Android app pulls audio from this port and plays"
 echo "  it back via Android AudioTrack (OpenSL ES for low latency)."

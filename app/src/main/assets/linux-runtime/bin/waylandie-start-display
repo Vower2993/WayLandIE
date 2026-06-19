@@ -1,5 +1,5 @@
 #!/bin/sh
-# waylandie-start-display — connect the Termux (bionic) side to the
+# waylandie-start-display — connect the bundled rootfs (bionic) side to the
 # Android WayLandIE bridge. NO proot, NO Debian. Direct bionic.
 #
 # After running this, run `waylandie-doctor` to verify, or
@@ -7,7 +7,7 @@
 
 set -e
 
-PREFIX="${WAYLANDIE_PREFIX:-/data/data/com.termux/files/usr}"
+PREFIX="${WAYLANDIE_PREFIX:-/usr/local}"
 
 # Load backend config
 [ -f "$PREFIX/share/waylandie/backend.conf" ] && . "$PREFIX/share/waylandie/backend.conf"
@@ -15,14 +15,14 @@ PREFIX="${WAYLANDIE_PREFIX:-/data/data/com.termux/files/usr}"
 SOCKET="${WAYLANDIE_BRIDGE_SOCKET:-waylandie.display.bridge.v1}"
 PORT="${WAYLANDIE_BRIDGE_PORT:-57391}"
 
-echo "WayLandIE bridge setup (termux-native / bionic)"
-echo "  socket   : $SOCKET (abstract — visible from Termux)"
+echo "WayLandIE bridge setup (rootfs / bionic)"
+echo "  socket   : $SOCKET (abstract — visible from bundled rootfs)"
 echo "  tcp port : $PORT (fallback)"
-echo "  backend  : ${WAYLANDIE_BACKEND:-termux-native}"
+echo "  backend  : ${WAYLANDIE_BACKEND:-rootfs}"
 echo "  finalcopy: ${WAYLANDIE_FINAL_COPY:-forbidden}"
 echo
 
-# In termux-native, we CAN see Android abstract sockets because Termux
+# In rootfs, we CAN see Android abstract sockets because bundled rootfs
 # runs as an Android app under the same kernel namespace as WayLandIE.
 # (This was the issue with proot — proot's namespace isolation hid them.)
 ABSTRACT_OK=false

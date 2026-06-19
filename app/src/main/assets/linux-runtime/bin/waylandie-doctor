@@ -1,5 +1,5 @@
 #!/bin/sh
-# waylandie-doctor — sanity-check the bridge end-to-end (termux-native).
+# waylandie-doctor — sanity-check the bridge end-to-end (rootfs).
 #
 # Verifies:
 #   1. WayLandIE Android app is listening (abstract + TCP).
@@ -18,7 +18,7 @@ ok()   { echo "  ✓ $1"; PASS=$((PASS+1)); }
 fail() { echo "  ✗ $1"; FAIL=$((FAIL+1)); }
 info() { echo "    $1"; }
 
-PREFIX="${WAYLANDIE_PREFIX:-/data/data/com.termux/files/usr}"
+PREFIX="${WAYLANDIE_PREFIX:-/usr/local}"
 [ -f "$PREFIX/share/waylandie/backend.conf" ] && . "$PREFIX/share/waylandie/backend.conf"
 [ -f "$PREFIX/share/waylandie/env-turnip.sh" ] && . "$PREFIX/share/waylandie/env-turnip.sh"
 
@@ -26,7 +26,7 @@ SOCKET="${WAYLANDIE_BRIDGE_SOCKET:-waylandie.display.bridge.v1}"
 PORT="${WAYLANDIE_BRIDGE_PORT:-57391}"
 AUDIO_PORT="${WAYLANDIE_AUDIO_PORT:-57392}"
 
-echo "=== WayLandIE doctor (termux-native / bionic) ==="
+echo "=== WayLandIE doctor (rootfs / bionic) ==="
 echo
 
 # ---------------------------------------------------------------------
@@ -80,7 +80,7 @@ if [ -f "$PREFIX/share/waylandie/env-turnip.sh" ]; then
         ok "Turnip .so exists: $SO_PATH"
         # Check if it's the KGSL variant (looks for 'kgsl' or 'drm' symbols)
         if strings "$SO_PATH" 2>/dev/null | grep -qi "kgsl\|/dev/kgsl"; then
-            ok "Turnip .so is KGSL variant (correct for termux-native)"
+            ok "Turnip .so is KGSL variant (correct for rootfs)"
         elif strings "$SO_PATH" 2>/dev/null | grep -qi "libhardware\|libsync"; then
             fail "Turnip .so is standalone variant — will crash in bionic"
             info "Install the KGSL bionic variant instead."

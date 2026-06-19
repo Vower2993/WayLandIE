@@ -1,6 +1,6 @@
 #!/bin/bash
 # waylandie-install-driver — unified driver/wrapper installer for the
-# termux-native (bionic) environment.
+# rootfs (bionic) environment.
 #
 # Supports:
 #   turnip       Mesa Turnip KGSL bionic variant (.zip or .tar.gz)
@@ -21,7 +21,7 @@
 #
 # If --activate is passed, an env file is written at:
 #   $PREFIX/share/waylandie/env-KIND.sh
-# which waylandie-termux sources automatically.
+# which waylandie-bundled rootfs sources automatically.
 
 set -e
 
@@ -49,7 +49,7 @@ case "$KIND" in
     *) echo "unknown kind: $KIND" >&2; exit 2 ;;
 esac
 
-PREFIX="${WAYLANDIE_PREFIX:-/data/data/com.termux/files/usr}"
+PREFIX="${WAYLANDIE_PREFIX:-/usr/local}"
 
 # Resolve file path
 RESOLVED_FILE=""
@@ -120,17 +120,17 @@ case "$KIND" in
         # CRITICAL: validate this is the KGSL bionic variant, NOT standalone.
         # Standalone links against libhardware.so, libsync.so, libcutils.so —
         # all of which are bionic framework libs that cause SIGTRAP crashes
-        # in the Termux-native environment.
+        # in the bundled rootfs-native environment.
         if strings "$SO" 2>/dev/null | grep -qi "libhardware\|libsync\.so\|libcutils"; then
             echo "ERROR: this Turnip .so is the STANDALONE variant." >&2
             echo >&2
             echo "It links against Android's libhardware.so which crashes" >&2
-            echo "with SIGTRAP 'Trace/breakpoint trap' inside Termux-native" >&2
+            echo "with SIGTRAP 'Trace/breakpoint trap' inside bundled rootfs-native" >&2
             echo "(bionic/glibc ABI conflict)." >&2
             echo >&2
             echo "Install the KGSL bionic variant instead. Look for:" >&2
             echo "  - File names containing 'kgsl' or 'mesa-vulkan-kgsl'" >&2
-            echo "  - Builds from the termux-packages mesa-vulkan-icd-freedreno" >&2
+            echo "  - Builds from the bundled rootfs-packages mesa-vulkan-icd-freedreno" >&2
             echo "  - Or builds labeled 'bionic' from Armec or similar" >&2
             echo >&2
             echo "Cleaning up failed install…" >&2
@@ -217,7 +217,7 @@ EOF
 export WAYLANDIE_PROTON_DIR="$SLOT_DIR"
 export STEAM_COMPAT_CLIENT_INSTALL_PATH="\$HOME/.local/share/Steam"
 export STEAM_COMPAT_DATA_PATH="\$HOME/.proton-$SLOT"
-# Proton 9+ respects this for skipping pressure-vessel (no namespaces in Termux)
+# Proton 9+ respects this for skipping pressure-vessel (no namespaces in bundled rootfs)
 export STEAM_RUNTIME=0
 EOF
             echo "  Wrote $PREFIX/share/waylandie/env-proton.sh"

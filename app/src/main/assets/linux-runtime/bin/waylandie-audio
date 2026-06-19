@@ -15,7 +15,7 @@ set -e
 
 ACTION="${1:-status}"
 
-PREFIX="${WAYLANDIE_PREFIX:-/data/data/com.termux/files/usr}"
+PREFIX="${WAYLANDIE_PREFIX:-/usr/local}"
 AUDIO_PORT="${WAYLANDIE_AUDIO_PORT:-57392}"
 
 case "$ACTION" in

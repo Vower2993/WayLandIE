@@ -35,9 +35,9 @@ import java.util.Locale;
  * </ul>
  *
  * <p>Installs use the bundled waylandie-install-driver script via
- * Termux RUN_COMMAND. The picked archive is first copied to
+ * ProotRunner. The picked archive is first copied to
  * /sdcard/Download/WayLandIE/drivers/ (or app-private external storage
- * fallback) so Termux can read it.
+ * fallback) so the rootfs can read it.
  */
 public final class SettingsActivity extends Activity {
 
@@ -83,7 +83,7 @@ public final class SettingsActivity extends Activity {
         findViewById(R.id.btnInstallBox64).setOnClickListener(v ->
                 openArchivePicker(PICK_BOX64, "Install box64"));
         findViewById(R.id.btnManageProfiles).setOnClickListener(v ->
-                openProfileManagerInTermux());
+                openProfileManager());
 
         refreshAllStatuses();
     }
@@ -187,14 +187,11 @@ public final class SettingsActivity extends Activity {
     }
 
     private void fireInstallCommand(String kind, String slot, String archivePath) {
-        if (!TermuxBridge.isTermuxInstalled(this)) {
-            new AlertDialog.Builder(this)
-                    .setTitle("Termux not installed")
-                    .setMessage(getString(R.string.termux_not_installed))
-                    .setPositiveButton("Install",
-                            (d, w) -> TermuxBridge.openTermuxInstallPage(this))
-                    .setNegativeButton(R.string.cancel, null)
-                    .show();
+        // Use ProotRunner to install driver inside the bundled rootfs
+        io.waylandie.display.runtime.environment.ProotRunner runner =
+                new io.waylandie.display.runtime.environment.ProotRunner(this);
+        if (!runner.isReady()) {
+            toast("Environment not ready. Initialize first.");
             return;
         }
         String inner = "waylandie-install-driver"
@@ -202,16 +199,21 @@ public final class SettingsActivity extends Activity {
                 + " --slot " + shellQuote(slot)
                 + " --file " + shellQuote(archivePath)
                 + " --activate";
-        String cmd = TermuxBridge.termuxCommand(inner);
 
-        boolean sent = TermuxBridge.tryRunCommand(this, cmd);
-        if (sent) {
-            toast("Installing " + kind + " slot '" + slot + "' in Termux…");
-        } else {
-            ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
-            cm.setPrimaryClip(ClipData.newPlainText("WayLandIE", cmd));
-            toast("Termux:API not available. Command copied — paste into Termux.");
-            TermuxBridge.openTermuxLauncher(this);
+        toast("Installing " + kind + " slot '" + slot + "'…");
+        log("Installing via ProotRunner: " + inner);
+        try {
+            Process p = runner.exec(inner);
+            // Drain output in background
+            new Thread(() -> {
+                try {
+                    byte[] buf = new byte[4096];
+                    while (p.getInputStream().read(buf) > 0) {}
+                    p.waitFor();
+                } catch (Exception ignored) {}
+            }).start();
+        } catch (java.io.IOException error) {
+            toast("Install failed: " + error.getMessage());
         }
         refreshAllStatuses();
     }
@@ -260,19 +262,18 @@ public final class SettingsActivity extends Activity {
         activeProfileText.setText("default (auto-activated slots apply to all games)");
     }
 
-    private void openProfileManagerInTermux() {
-        if (!TermuxBridge.isTermuxInstalled(this)) {
-            toast("Termux not installed.");
+    private void openProfileManager() {
+        io.waylandie.display.runtime.environment.ProotRunner runner =
+                new io.waylandie.display.runtime.environment.ProotRunner(this);
+        if (!runner.isReady()) {
+            toast("Environment not ready.");
             return;
         }
-        String cmd = TermuxBridge.termuxCommand(
-                "waylandie-steam-profile list-games");
-        boolean sent = TermuxBridge.tryRunCommand(this, cmd);
-        if (!sent) {
-            ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
-            cm.setPrimaryClip(ClipData.newPlainText("WayLandIE", cmd));
-            toast("Command copied — paste into Termux.");
-            TermuxBridge.openTermuxLauncher(this);
+        try {
+            runner.exec("waylandie-steam-profile list-games");
+            toast("Profile list running in background.");
+        } catch (java.io.IOException error) {
+            toast("Failed: " + error.getMessage());
         }
     }
 
@@ -306,6 +307,10 @@ public final class SettingsActivity extends Activity {
 
     private void toast(String msg) {
         Toast.makeText(this, msg, Toast.LENGTH_SHORT).show();
+    }
+
+    private void log(String msg) {
+        android.util.Log.i("WayLandIE/Settings", msg);
     }
 
     private static String shellQuote(String s) {

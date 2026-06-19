@@ -17,7 +17,7 @@ import java.util.List;
  *
  * <p>This is the WinNative/Winlator pattern: bundle proot + rootfs as APK
  * assets, exec via {@link Runtime#exec(String[], String[], File)}. No
- * Termux, no missing packages, no repo issues.
+ * bundled rootfs, no missing packages, no repo issues.
  *
  * <p>Usage:
  * <pre>

@@ -1,6 +1,6 @@
 #!/bin/bash
 # waylandie-run-game — run a Windows .exe through Wine in the
-# termux-native (bionic) environment, with optional gamescope + Armec
+# rootfs (bionic) environment, with optional gamescope + Armec
 # DXVK + Armec Proton + FEX/box86/box64 + driver slot.
 #
 # Usage:
@@ -61,7 +61,7 @@ case "$EXE" in
 esac
 [ ! -f "$REAL_EXE" ] && { echo "ERROR: file not found: $REAL_EXE" >&2; exit 1; }
 
-PREFIX="${WAYLANDIE_PREFIX:-/data/data/com.termux/files/usr}"
+PREFIX="${WAYLANDIE_PREFIX:-/usr/local}"
 
 # Source WayLandIE env
 if [ -f "${XDG_RUNTIME_DIR:-$PREFIX/tmp}/waylandie/env.sh" ]; then
