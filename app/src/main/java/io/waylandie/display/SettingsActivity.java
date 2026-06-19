@@ -67,6 +67,19 @@ public final class SettingsActivity extends Activity {
     private Process runningInstallProcess;
     private Thread runningInstallThread;
 
+    /**
+     * Modal progress dialog shown during driver/component installs.
+     * Updated step-by-step from the install background thread to give
+     * the user visible feedback (detect → extract → validate → install).
+     *
+     * <p>ProgressDialog is deprecated as of API 26 but still functions
+     * on Android 16. We use it because it's a single class that gives
+     * us both a message and a horizontal progress bar; an equivalent
+     * AlertDialog + ProgressBar view would require significantly more
+     * boilerplate for the same UX.
+     */
+    private android.app.ProgressDialog installProgressDialog;
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -374,11 +387,25 @@ public final class SettingsActivity extends Activity {
         io.waylandie.display.shared.util.LogRingBuffer.append(
                 "[Settings] Installing " + kind + " slot '" + slot + "'…");
 
+        // Show a modal progress dialog so the user sees visible feedback
+        // during the long-running detect → extract → validate → install
+        // pipeline. Without this, the only feedback was a single toast
+        // at the start and the screen appeared frozen until the install
+        // completed (or failed and popped up the error dialog).
+        installProgressDialog = new android.app.ProgressDialog(this);
+        installProgressDialog.setMessage("Installing " + kind + " slot '" + slot + "'…");
+        installProgressDialog.setProgressStyle(android.app.ProgressDialog.STYLE_HORIZONTAL);
+        installProgressDialog.setMax(100);
+        installProgressDialog.setProgress(0);
+        installProgressDialog.setCancelable(false);
+        installProgressDialog.show();
+
         Thread t = new Thread(() -> {
             StringBuilder output = new StringBuilder();
             int exitCode = 0;
             try {
                 // 1. Detect archive type by magic bytes
+                updateInstallProgress(5, "Detecting archive type…");
                 io.waylandie.display.shared.io.TarCompressorUtils.Type type =
                         io.waylandie.display.shared.io.TarCompressorUtils.detectArchiveType(archiveFile);
                 if (type == null) {
@@ -389,6 +416,7 @@ public final class SettingsActivity extends Activity {
                     throw new IOException("unrecognized archive format");
                 }
                 output.append("Detected archive type: ").append(type).append('\n');
+                updateInstallProgress(25, "Extracting…");
 
                 // 2. Create slot directory in app-private contents/
                 File kindDir = new File(getFilesDir(), "contents/" + kind);
@@ -409,6 +437,7 @@ public final class SettingsActivity extends Activity {
                     throw new IOException("extraction failed");
                 }
                 output.append("Extraction complete.\n");
+                updateInstallProgress(60, "Validating…");
                 output.append("Top-level contents:\n");
                 File[] kids = slotDir.listFiles();
                 if (kids != null) {
@@ -427,6 +456,7 @@ public final class SettingsActivity extends Activity {
                     deleteRecursive(slotDir);
                     throw new IOException("validation failed");
                 }
+                updateInstallProgress(80, "Installing to Wine prefix…");
 
                 // 5. Activate — create 'active' symlink
                 File activeLink = new File(kindDir, "active");
@@ -459,10 +489,12 @@ public final class SettingsActivity extends Activity {
                     pw.println("}");
                 }
                 output.append("Done.\n");
+                updateInstallProgress(100, "Done");
 
             } catch (Exception e) {
                 if (exitCode == 0) exitCode = 1;
                 output.append("INSTALL FAILED: ").append(e.getMessage()).append('\n');
+                updateInstallProgress(-1, "Install failed — see error dialog");
             }
 
             final int code = exitCode;
@@ -473,6 +505,12 @@ public final class SettingsActivity extends Activity {
                 io.waylandie.display.shared.util.LogRingBuffer.append("[install] " + line);
             }
             runOnUiThread(() -> {
+                // Auto-dismiss the progress dialog on success OR failure.
+                // Guarded so we don't throw if the activity was destroyed
+                // mid-install (onDestroy already dismissed it).
+                if (installProgressDialog != null && installProgressDialog.isShowing()) {
+                    try { installProgressDialog.dismiss(); } catch (IllegalArgumentException ignored) {}
+                }
                 if (code == 0) {
                     toast(kind + " '" + slot + "' installed ✓");
                     log("Install succeeded: " + kind + " " + slot);
@@ -489,6 +527,23 @@ public final class SettingsActivity extends Activity {
         }, "wl-install-" + kind);
         runningInstallThread = t;
         t.start();
+    }
+
+    /**
+     * Updates the install progress dialog from a background thread.
+     * Safe to call from any thread; posts the actual UI mutation to the
+     * main looper via {@link #runOnUiThread(Runnable)}. No-op if the
+     * dialog has been dismissed (e.g., activity destroyed mid-install).
+     *
+     * @param progress 0-100 for the horizontal bar, or -1 to leave it unchanged
+     * @param message  new message text, or null to leave it unchanged
+     */
+    private void updateInstallProgress(final int progress, final String message) {
+        runOnUiThread(() -> {
+            if (installProgressDialog == null || !installProgressDialog.isShowing()) return;
+            if (progress >= 0) installProgressDialog.setProgress(progress);
+            if (message != null) installProgressDialog.setMessage(message);
+        });
     }
 
     /**
@@ -864,6 +919,14 @@ public final class SettingsActivity extends Activity {
     @Override
     protected void onDestroy() {
         super.onDestroy();
+        // Dismiss the install progress dialog to avoid leaking its
+        // window if the user navigates away mid-install. The install
+        // thread keeps running in the background; subsequent
+        // updateInstallProgress() calls become no-ops because the
+        // dialog is no longer showing (guard inside the helper).
+        if (installProgressDialog != null && installProgressDialog.isShowing()) {
+            try { installProgressDialog.dismiss(); } catch (IllegalArgumentException ignored) {}
+        }
         // Kill any running install process to prevent orphaned proot children
         // and stale bind mounts. On hard crashes (OOM, task-swipe), Android
         // may not call onDestroy(), but for normal navigation (user backs out

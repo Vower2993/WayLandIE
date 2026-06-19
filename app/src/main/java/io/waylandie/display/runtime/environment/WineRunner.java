@@ -164,6 +164,20 @@ public final class WineRunner {
         Log.i(TAG, "Wine binary: " + wineBin);
         Log.i(TAG, "Working dir: " + rootDir);
 
+        // 4.5. Start the Wayland bridge translator BEFORE launching Wine.
+        // The bridge creates a real Wayland display socket that Wine connects
+        // to. It translates Wayland dmabuf buffers → Android bridge protocol
+        // → zero-copy SurfaceControl presentation. Without it, Wine has no
+        // Wayland display to render to.
+        Process bridgeProcess = startBridgeTranslator(rootDir);
+        if (bridgeProcess != null) {
+            Log.i(TAG, "Bridge translator started (pid=" + getPid(bridgeProcess) + ")");
+            // Give the bridge 2 seconds to create the Wayland socket
+            try { Thread.sleep(2000); } catch (InterruptedException ignored) {}
+        } else {
+            Log.w(TAG, "Bridge translator not started — Wine may not be able to render");
+        }
+
         // 5. Build the process with environment
         ProcessBuilder pb = new ProcessBuilder(cmd);
         pb.directory(rootDir);
@@ -293,6 +307,65 @@ public final class WineRunner {
             Log.i(TAG, "Synced adrenotools driver to rootfs: " + destSo);
         } catch (Exception e) {
             Log.e(TAG, "Failed to sync adrenotools driver to rootfs", e);
+        }
+    }
+
+    /**
+     * Starts the Wayland bridge translator. The bridge is a C program
+     * (waylandie-wayland-bridge) that creates a real Wayland display socket,
+     * accepts Wine client connections, and translates Wayland dmabuf buffers
+     * to the Android bridge protocol for zero-copy SurfaceControl presentation.
+     *
+     * @return the bridge Process, or null if the binary is not found
+     */
+    private Process startBridgeTranslator(File rootDir) {
+        File bridgeBin = new File(rootDir, "usr/local/bin/waylandie-wayland-bridge");
+        if (!bridgeBin.exists()) {
+            Log.w(TAG, "Bridge translator not found at " + bridgeBin
+                    + " — Wine will have no Wayland display. Rebuild rootfs.");
+            return null;
+        }
+        bridgeBin.setExecutable(true, false);
+
+        try {
+            ProcessBuilder pb = new ProcessBuilder(bridgeBin.getAbsolutePath());
+            pb.directory(rootDir);
+            pb.redirectErrorStream(true);
+
+            Map<String, String> env = pb.environment();
+            env.clear();
+            File tmpDir = new File(rootDir, "usr/tmp");
+            if (!tmpDir.exists()) tmpDir.mkdirs();
+            File runtimeDir = new File(tmpDir, "runtime");
+            if (!runtimeDir.exists()) runtimeDir.mkdirs();
+
+            env.put("XDG_RUNTIME_DIR", runtimeDir.getAbsolutePath());
+            env.put("WAYLAND_DISPLAY", "waylandie");
+            env.put("WAYLANDIE_BRIDGE_SOCKET", "waylandie.display.bridge.v1");
+            env.put("WAYLANDIE_BRIDGE_PORT", "57391");
+            env.put("WAYLANDIE_BRIDGE_PREFER", "abstract");
+            env.put("WAYLANDIE_FINAL_COPY", "forbidden");
+            env.put("LD_LIBRARY_PATH",
+                    new File(rootDir, "usr/lib").getAbsolutePath() + ":"
+                    + new File(rootDir, "usr/local/lib").getAbsolutePath());
+            env.put("PATH", new File(rootDir, "usr/bin").getAbsolutePath() + ":"
+                    + new File(rootDir, "usr/local/bin").getAbsolutePath());
+
+            Log.i(TAG, "Starting bridge translator: " + bridgeBin);
+            return pb.start();
+        } catch (IOException e) {
+            Log.e(TAG, "Failed to start bridge translator", e);
+            return null;
+        }
+    }
+
+    private static long getPid(Process p) {
+        try {
+            java.lang.reflect.Field pidField = p.getClass().getDeclaredField("pid");
+            pidField.setAccessible(true);
+            return pidField.getLong(p);
+        } catch (Exception e) {
+            return -1;
         }
     }
 

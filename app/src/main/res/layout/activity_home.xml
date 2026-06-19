@@ -188,6 +188,10 @@
                 android:layout_width="match_parent" android:layout_height="wrap_content"
                 android:text="Settings — Drivers &amp; Wrappers" />
 
+            <Button android:id="@+id/btnTaskManager" style="@style/PrimaryButton"
+                android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:text="Task Manager (running processes)" />
+
             <Button android:id="@+id/btnSaveLogs" style="@style/PrimaryButton"
                 android:layout_width="match_parent" android:layout_height="wrap_content"
                 android:text="Save Logs (for debugging)"

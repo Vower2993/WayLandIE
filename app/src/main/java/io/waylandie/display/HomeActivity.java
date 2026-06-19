@@ -22,6 +22,7 @@ import android.view.InputDevice;
 import android.view.View;
 import android.widget.Button;
 import android.widget.CheckBox;
+import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -73,6 +74,7 @@ public final class HomeActivity extends Activity {
     private Button btnSettings;
     private Button btnSaveLogs;
     private Button btnAbout;
+    private Button btnTaskManager;
 
     private final Handler main = new Handler(Looper.getMainLooper());
     private PowerManager.WakeLock wakeLock;
@@ -80,6 +82,13 @@ public final class HomeActivity extends Activity {
     private Uri pickedUri;
     private String pickedRealPath;
     private final List<String> logBuffer = new ArrayList<>();
+
+    // Task Manager — tracks the currently-running Wine/exe process so
+    // the user can inspect its status and forcibly kill it from the
+    // home screen. Both fields are reset (null / -1) when the process
+    // is detected to have exited (via Refresh).
+    private Process runningWineProcess;
+    private int winePid = -1;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -133,6 +142,7 @@ public final class HomeActivity extends Activity {
         btnSettings = findViewById(R.id.btnSettings);
         btnSaveLogs = findViewById(R.id.btnSaveLogs);
         btnAbout = findViewById(R.id.btnAbout);
+        btnTaskManager = findViewById(R.id.btnTaskManager);
     }
 
     private void wireListeners() {
@@ -145,6 +155,7 @@ public final class HomeActivity extends Activity {
                 startActivity(new Intent(this, SettingsActivity.class)));
         btnSaveLogs.setOnClickListener(v -> saveLogs());
         btnAbout.setOnClickListener(v -> showAbout());
+        btnTaskManager.setOnClickListener(v -> showTaskManager());
     }
 
     @Override
@@ -265,7 +276,9 @@ public final class HomeActivity extends Activity {
         try {
             String[] extraArgs = gamescope ? new String[]{"--gamescope"} : new String[0];
             Process p = wineRunner.execWine(exePath, extraArgs, useProton);
-            log("Wine process started (pid=" + getPid(p) + ")");
+            runningWineProcess = p;
+            winePid = (int) getPid(p);
+            log("Wine process started (pid=" + winePid + ")");
         } catch (IOException error) {
             log("Launch failed: " + error.getMessage());
             toast("Launch failed: " + error.getMessage());
@@ -295,6 +308,13 @@ public final class HomeActivity extends Activity {
         BridgeKeepAliveService.start(this);
         Intent intent = new Intent(this, MainActivity.class);
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        // CRITICAL: Enable the Wayland bridge server. Without this extra,
+        // MainActivity.startBridgeControlServerIfNeeded() early-returns at
+        // line 1054, the TCP 57391 listener and abstract socket
+        // "waylandie.display.bridge.v1" are never bound, and Wine has no
+        // Wayland display to connect to. This was the root cause of
+        // "bridge: off" in every diagnostic log.
+        intent.putExtra("waylandie_bridge_server", true);
         startActivity(intent);
         acquireWakeLock();
         refreshBridgeStatus();
@@ -319,6 +339,101 @@ public final class HomeActivity extends Activity {
         } catch (IOException error) {
             log("Steam launch failed: " + error.getMessage());
             toast("Steam launch failed: " + error.getMessage());
+        }
+    }
+
+    // --- Task Manager (running Wine/exe process status) ---
+    /**
+     * Shows the Task Manager dialog. Lists the currently-running Wine
+     * process (if any), its PID, and whether it is still alive. Offers
+     * Kill Process + Refresh actions inline; Close is the dialog's
+     * positive button. If no process has been launched since activity
+     * creation (or the last reset), shows a "not running" state with
+     * only the Close button.
+     */
+    private void showTaskManager() {
+        final AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle("Task Manager")
+                .setPositiveButton("Close", null)
+                .create();
+        // Body is a LinearLayout whose children we swap on Refresh / Kill
+        // — we can't call setView() after show(), but we CAN clear and
+        // repopulate the existing container, which is what
+        // refreshTaskManagerBody() does.
+        final LinearLayout body = new LinearLayout(this);
+        body.setOrientation(LinearLayout.VERTICAL);
+        body.setPadding(48, 32, 48, 32);
+        dialog.setView(body);
+        dialog.show();
+        refreshTaskManagerBody(body, dialog);
+    }
+
+    /**
+     * Populates (or re-populates) the Task Manager dialog body with the
+     * current process state. Called once on dialog show, then again on
+     * every Kill / Refresh tap so the user sees up-to-date status.
+     */
+    private void refreshTaskManagerBody(final LinearLayout body, final AlertDialog dialog) {
+        body.removeAllViews();
+
+        final boolean hasProcess = runningWineProcess != null;
+        final boolean alive = hasProcess && runningWineProcess.isAlive();
+
+        TextView status = new TextView(this);
+        status.setTextColor(0xFFF5F5F7);
+        status.setTextSize(13);
+        status.setLineSpacing(0, 1.3f);
+        if (hasProcess) {
+            status.setText("Wine process: Running (PID: " + winePid + ")\n"
+                    + "Status: " + (alive ? "Alive" : "Exited"));
+        } else {
+            status.setText("Wine process: Not running\n"
+                    + "No game is currently running.");
+        }
+        body.addView(status);
+
+        if (hasProcess) {
+            // Inline button row: [Kill Process] [Refresh]
+            // Close is the dialog's positive button (rendered separately
+            // by AlertDialog at the bottom-right).
+            LinearLayout row = new LinearLayout(this);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            row.setGravity(android.view.Gravity.CENTER_VERTICAL);
+            LinearLayout.LayoutParams rowLp = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT);
+            rowLp.topMargin = 24;
+            row.setLayoutParams(rowLp);
+
+            Button kill = new Button(this);
+            kill.setText("Kill Process");
+            LinearLayout.LayoutParams killLp = new LinearLayout.LayoutParams(
+                    0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+            killLp.rightMargin = 8;
+            kill.setLayoutParams(killLp);
+            kill.setEnabled(alive);
+            kill.setOnClickListener(v -> {
+                if (runningWineProcess != null && runningWineProcess.isAlive()) {
+                    runningWineProcess.destroyForcibly();
+                    log("Killed Wine process (pid=" + winePid + ") via Task Manager");
+                    toast("Kill signal sent to pid " + winePid);
+                } else {
+                    toast("Process already exited.");
+                }
+                refreshTaskManagerBody(body, dialog);
+            });
+            row.addView(kill);
+
+            Button refresh = new Button(this);
+            refresh.setText("Refresh");
+            LinearLayout.LayoutParams refLp = new LinearLayout.LayoutParams(
+                    0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+            refLp.leftMargin = 8;
+            refresh.setLayoutParams(refLp);
+            refresh.setOnClickListener(v -> refreshTaskManagerBody(body, dialog));
+            row.addView(refresh);
+
+            body.addView(row);
         }
     }
 

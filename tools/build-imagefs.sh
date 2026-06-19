@@ -125,14 +125,16 @@ chroot_run apt-get install -y --no-install-recommends \
     ca-certificates wget curl xz-utils tar bzip2 gzip unzip binutils \
     locales bash coreutils findutils \
     libwayland-client0 libwayland-server0 wayland-protocols \
+    wayland-scanner libwayland-dev \
     libvulkan1 vulkan-tools mesa-vulkan-drivers mesa-utils \
     libpulse0 pulseaudio pulseaudio-utils \
     libfreetype6 libfontconfig1 libgnutls30 libxcomposite1 \
     libxinerama1 libxcursor1 libxrandr2 libxi6 libxtst6 \
     libxrender1 libxext6 libxfixes3 libxxf86vm1 \
+    libx11-dev libxtst-dev \
     libgl1 libegl1 libgles2 \
     libgstreamer1.0-0 libgstreamer-plugins-base1.0-0 \
-    desktop-file-utils 2>&1 | tail -5
+    desktop-file-utils gcc pkg-config 2>&1 | tail -5
 
 chroot_run locale-gen en_US.UTF-8 2>/dev/null || true
 
@@ -164,6 +166,70 @@ if [ -f "$ROOTFS_DIR/usr/bin/box64" ]; then
     else
         echo "  ⚠ WARNING: box64 is NOT bionic — may not work without glibc linker"
     fi
+fi
+
+# ---------------------------------------------------------------------
+# 3.5. Compile the Wayland-to-Android bridge translator
+# ---------------------------------------------------------------------
+# The bridge is a ~3900-line C program that implements a minimal Wayland
+# compositor (wl_compositor, xdg_wm_base, linux-dmabuf, presentation-time,
+# viewporter, seat, relative-pointer, pointer-constraints). It accepts
+# Wayland client connections from Wine, extracts dmabuf fds, and forwards
+# them to the Android bridge (abstract socket waylandie.display.bridge.v1)
+# via the custom "waylandie-bridge" text protocol. This is the zero-copy
+# path — dmabuf fds pass through directly, no CPU copy.
+#
+# Source: AstroCODEsky/WayLandIE (MIT license), adapted for our build.
+echo "[3.5/7] Compiling Wayland bridge translator…"
+BRIDGE_SRC="$SCRIPT_DIR/../app/src/main/assets/linux-runtime/bridge/waylandie-wayland-bridge.c"
+if [ -f "$BRIDGE_SRC" ]; then
+    cp "$BRIDGE_SRC" "$ROOTFS_DIR/tmp/waylandie-wayland-bridge.c"
+
+    # Generate Wayland protocol headers + source files
+    chroot_run bash -c '
+        cd /tmp && \
+        XML_DIR=/usr/share/wayland-protocols && \
+        wayland-scanner server-header $XML_DIR/stable/xdg-shell/xdg-shell.xml /tmp/xdg-shell-server-protocol.h && \
+        wayland-scanner private-code $XML_DIR/stable/xdg-shell/xdg-shell.xml /tmp/xdg-shell-protocol.c && \
+        wayland-scanner server-header $XML_DIR/unstable/linux-dmabuf/linux-dmabuf-unstable-v1.xml /tmp/linux-dmabuf-unstable-v1-server-protocol.h && \
+        wayland-scanner private-code $XML_DIR/unstable/linux-dmabuf/linux-dmabuf-unstable-v1.xml /tmp/linux-dmabuf-unstable-v1-protocol.c && \
+        wayland-scanner server-header $XML_DIR/stable/presentation-time/presentation-time.xml /tmp/presentation-time-server-protocol.h && \
+        wayland-scanner private-code $XML_DIR/stable/presentation-time/presentation-time.xml /tmp/presentation-time-protocol.c && \
+        wayland-scanner server-header $XML_DIR/stable/viewporter/viewporter.xml /tmp/viewporter-server-protocol.h && \
+        wayland-scanner private-code $XML_DIR/stable/viewporter/viewporter.xml /tmp/viewporter-protocol.c && \
+        wayland-scanner server-header $XML_DIR/unstable/relative-pointer/relative-pointer-unstable-v1.xml /tmp/relative-pointer-unstable-v1-server-protocol.h && \
+        wayland-scanner private-code $XML_DIR/unstable/relative-pointer/relative-pointer-unstable-v1.xml /tmp/relative-pointer-unstable-v1-protocol.c && \
+        wayland-scanner server-header $XML_DIR/unstable/pointer-constraints/pointer-constraints-unstable-v1.xml /tmp/pointer-constraints-unstable-v1-server-protocol.h && \
+        wayland-scanner private-code $XML_DIR/unstable/pointer-constraints/pointer-constraints-unstable-v1.xml /tmp/pointer-constraints-unstable-v1-protocol.c && \
+        echo "  protocol headers generated"
+    ' 2>&1 | tail -2
+
+    # Compile the bridge
+    chroot_run bash -c '
+        cc -Wall -Wextra -o /usr/local/bin/waylandie-wayland-bridge \
+            /tmp/waylandie-wayland-bridge.c \
+            /tmp/xdg-shell-protocol.c \
+            /tmp/linux-dmabuf-unstable-v1-protocol.c \
+            /tmp/presentation-time-protocol.c \
+            /tmp/viewporter-protocol.c \
+            /tmp/relative-pointer-unstable-v1-protocol.c \
+            /tmp/pointer-constraints-unstable-v1-protocol.c \
+            $(pkg-config --cflags --libs wayland-server x11 xtst) && \
+        chmod +x /usr/local/bin/waylandie-wayland-bridge && \
+        echo "  bridge compiled → /usr/local/bin/waylandie-wayland-bridge"
+    ' 2>&1 | tail -5
+
+    # Clean up temp files
+    rm -f "$ROOTFS_DIR/tmp/waylandie-wayland-bridge.c" "$ROOTFS_DIR/tmp/"*-protocol.{c,h}
+
+    # Verify
+    if [ -f "$ROOTFS_DIR/usr/local/bin/waylandie-wayland-bridge" ]; then
+        echo "  ✓ Wayland bridge translator installed"
+    else
+        echo "  ⚠ WARNING: bridge compilation failed — Wine won't be able to render"
+    fi
+else
+    echo "  ⚠ bridge source not found at $BRIDGE_SRC — skipping"
 fi
 
 # ---------------------------------------------------------------------
