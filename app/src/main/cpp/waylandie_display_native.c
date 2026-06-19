@@ -146,12 +146,18 @@ Java_io_waylandie_display_MainActivity_nativeProbeCompositor(JNIEnv *env, jclass
     pfn_destroy(inst, NULL);
     dlclose(vulkan);
 
-    /* 4. ANativeWindow_fromSurface — resolve from libnativewindow.so.
-     * We don't actually call it (we have no Surface yet), just confirm
-     * the symbol exists. */
-    void *nw = dlopen("libnativewindow.so", RTLD_NOW | RTLD_LOCAL);
+    /* 4. ANativeWindow_fromSurface — resolve from libandroid.so.
+     * NOTE: ANativeWindow_fromSurface is declared in
+     * <android/native_window_jni.h> and exported by libandroid.so,
+     * NOT libnativewindow.so. (libnativewindow.so provides the
+     * ASurfaceControl_* APIs added in API 29.) The original version
+     * of this probe incorrectly dlopen'd libnativewindow.so, which
+     * caused a false "symbol missing" failure even though the actual
+     * compositor code links libandroid at build time and the symbol
+     * IS available at runtime. */
+    void *nw = dlopen("libandroid.so", RTLD_NOW | RTLD_LOCAL);
     if (nw == NULL) {
-        return (*env)->NewStringUTF(env, "fail: dlopen libnativewindow.so");
+        return (*env)->NewStringUTF(env, "fail: dlopen libandroid.so");
     }
     void *fromSurface = dlsym(nw, "ANativeWindow_fromSurface");
     dlclose(nw);
