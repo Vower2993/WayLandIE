@@ -6,15 +6,23 @@
 #   turnip       Mesa Turnip KGSL bionic variant (.zip or .tar.gz)
 #                Standalone variant (links against libhardware.so) is
 #                REJECTED because it crashes with SIGTRAP in bionic.
-#   dxvk         Armec DXVK (bionic) — .tar.gz or .zip
-#   proton       Armec Proton (bionic) — .tar.gz
-#   fex          FEX-Emu rootfs (.tar.xz)
+#   dxvk         Armec DXVK (bionic) — .tar.gz, .zip, or .wcp
+#   proton       Armec Proton (bionic) — .tar.gz or .wcp
+#                (.wcp = Winlator Container Package; auto-detected by
+#                magic bytes, not extension. Internal layout may differ
+#                from Armec — caller should verify after extraction.)
+#   fex          FEX-Emu rootfs (.tar.xz or .wcp)
 #   qcom-adreno  Qualcomm proprietary driver (.deb) — kept for compat
 #   box86        box86 binary release (.tar.gz)
 #   box64        box64 binary release (.tar.gz)
 #
 # Usage:
 #   waylandie-install-driver --kind KIND --slot NAME --file PATH [--activate]
+#   waylandie-install-driver --list --file PATH
+#
+# The --list mode prints the archive's contents without extracting.
+# Useful for diagnosing layout mismatches (e.g. Winlator .wcp packages
+# that have a different internal structure than Armec packages).
 #
 # The slot is installed under:
 #   $PREFIX/share/waylandie/driver-slots/KIND/SLOT/
@@ -29,6 +37,7 @@ KIND=""
 SLOT=""
 FILE=""
 ACTIVATE=false
+LIST_ONLY=false
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -36,18 +45,136 @@ while [ $# -gt 0 ]; do
         --slot)     SLOT="$2"; shift 2 ;;
         --file)     FILE="$2"; shift 2 ;;
         --activate) ACTIVATE=true; shift ;;
+        --list)     LIST_ONLY=true; shift ;;
         *)          echo "unknown arg: $1" >&2; exit 2 ;;
     esac
 done
 
+[ -z "$FILE" ] && { echo "--file required" >&2; exit 2; }
+
+if [ "$LIST_ONLY" = "true" ]; then
+    # Resolve file path
+    for candidate in \
+        "$FILE" \
+        "/usr/local/share/waylandie/driver-archive/$(basename "$FILE")" \
+        "/sdcard/Download/$(basename "$FILE")" \
+        "/sdcard/Download/WayLandIE/drivers/$(basename "$FILE")" \
+        "/storage/emulated/0/Download/$(basename "$FILE")" \
+        "$HOME/storage/downloads/$(basename "$FILE")"; do
+        if [ -f "$candidate" ]; then
+            FILE="$candidate"
+            break
+        fi
+    done
+    if [ ! -f "$FILE" ]; then
+        echo "ERROR: file not found: $FILE" >&2
+        exit 1
+    fi
+    echo "=== Archive: $FILE ==="
+    echo "Size: $(stat -c%s "$FILE") bytes"
+    echo "Magic: $(head -c 4 "$FILE" | od -An -tx1 | tr -d ' ')"
+    echo ""
+    echo "=== Detection ==="
+    detect_archive_type "$FILE"
+    echo ""
+    echo "=== Contents (first 100 entries) ==="
+    list_archive_contents "$FILE" | head -100
+    exit 0
+fi
+
 [ -z "$KIND" ] && { echo "--kind required" >&2; exit 2; }
 [ -z "$SLOT" ] && { echo "--slot required" >&2; exit 2; }
-[ -z "$FILE" ] && { echo "--file required" >&2; exit 2; }
 
 case "$KIND" in
     turnip|dxvk|proton|fex|qcom-adreno|box86|box64) ;;
     *) echo "unknown kind: $KIND" >&2; exit 2 ;;
 esac
+
+# ---------------------------------------------------------------------
+# Archive format detection helpers
+# ---------------------------------------------------------------------
+# These detect format by MAGIC BYTES, not by file extension. This lets
+# us handle .wcp (Winlator Container Package) files, which are typically
+# gzip-compressed tar archives with a non-standard extension. Also
+# handles .deb, plain tar, zip, xz, and bzip2.
+#
+# Magic byte references:
+#   1f 8b         → gzip (tar.gz, .wcp, .tgz)
+#   42 5a 68      → bzip2 (tar.bz2, .tbz2)
+#   fd 37 7a 58 5a → xz (tar.xz, .txz)
+#   50 4b 03 04   → zip (.zip, .jar, .apk)
+#   21 3c 61 72 63→ ar archive (.deb)
+#   75 73 74 61 72 → ustar (plain tar, at offset 257)
+
+detect_archive_type() {
+    local f="$1"
+    local magic
+    magic=$(head -c 6 "$f" 2>/dev/null | od -An -tx1 | tr -d ' \n')
+    case "$magic" in
+        1f8b*)          echo "gzip" ;;
+        425a68*)        echo "bzip2" ;;
+        fd377a585a00*)  echo "xz" ;;
+        504b0304*)      echo "zip" ;;
+        213c61726368*)  echo "ar-deb" ;;
+        *)
+            # Check for ustar magic at offset 257 (plain tar)
+            if head -c 264 "$f" 2>/dev/null | tail -c 5 | grep -q "^ustar"; then
+                echo "tar"
+            else
+                echo "unknown"
+            fi
+            ;;
+    esac
+}
+
+list_archive_contents() {
+    local f="$1"
+    local type
+    type=$(detect_archive_type "$f")
+    case "$type" in
+        gzip)   tar -tzf "$f" 2>/dev/null ;;
+        bzip2)  tar -tjf "$f" 2>/dev/null ;;
+        xz)     tar -tJf "$f" 2>/dev/null ;;
+        tar)    tar -tf "$f" 2>/dev/null ;;
+        zip)    unzip -l "$f" 2>/dev/null | awk 'NR>3 && $4 != "" {print $4}' ;;
+        ar-deb) ar t "$f" 2>/dev/null ;;
+        *)
+            echo "  (unknown archive type, magic=$(head -c 4 "$f" | od -An -tx1 | tr -d ' '))" >&2
+            # Try tar then zip as last resort
+            tar -tf "$f" 2>/dev/null || unzip -l "$f" 2>/dev/null | awk 'NR>3 && $4 != "" {print $4}'
+            ;;
+    esac
+}
+
+extract_archive() {
+    # extract_archive <archive> <dest_dir>
+    local f="$1"
+    local dest="$2"
+    local type
+    type=$(detect_archive_type "$f")
+    echo "Detected archive type: $type"
+    case "$type" in
+        gzip)   tar -xzf "$f" -C "$dest" ;;
+        bzip2)  tar -xjf "$f" -C "$dest" ;;
+        xz)     tar -xJf "$f" -C "$dest" ;;
+        tar)    tar -xf "$f" -C "$dest" ;;
+        zip)    unzip -q "$f" -d "$dest" ;;
+        ar-deb)
+            local tmp
+            tmp=$(mktemp -d)
+            cp "$f" "$tmp/pkg.deb"
+            (cd "$tmp" && ar x pkg.deb && tar -xf data.tar.* -C "$dest" 2>/dev/null || true)
+            rm -rf "$tmp"
+            ;;
+        *)
+            echo "ERROR: unrecognized archive format (magic=$(head -c 4 "$f" | od -An -tx1 | tr -d ' '))" >&2
+            echo "  Tried gzip, bzip2, xz, tar, zip, deb." >&2
+            echo "  If this is a Winlator .wcp file, it should be gzip-compressed." >&2
+            echo "  If it's a different format, send the magic bytes above for support." >&2
+            return 1
+            ;;
+    esac
+}
 
 PREFIX="${WAYLANDIE_PREFIX:-/usr/local}"
 
@@ -84,24 +211,22 @@ rm -rf "$SLOT_DIR"/*
 echo "Installing $KIND slot '$SLOT' → $SLOT_DIR"
 
 # ---------------------------------------------------------------------
-# Extract
+# Extract — uses magic-byte detection so .wcp / .tar.gz / .zip / .deb
+# all work regardless of file extension.
 # ---------------------------------------------------------------------
-case "$FILE" in
-    *.deb)
-        TMP=$(mktemp -d)
-        cp "$FILE" "$TMP/pkg.deb"
-        (cd "$TMP" && ar x pkg.deb && tar -xf data.tar.* -C "$SLOT_DIR")
-        rm -rf "$TMP"
-        ;;
-    *.tar.gz|*.tgz)  tar -xzf "$FILE" -C "$SLOT_DIR" ;;
-    *.tar.xz|*.txz)  tar -xJf "$FILE" -C "$SLOT_DIR" ;;
-    *.tar.bz2|*.tbz2) tar -xjf "$FILE" -C "$SLOT_DIR" ;;
-    *.tar)           tar -xf "$FILE" -C "$SLOT_DIR" ;;
-    *.zip)           unzip -q "$FILE" -d "$SLOT_DIR" ;;
-    *)
-        tar -xf "$FILE" -C "$SLOT_DIR" 2>/dev/null || unzip -q "$FILE" -d "$SLOT_DIR"
-        ;;
-esac
+extract_archive "$FILE" "$SLOT_DIR" || {
+    echo "ERROR: extraction failed." >&2
+    echo "  Archive: $FILE" >&2
+    echo "  Detected type: $(detect_archive_type "$FILE")" >&2
+    echo "  Slot dir: $SLOT_DIR" >&2
+    echo "" >&2
+    echo "  First 20 entries in archive:" >&2
+    list_archive_contents "$FILE" 2>/dev/null | head -20 >&2
+    exit 1
+}
+echo "Extraction complete."
+echo "Top-level contents of slot dir:"
+ls -la "$SLOT_DIR" 2>/dev/null | head -20
 
 # ---------------------------------------------------------------------
 # Kind-specific validation + install

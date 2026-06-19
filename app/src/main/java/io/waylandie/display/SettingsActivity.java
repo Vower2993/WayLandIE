@@ -91,23 +91,15 @@ public final class SettingsActivity extends Activity {
     private void openArchivePicker(int requestCode, String title) {
         Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
         intent.addCategory(Intent.CATEGORY_OPENABLE);
+        // Accept ANY file — the user may have .wcp (Winlator Container
+        // Package), .tar.gz, .zip, .tar.xz, .deb, or other formats. The
+        // install script auto-detects format by magic bytes, not extension.
+        // Using setType("*/*") without EXTRA_MIME_TYPES makes the picker
+        // show all files, which is what we want.
         intent.setType("*/*");
-        intent.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{
-                "application/zip",
-                "application/x-tar",
-                "application/gzip",
-                "application/x-gzip",
-                "application/x-compressed-tar",
-                "application/x-xz-compressed-tar",
-                "application/x-bzip2",
-                "application/vnd.debian.binary-package",
-                "application/x-rar-compressed",
-                "application/x-7z-compressed",
-                "application/octet-stream"
-        });
         try {
             startActivityForResult(intent, requestCode);
-            toast(title + " — pick the archive file");
+            toast(title + " — pick the archive file (.tar.gz / .zip / .wcp / .tar.xz / .deb)");
         } catch (RuntimeException error) {
             toast("No file picker available: " + error.getMessage());
         }
@@ -169,18 +161,90 @@ public final class SettingsActivity extends Activity {
             return;
         }
 
-        // 2. Prompt the user for a slot name.
+        // 2. Preview the archive contents in a background thread, then
+        //    prompt for slot name with the preview shown. This lets the
+        //    user verify the archive has the expected layout (e.g. wine
+        //    binary present for proton) before committing to install.
+        toast("Copied. Analyzing archive…");
+        new Thread(() -> {
+            final String preview = previewArchive(outFile.getAbsolutePath());
+            runOnUiThread(() -> showInstallPromptWithPreview(kind, outFile, preview));
+        }).start();
+    }
+
+    /**
+     * Runs {@code waylandie-install-driver --list} inside proot to get
+     * the archive's detected format + first 100 entries. Returns the
+     * output as a string. If the command fails, returns an error message.
+     */
+    private String previewArchive(String archivePath) {
+        io.waylandie.display.runtime.environment.ProotRunner runner =
+                new io.waylandie.display.runtime.environment.ProotRunner(this);
+        if (!runner.isReady()) {
+            return "(Environment not ready — cannot preview. Tap Install anyway to try.)";
+        }
+        try {
+            Process p = runner.exec("waylandie-install-driver --list --file " + shellQuote(archivePath));
+            BufferedReader reader = new BufferedReader(
+                    new InputStreamReader(p.getInputStream()));
+            StringBuilder sb = new StringBuilder();
+            String line;
+            while ((line = reader.readLine()) != null) {
+                sb.append(line).append('\n');
+            }
+            p.waitFor();
+            return sb.length() > 0 ? sb.toString() : "(no output from preview command)";
+        } catch (Exception e) {
+            return "(preview failed: " + e.getMessage() + " — tap Install to try anyway)";
+        }
+    }
+
+    private void showInstallPromptWithPreview(String kind, File archiveFile, String preview) {
         final EditTextEx slotInput = new EditTextEx(this);
         slotInput.setHint("e.g. " + suggestSlotName(kind));
+
+        // Build a scrollable preview view
+        ScrollView previewScroll = new ScrollView(this);
+        TextView previewText = new TextView(this);
+        previewText.setTypeface(android.graphics.Typeface.MONOSPACE);
+        previewText.setTextSize(10);
+        previewText.setTextColor(0xFFA0A0B0);
+        previewText.setText("Archive preview:\n\n" + preview);
+        previewScroll.addView(previewText);
+
+        LinearLayout container = new LinearLayout(this);
+        container.setOrientation(LinearLayout.VERTICAL);
+        int pad = (int) (getResources().getDisplayMetrics().density * 16);
+        container.setPadding(pad, pad, pad, pad);
+
+        TextView label = new TextView(this);
+        label.setText("Copied to:\n" + archiveFile.getAbsolutePath()
+                + "\n\nEnter a slot name:");
+        label.setTextColor(0xFFF5F5F7);
+        label.setTextSize(13);
+        container.addView(label);
+
+        LinearLayout.LayoutParams slotParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        slotParams.topMargin = pad / 2;
+        slotInput.setLayoutParams(slotParams);
+        container.addView(slotInput);
+
+        LinearLayout.LayoutParams previewParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 0);
+        previewParams.weight = 1f;
+        previewParams.topMargin = pad;
+        previewScroll.setLayoutParams(previewParams);
+        container.addView(previewScroll);
+
         new AlertDialog.Builder(this)
                 .setTitle("Install " + kind)
-                .setMessage("Copied archive to:\n" + outFile.getAbsolutePath()
-                        + "\n\nEnter a slot name:")
-                .setView(slotInput)
+                .setView(container)
                 .setPositiveButton("Install", (d, w) -> {
                     String slot = slotInput.getText().toString().trim();
                     if (slot.isEmpty()) slot = suggestSlotName(kind);
-                    fireInstallCommand(kind, slot, outFile.getAbsolutePath());
+                    fireInstallCommand(kind, slot, archiveFile.getAbsolutePath());
                 })
                 .setNegativeButton(R.string.cancel, null)
                 .show();
