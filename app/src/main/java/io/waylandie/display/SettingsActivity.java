@@ -580,22 +580,59 @@ public final class SettingsActivity extends Activity {
                 break;
             }
             case "fex": {
-                if (!new File(slotDir, "bin").isDirectory()) {
-                    // Try hoisting
+                // FEX packages come in two layouts:
+                // 1. Winlator-style: contains profile.json + system32/ with DLLs
+                //    (FEX is loaded as WoW64 hook DLLs, not as a standalone bin/)
+                // 2. Standalone: contains bin/ + lib/ (raw FEX-Emu binary)
+                // Accept either layout.
+                File profileJson = new File(slotDir, "profile.json");
+                File system32Dir = new File(slotDir, "system32");
+                File binDir = new File(slotDir, "bin");
+
+                if (profileJson.isFile() && system32Dir.isDirectory()) {
+                    // Winlator-style FEX — copy DLLs to Wine prefix system32
+                    output.append("FEX Winlator-style (profile.json + system32/) ✓\n");
+                    installFexDllsToWinePrefix(system32Dir, output);
+                } else if (binDir.isDirectory()) {
+                    // Standalone FEX-Emu binary
+                    output.append("FEX bin/ found ✓\n");
+                } else {
+                    // Try hoisting nested layout
                     File[] topDirs = slotDir.listFiles(File::isDirectory);
-                    if (topDirs != null && topDirs.length == 1 && new File(topDirs[0], "bin").isDirectory()) {
+                    if (topDirs != null && topDirs.length == 1) {
                         File top = topDirs[0];
-                        File[] kids = top.listFiles();
-                        if (kids != null) {
-                            for (File kid : kids) kid.renameTo(new File(slotDir, kid.getName()));
+                        if (new File(top, "bin").isDirectory()
+                                || (new File(top, "profile.json").isFile()
+                                    && new File(top, "system32").isDirectory())) {
+                            output.append("Hoisting nested FEX layout: " + top.getName() + "\n");
+                            File[] kids = top.listFiles();
+                            if (kids != null) {
+                                for (File kid : kids) kid.renameTo(new File(slotDir, kid.getName()));
+                            }
+                            top.delete();
+                            // Re-check after hoisting
+                            if (new File(slotDir, "profile.json").isFile()
+                                    && new File(slotDir, "system32").isDirectory()) {
+                                output.append("FEX Winlator-style (after hoist) ✓\n");
+                                installFexDllsToWinePrefix(new File(slotDir, "system32"), output);
+                            } else if (new File(slotDir, "bin").isDirectory()) {
+                                output.append("FEX bin/ found (after hoist) ✓\n");
+                            } else {
+                                return "ERROR: FEX archive has unrecognized layout. "
+                                        + "Expected profile.json+system32/ or bin/. Found: "
+                                        + listContents(slotDir);
+                            }
+                        } else {
+                            return "ERROR: FEX archive has unrecognized layout. "
+                                    + "Expected profile.json+system32/ or bin/. Found: "
+                                    + listContents(slotDir);
                         }
-                        top.delete();
+                    } else {
+                        return "ERROR: FEX archive has unrecognized layout. "
+                                + "Expected profile.json+system32/ or bin/. Found: "
+                                + listContents(slotDir);
                     }
                 }
-                if (!new File(slotDir, "bin").isDirectory()) {
-                    return "ERROR: no bin/ directory in FEX archive.";
-                }
-                output.append("FEX bin/ found ✓\n");
                 break;
             }
         }
@@ -748,6 +785,52 @@ public final class SettingsActivity extends Activity {
                 out.write(buf, 0, n);
             }
         }
+    }
+
+    /**
+     * Copies FEX DLLs from the extracted system32/ into the Wine prefix's
+     * system32/. FEX (Winlator-style) is loaded as WoW64 hook DLLs, so the
+     * DLLs must be in the Wine prefix's system32/ directory.
+     */
+    private void installFexDllsToWinePrefix(File srcSystem32, StringBuilder output) {
+        try {
+            io.waylandie.display.runtime.environment.ImageFsManager imageFs =
+                    new io.waylandie.display.runtime.environment.ImageFsManager(this);
+            File winePrefix = new File(imageFs.getRootDir(), "home/xuser/.wine");
+            File dstSystem32 = new File(winePrefix, "drive_c/windows/system32");
+            dstSystem32.mkdirs();
+            File[] dlls = srcSystem32.listFiles((d, name) -> name.endsWith(".dll"));
+            if (dlls == null || dlls.length == 0) {
+                output.append("WARNING: no .dll files in FEX system32/\n");
+                return;
+            }
+            int copied = 0;
+            for (File dll : dlls) {
+                copyFile(dll, new File(dstSystem32, dll.getName()));
+                copied++;
+            }
+            output.append("FEX: copied ").append(copied).append(" DLLs to Wine prefix system32/\n");
+            output.append("  → ").append(dstSystem32).append('\n');
+        } catch (Exception e) {
+            output.append("WARNING: FEX DLL install failed: ").append(e.getMessage()).append('\n');
+        }
+    }
+
+    private String listContents(File dir) {
+        StringBuilder sb = new StringBuilder();
+        File[] kids = dir.listFiles();
+        if (kids != null) {
+            for (File kid : kids) {
+                sb.append(kid.getName());
+                if (kid.isDirectory()) {
+                    sb.append("/ (").append(kid.list() != null ? kid.list().length : 0).append(" items)");
+                } else {
+                    sb.append(" (").append(kid.length()).append(" bytes)");
+                }
+                sb.append(", ");
+            }
+        }
+        return sb.toString();
     }
 
     private void findRecursive(File dir, String pattern, StringBuilder out, int maxResults) {

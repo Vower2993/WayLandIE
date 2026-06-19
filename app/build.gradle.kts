@@ -123,6 +123,14 @@ dependencies {
     // decompress .tar.xz entirely in Java.
     implementation("org.tukaani:xz:1.10")
 
+    // Pure-Java zstd + tar decompression — Winlator's .wcp/.tzst files use
+    // zstd compression. Apache Commons Compress provides ZstdCompressorInputStream
+    // + TarArchiveInputStream for reliable extraction. This is the same library
+    // winlator (StevenMXZ/Winlator-Ludashi) uses for all its .tzst packages.
+    implementation("org.apache.commons:commons-compress:1.27.1")
+    // zstd-jni is the native bindings that commons-compress uses for zstd
+    implementation("com.github.luben:zstd-jni:1.5.6-2@aar")
+
     // Force Kotlin stdlib to a consistent version. androidx.activity:1.9.0
     // pulls in the modern kotlin-stdlib:1.8.22 (which absorbed the old
     // jdk7/jdk8 splits), but other AndroidX deps transitively pull in the

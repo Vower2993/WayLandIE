@@ -37,9 +37,10 @@ public final class TarCompressorUtils {
 
     public enum Type {
         XZ,      // .tar.xz / .txz
-        GZIP,    // .tar.gz / .tgz / .wcp (Winlator Container Package = gzip tar)
+        GZIP,    // .tar.gz / .tgz
         TAR,     // uncompressed .tar
-        ZIP      // .zip
+        ZIP,     // .zip
+        ZSTD     // .tar.zst / .tzst / .wcp (Winlator Container Package)
     }
 
     public interface OnExtractFileListener {
@@ -63,9 +64,10 @@ public final class TarCompressorUtils {
      * Returns the detected Type, or null if unrecognized.
      *
      * Magic bytes reference:
-     *   1f 8b           → gzip (tar.gz, .wcp, .tgz)
+     *   1f 8b           → gzip (tar.gz, .tgz)
      *   fd 37 7a 58 5a  → xz (tar.xz)
      *   50 4b 03 04     → zip
+     *   28 b5 2f fd     → zstd (.tzst, .wcp, .tar.zst)
      *   75 73 74 61 72  → ustar (plain tar, at offset 257)
      */
     public static Type detectArchiveType(File archiveFile) {
@@ -80,6 +82,9 @@ public final class TarCompressorUtils {
             if ((magic[0] & 0xFF) == 0xfd && (magic[1] & 0xFF) == 0x37
                     && (magic[2] & 0xFF) == 0x7a && (magic[3] & 0xFF) == 0x58
                     && (magic[4] & 0xFF) == 0x5a) return Type.XZ;
+            // zstd: 28 b5 2f fd
+            if ((magic[0] & 0xFF) == 0x28 && (magic[1] & 0xFF) == 0xb5
+                    && (magic[2] & 0xFF) == 0x2f && (magic[3] & 0xFF) == 0xfd) return Type.ZSTD;
             // zip: 50 4b 03 04
             if ((magic[0] & 0xFF) == 0x50 && (magic[1] & 0xFF) == 0x4b
                     && (magic[2] & 0xFF) == 0x03 && (magic[3] & 0xFF) == 0x04) return Type.ZIP;
@@ -139,6 +144,9 @@ public final class TarCompressorUtils {
         try {
             if (type == Type.ZIP) {
                 extractZip(archiveFile, outDir, listener);
+            } else if (type == Type.ZSTD) {
+                // Use Apache Commons Compress for zstd — same as winlator
+                extractZstdTar(archiveFile, outDir, listener);
             } else {
                 InputStream fileIn = new BufferedInputStream(new FileInputStream(archiveFile), 65536);
                 InputStream decompressed;
@@ -158,6 +166,73 @@ public final class TarCompressorUtils {
             Log.e(TAG, "Extraction failed for " + archiveFile, e);
             return false;
         }
+    }
+
+    /**
+     * Extracts a .tar.zst / .tzst / .wcp archive using Apache Commons Compress.
+     * This is the format winlator uses for all its .tzst packages.
+     * Pure Java — no shell zstd needed.
+     */
+    private static void extractZstdTar(File archiveFile, File outDir, OnExtractFileListener listener)
+            throws IOException {
+        long totalExtracted = 0;
+        try (InputStream fis = new BufferedInputStream(new FileInputStream(archiveFile), 65536)) {
+            // ZstdCompressorInputStream wraps the zstd-compressed stream
+            org.apache.commons.compress.compressors.zstandard.ZstdCompressorInputStream zstdIn =
+                    new org.apache.commons.compress.compressors.zstandard.ZstdCompressorInputStream(fis);
+            // TarArchiveInputStream wraps the decompressed tar stream
+            org.apache.commons.compress.archivers.tar.TarArchiveInputStream tarIn =
+                    new org.apache.commons.compress.archivers.tar.TarArchiveInputStream(zstdIn);
+            org.apache.commons.compress.archivers.tar.TarArchiveEntry entry;
+            while ((entry = tarIn.getNextTarEntry()) != null) {
+                String name = entry.getName();
+                if (name == null || name.isEmpty()) continue;
+                // Strip leading ./
+                if (name.startsWith("./")) name = name.substring(2);
+                File outFile = new File(outDir, name);
+                // Security: prevent path traversal
+                String outDirCanonical = outDir.getCanonicalPath();
+                String outFileCanonical = outFile.getCanonicalPath();
+                if (!outFileCanonical.startsWith(outDirCanonical + File.separator)
+                        && !outFileCanonical.equals(outDirCanonical)) {
+                    Log.w(TAG, "Skipping tar entry with path traversal: " + name);
+                    continue;
+                }
+                if (entry.isDirectory()) {
+                    outFile.mkdirs();
+                } else {
+                    outFile.getParentFile().mkdirs();
+                    try (OutputStream out = new BufferedOutputStream(new FileOutputStream(outFile), 65536)) {
+                        byte[] buf = new byte[65536];
+                        int n;
+                        while ((n = tarIn.read(buf)) > 0) {
+                            out.write(buf, 0, n);
+                            totalExtracted += n;
+                            if (listener != null && (totalExtracted % (1024 * 1024)) < 65536) {
+                                listener.onExtractedBytes(totalExtracted);
+                            }
+                        }
+                    }
+                    // Set executable for bin/ entries
+                    if (name.contains("/bin/") || name.startsWith("bin/")) {
+                        outFile.setExecutable(true, false);
+                    }
+                    // Handle symlinks
+                    if (entry.isSymbolicLink()) {
+                        try {
+                            java.nio.file.Files.createSymbolicLink(
+                                    outFile.toPath(),
+                                    new File(entry.getLinkName()).toPath());
+                        } catch (Exception e) {
+                            Log.w(TAG, "Symlink failed for " + name + ": " + e.getMessage());
+                        }
+                    }
+                }
+            }
+            tarIn.close();
+            zstdIn.close();
+        }
+        Log.i(TAG, "Zstd tar extraction complete. Total extracted: " + totalExtracted + " bytes");
     }
 
     /**
