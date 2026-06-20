@@ -89,18 +89,25 @@ jobs:
           sudo mkdir -p app/src/main/jniLibs/arm64-v8a
           sudo chown -R $(id -u):$(id -g) app/src/main/jniLibs
           mkdir -p /tmp/wl-linker-extract
-          # The linker is a symlink: usr/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1
-          # → ../../ld-linux-aarch64.so.1 (i.e., usr/lib/ld-linux-aarch64.so.1)
-          # Extract ALL matching files (symlink + target) using wildcards
+          # List all ld-linux files in the tarball for debugging
+          echo "  Searching for ld-linux in tarball…"
           xz -dc app/src/main/assets/imagefs/imagefs.tar.xz 2>/dev/null | \
-            tar -xf - -C /tmp/wl-linker-extract \
-              --wildcards "*/ld-linux-aarch64.so.1" 2>/dev/null || true
-          # Also try xz fallback
-          if [ ! -e /tmp/wl-linker-extract/usr/lib/ld-linux-aarch64.so.1 ]; then
+            tar -tf - 2>/dev/null | grep "ld-linux" | head -10
+          # Extract ALL matching files (try multiple patterns — tarball may use ./ prefix)
+          # Pattern 1: */ld-linux-aarch64.so.1 (matches ./usr/lib/ld-linux-aarch64.so.1)
+          # Pattern 2: ld-linux-aarch64.so.1 (exact match)
+          # Pattern 3: *ld-linux* (broadest match)
+          for pattern in "*/ld-linux-aarch64.so.1" "*ld-linux-aarch64*" "*ld-linux*"; do
+            echo "  Trying pattern: $pattern"
             xz -dc app/src/main/assets/imagefs/imagefs.tar.xz 2>/dev/null | \
               tar -xf - -C /tmp/wl-linker-extract \
-                --wildcards "*/ld-linux-aarch64.so.1" 2>/dev/null || true
-          fi
+                --wildcards "$pattern" 2>/dev/null
+            FOUND=$(find /tmp/wl-linker-extract -name "ld-linux-aarch64.so.1" -type f | head -1)
+            if [ -n "$FOUND" ]; then
+              echo "  ✓ Found with pattern: $pattern"
+              break
+            fi
+          done
           # Find the REAL file (not symlink) — the actual ELF binary
           FOUND=$(find /tmp/wl-linker-extract -name "ld-linux-aarch64.so.1" -type f | head -1)
           if [ -n "$FOUND" ]; then
@@ -123,7 +130,12 @@ jobs:
               echo "  ✓ glibc $GLIBC_VER is safe (< 2.34 — no seccomp SIGSYS)"
             fi
           else
-            echo "⚠ WARNING: glibc linker not found — proot fallback only"
+            echo "✗ FATAL: glibc linker not found in rootfs tarball"
+            echo "  Listing all files matching ld-linux in tarball:"
+            xz -dc app/src/main/assets/imagefs/imagefs.tar.xz 2>/dev/null | \
+              tar -tf - 2>/dev/null | grep -i "ld-linux\|linker" | head -20
+            echo "  If no files listed, the rootfs was built without glibc installed."
+            exit 1
           fi
           rm -rf /tmp/wl-linker-extract
 
