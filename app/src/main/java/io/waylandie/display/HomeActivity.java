@@ -1104,6 +1104,79 @@ public final class HomeActivity extends Activity {
                 warned++;
             }
 
+            // Test F: LD_PRELOAD each bridge library to identify which one
+            // triggers SIGSYS. /bin/echo works alone but the bridge crashes,
+            // so a library CONSTRUCTOR is making a blocked syscall.
+            // Test each library: libwayland-server, libX11, libXtst, libvulkan
+            results.append("Test F: LD_PRELOAD library constructor SIGSYS test:\n");
+            File echoBinF = new File(rootDir, "usr/bin/echo");
+            File linkerF = new File(nativeLibDir, "libld_glibc.so");
+            if (echoBinF.exists() && linkerF.exists()) {
+                String baseLibPath = new File(rootDir, "usr/lib").getAbsolutePath() + ":"
+                        + new File(rootDir, "usr/lib/aarch64-linux-gnu").getAbsolutePath() + ":"
+                        + new File(rootDir, "usr/local/lib").getAbsolutePath();
+                String[] libsToTest = {
+                    "libwayland-server.so.0",
+                    "libwayland-client.so.0",
+                    "libX11.so.6",
+                    "libXtst.so.6",
+                    "libXext.so.6",
+                    "libX11-xcb.so.1",
+                    "libxcb.so.1",
+                    "libvulkan.so.1",
+                    "libfreetype.so.6"
+                };
+                for (String libName : libsToTest) {
+                    File libFile = new File(rootDir, "usr/lib/aarch64-linux-gnu/" + libName);
+                    if (!libFile.exists()) libFile = new File(rootDir, "usr/local/lib/" + libName);
+                    if (!libFile.exists()) {
+                        results.append("  " + libName + ": NOT FOUND — skip\n");
+                        continue;
+                    }
+                    try {
+                        List<String> cmd = new ArrayList<>();
+                        cmd.add(linkerF.getAbsolutePath());
+                        cmd.add("--library-path");
+                        cmd.add(baseLibPath);
+                        cmd.add(echoBinF.getAbsolutePath());
+                        cmd.add("preload-test-" + libName);
+                        ProcessBuilder pb = new ProcessBuilder(cmd);
+                        pb.redirectErrorStream(true);
+                        pb.environment().clear();
+                        pb.environment().put("LD_LIBRARY_PATH", baseLibPath);
+                        pb.environment().put("LD_PRELOAD", libFile.getAbsolutePath());
+                        Process p = pb.start();
+                        StringBuilder out = new StringBuilder();
+                        Thread reader = new Thread(() -> {
+                            try (java.io.BufferedReader r = new java.io.BufferedReader(
+                                    new java.io.InputStreamReader(p.getInputStream()))) {
+                                String l;
+                                while ((l = r.readLine()) != null) out.append(l).append('\n');
+                            } catch (Exception ignored) {}
+                        }, "wl-diag-preload-" + libName);
+                        reader.start();
+                        boolean exited = p.waitFor(5, java.util.concurrent.TimeUnit.SECONDS);
+                        if (!exited) p.destroyForcibly();
+                        reader.join(500);
+                        int exit = -1;
+                        try { exit = p.exitValue(); } catch (Exception ignored) {}
+                        if (exit == 0) {
+                            results.append("  ✓ " + libName + ": OK (exit=0)\n");
+                        } else if (exit == 159) {
+                            results.append("  ✗ " + libName + ": SIGSYS (exit=159) ← THIS LIBRARY TRIGGERS SIGSYS\n");
+                        } else {
+                            String snippet = out.toString().trim();
+                            if (snippet.length() > 100) snippet = snippet.substring(0, 100);
+                            results.append("  ⚠ " + libName + ": exit=" + exit + " " + snippet + "\n");
+                        }
+                    } catch (Exception e) {
+                        results.append("  ⚠ " + libName + ": test failed: " + e.getMessage() + "\n");
+                    }
+                }
+            } else {
+                results.append("Test F: SKIP (/bin/echo or linker not found)\n");
+            }
+
             // === 4. PROTON + WINE ===
             results.append("\n--- PROTON + WINE ---\n");
             File protonDir = new File(filesDir, "contents/proton/active");
