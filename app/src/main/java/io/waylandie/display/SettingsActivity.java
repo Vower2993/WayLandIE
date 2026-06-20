@@ -723,51 +723,71 @@ public final class SettingsActivity extends Activity {
             io.waylandie.display.runtime.environment.ImageFsManager imageFs =
                     new io.waylandie.display.runtime.environment.ImageFsManager(this);
             File winePrefix = new File(imageFs.getRootDir(), "home/xuser/.wine");
-            File system32 = new File(winePrefix, "drive_c/windows/system32");
-            File syswow64 = new File(winePrefix, "drive_c/windows/syswow64");
-            system32.mkdirs();
-            syswow64.mkdirs();
+            File dstSystem32 = new File(winePrefix, "drive_c/windows/system32");
+            File dstSyswow64 = new File(winePrefix, "drive_c/windows/syswow64");
+            dstSystem32.mkdirs();
+            dstSyswow64.mkdirs();
 
-            // DXVK layout: x64/*.dll → system32, x32/*.dll → syswow64
-            // Also try flat layout: *.dll at root → both
-            String[] dxvkDlls = {"d3d8.dll", "d3d9.dll", "d3d10.dll", "d3d10_1.dll",
-                    "d3d10core.dll", "d3d11.dll", "dxgi.dll"};
             int copied = 0;
-            for (String dll : dxvkDlls) {
-                // Try x64/ first
-                File x64Dll = new File(slotDir, "x64/" + dll);
-                if (!x64Dll.isFile()) x64Dll = findFileRecursiveFile(slotDir, dll);
-                if (x64Dll != null && x64Dll.getAbsolutePath().contains("x64")) {
-                    copyFile(x64Dll, new File(system32, dll));
-                    copied++;
-                }
-                // Try x32/
-                File x32Dll = new File(slotDir, "x32/" + dll);
-                if (!x32Dll.isFile()) {
-                    // Search in x32/ subdir
-                    File x32Dir = new File(slotDir, "x32");
-                    if (x32Dir.isDirectory()) {
-                        x32Dll = new File(x32Dir, dll);
+
+            // Layout 1: Winlator-style — system32/ and syswow64/ at top level
+            File srcSystem32 = new File(slotDir, "system32");
+            File srcSyswow64 = new File(slotDir, "syswow64");
+            if (srcSystem32.isDirectory()) {
+                File[] dlls = srcSystem32.listFiles((d, name) -> name.endsWith(".dll"));
+                if (dlls != null) {
+                    for (File dll : dlls) {
+                        copyFile(dll, new File(dstSystem32, dll.getName()));
+                        copied++;
                     }
                 }
-                if (x32Dll != null && x32Dll.isFile()) {
-                    copyFile(x32Dll, new File(syswow64, dll));
-                    copied++;
+            }
+            if (srcSyswow64.isDirectory()) {
+                File[] dlls = srcSyswow64.listFiles((d, name) -> name.endsWith(".dll"));
+                if (dlls != null) {
+                    for (File dll : dlls) {
+                        copyFile(dll, new File(dstSyswow64, dll.getName()));
+                        copied++;
+                    }
                 }
             }
+
+            // Layout 2: Standard DXVK — x64/ and x32/ subdirs
+            if (copied == 0) {
+                String[] dxvkDlls = {"d3d8.dll", "d3d9.dll", "d3d10.dll", "d3d10_1.dll",
+                        "d3d10core.dll", "d3d11.dll", "dxgi.dll"};
+                for (String dll : dxvkDlls) {
+                    File x64Dll = new File(slotDir, "x64/" + dll);
+                    if (!x64Dll.isFile()) x64Dll = findFileRecursiveFile(slotDir, dll);
+                    if (x64Dll != null) {
+                        copyFile(x64Dll, new File(dstSystem32, dll));
+                        copied++;
+                    }
+                    File x32Dir = new File(slotDir, "x32");
+                    if (x32Dir.isDirectory()) {
+                        File x32Dll = new File(x32Dir, dll);
+                        if (x32Dll.isFile()) {
+                            copyFile(x32Dll, new File(dstSyswow64, dll));
+                            copied++;
+                        }
+                    }
+                }
+            }
+
             output.append("DXVK: copied ").append(copied).append(" dlls to Wine prefix\n");
-            output.append("  system32: ").append(system32).append('\n');
-            output.append("  syswow64: ").append(syswow64).append('\n');
+            output.append("  system32: ").append(dstSystem32).append('\n');
+            output.append("  syswow64: ").append(dstSyswow64).append('\n');
         } catch (Exception e) {
             output.append("WARNING: DXVK prefix install failed: ").append(e.getMessage()).append('\n');
         }
     }
 
     /**
-     * Creates the Vulkan ICD JSON at the GUEST path that VK_ICD_FILENAMES
-     * points to. The ICD JSON tells the Vulkan loader where to find the
-     * Turnip driver .so. The .so path in the JSON is the GUEST path
-     * (/opt/turnip/...) because the Vulkan loader runs inside proot.
+     * Creates the Vulkan ICD JSON pointing to the Turnip driver .so.
+     * The .so is copied to rootfs/usr/local/lib/ so the ICD JSON uses
+     * /usr/local/lib/libvulkan_freedreno.so — this path works in BOTH
+     * native mode (rootfs is the working directory) and proot mode
+     * (rootfs is the proot root).
      */
     private void installTurnipIcd(File turnipSo, StringBuilder output) {
         try {
@@ -777,46 +797,25 @@ public final class SettingsActivity extends Activity {
             icdDir.mkdirs();
             File icdFile = new File(icdDir, "freedreno_icd.json");
 
-            // The .so path in the ICD JSON must be the GUEST path — the path
-            // as seen inside proot. The Turnip slot is bind-mounted to
-            // /opt/turnip, so the .so is at /opt/turnip/<relative path>.
-            // We compute the relative path from the slot dir.
-            File slotDir = turnipSo.getParentFile();
-            File turnipRoot = slotDir;
-            // Walk up to find the slot root (contents/turnip/<slot>/)
-            while (turnipRoot != null && !turnipRoot.getName().equals("active")
-                    && !turnipRoot.getParentFile().getName().equals("turnip")) {
-                turnipRoot = turnipRoot.getParentFile();
-                if (turnipRoot == null) break;
-            }
-            // The guest path is /opt/turnip/ + relative path from slot root
-            String relativePath = "";
-            if (turnipRoot != null) {
-                relativePath = turnipSo.getAbsolutePath().substring(
-                        turnipRoot.getAbsolutePath().length() + 1);
-            } else {
-                relativePath = turnipSo.getName();
-            }
-            String guestSoPath = "/opt/turnip/" + relativePath;
+            // Copy the .so to rootfs/usr/local/lib/ — this path works in
+            // both native and proot modes.
+            File libDir = new File(imageFs.getRootDir(), "usr/local/lib");
+            libDir.mkdirs();
+            File destSo = new File(libDir, "libvulkan_freedreno.so");
+            copyFile(turnipSo, destSo);
 
-            // Write ICD JSON
+            // Write ICD JSON pointing to /usr/local/lib/ (works in both modes)
             try (java.io.PrintWriter pw = new java.io.PrintWriter(icdFile)) {
                 pw.println("{");
                 pw.println("    \"file_format_version\": \"1.0.0\",");
                 pw.println("    \"ICD\": {");
-                pw.println("        \"library_path\": \"" + guestSoPath + "\",");
+                pw.println("        \"library_path\": \"/usr/local/lib/libvulkan_freedreno.so\",");
                 pw.println("        \"api_version\": \"1.3.0\"");
                 pw.println("    }");
                 pw.println("}");
             }
             output.append("Turnip ICD JSON: ").append(icdFile).append('\n');
-            output.append("  → library_path: ").append(guestSoPath).append('\n');
-
-            // Also copy the .so to the rootfs lib path (belt + suspenders)
-            File libDir = new File(imageFs.getRootDir(), "usr/local/lib");
-            libDir.mkdirs();
-            File destSo = new File(libDir, "libvulkan_freedreno.so");
-            copyFile(turnipSo, destSo);
+            output.append("  → library_path: /usr/local/lib/libvulkan_freedreno.so\n");
             output.append("  Also copied .so to: ").append(destSo).append('\n');
 
             // Disable llvmpipe ICD if present (so Turnip wins)

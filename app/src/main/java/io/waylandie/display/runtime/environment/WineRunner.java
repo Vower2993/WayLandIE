@@ -142,7 +142,11 @@ public final class WineRunner {
         File linker = new File(nativeLibDir, "libld_glibc.so");
 
         // Build library path: rootfs libs + proton libs
+        // CRITICAL: Debian multiarch puts libs in /usr/lib/aarch64-linux-gnu/
+        // not /usr/lib/. Without this path, wine + bridge can't find libX11,
+        // libwayland-server, libfreetype, etc.
         String libPath = new File(rootDir, "usr/lib").getAbsolutePath() + ":"
+                + new File(rootDir, "usr/lib/aarch64-linux-gnu").getAbsolutePath() + ":"
                 + new File(rootDir, "usr/local/lib").getAbsolutePath() + ":"
                 + new File(protonDir, "files/lib").getAbsolutePath();
 
@@ -196,7 +200,24 @@ public final class WineRunner {
         env.clear();
         setupEnvironment(env, rootDir, protonDir, isArm64ec, fexCoreInstalled);
 
-        return pb.start();
+        Process p = pb.start();
+
+        // Capture output in a background thread so we can see Wine errors
+        // in logcat. Without this, if Wine crashes we have no idea why.
+        new Thread(() -> {
+            try (java.io.BufferedReader reader = new java.io.BufferedReader(
+                    new java.io.InputStreamReader(p.getInputStream()))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    Log.i("WayLandIE/Wine", line);
+                    io.waylandie.display.shared.util.LogRingBuffer.append("[wine] " + line);
+                }
+            } catch (java.io.IOException e) {
+                Log.w(TAG, "Wine output stream closed: " + e.getMessage());
+            }
+        }, "wl-wine-output").start();
+
+        return p;
     }
 
     /**
