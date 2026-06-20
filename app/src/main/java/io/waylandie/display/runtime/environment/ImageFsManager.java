@@ -49,7 +49,7 @@ public final class ImageFsManager {
     // Ubuntu 20.04 Focal (glibc 2.31). glibc 2.41 triggers SIGSYS on
     // Android 16 (seccomp blocks rseq/clone3). glibc 2.31 is safe.
     public static final int LATEST_VERSION = 4;
-    private static final String IMAGEFS_ARCHIVE = "imagefs/imagefs.tar.zst";
+    private static final String IMAGEFS_ARCHIVE = "imagefs/imagefs.tar.xz";
     private static final long IMAGEFS_EXTRACTED_BYTES = 500_000_000L;
 
     private final Context context;
@@ -219,32 +219,53 @@ public final class ImageFsManager {
         }
 
         // Extract the imagefs tarball
-        AtomicLong totalBytes = new AtomicLong(0);
-        TarCompressorUtils.OnExtractFileListener extractListener =
-                new TarCompressorUtils.OnExtractFileListener() {
-                    @Override
-                    public File onExtractFile(File file, long size) { return file; }
-                    @Override
-                    public void onExtractFileProgress(File file, long size) {}
-                    @Override
-                    public void onExtractedBytes(long size) {
-                        long total = totalBytes.addAndGet(size);
-                        int percent = (int) Math.min(99,
-                                (total * 100L) / IMAGEFS_EXTRACTED_BYTES);
-                        if (listener != null) listener.onProgress(percent);
-                    }
-                };
+        // FAST PATH: Use Android's native toybox tar (3-5x faster than Java).
+        // Copy asset to temp file, then run 'tar -xJf <temp> -C <rootDir>'.
+        // FALLBACK: If native tar fails, use Java extraction (Apache Commons).
+        if (listener != null) listener.onProgress(1);
+        boolean ok = false;
 
-        boolean ok = TarCompressorUtils.extractSync(
-                TarCompressorUtils.Type.ZSTD,
-                context,
-                IMAGEFS_ARCHIVE,
-                rootDir,
-                extractListener);
+        // Try native tar extraction first
+        try {
+            ok = extractWithNativeTar(context, IMAGEFS_ARCHIVE, rootDir, listener);
+            if (ok) {
+                Log.i(TAG, "Rootfs extracted via native tar (fast path)");
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "Native tar extraction failed: " + e.getMessage() + " — falling back to Java");
+        }
+
+        // Fall back to Java extraction if native failed
+        if (!ok) {
+            Log.i(TAG, "Falling back to Java extraction (slower)");
+            if (listener != null) listener.onProgress(5);
+            AtomicLong totalBytes = new AtomicLong(0);
+            TarCompressorUtils.OnExtractFileListener extractListener =
+                    new TarCompressorUtils.OnExtractFileListener() {
+                        @Override
+                        public File onExtractFile(File file, long size) { return file; }
+                        @Override
+                        public void onExtractFileProgress(File file, long size) {}
+                        @Override
+                        public void onExtractedBytes(long size) {
+                            long total = totalBytes.addAndGet(size);
+                            int percent = (int) Math.min(99,
+                                    (total * 100L) / IMAGEFS_EXTRACTED_BYTES);
+                            if (listener != null) listener.onProgress(percent);
+                        }
+                    };
+
+            ok = TarCompressorUtils.extractSync(
+                    TarCompressorUtils.Type.XZ,
+                    context,
+                    IMAGEFS_ARCHIVE,
+                    rootDir,
+                    extractListener);
+        }
 
         if (!ok) {
             lastError = "Rootfs tarball extraction failed."
-                    + "\n  This is likely an xz decompression error."
+                    + "\n  Both native tar and Java extraction failed."
                     + "\n  Tap 'Save Logs' to see the detailed error.";
             Log.e(TAG, lastError);
             if (listener != null) listener.onFinished(false);
@@ -292,6 +313,92 @@ public final class ImageFsManager {
                             .redirectErrorStream(true).start().waitFor();
                 } catch (Exception ignored) {}
             }
+        }
+    }
+
+    /**
+     * Extracts the imagefs tarball using Android's native toybox tar command.
+     * This is 3-5x faster than Java extraction because it uses native C code
+     * for both XZ decompression and file I/O.
+     *
+     * <p>Process:
+     * <ol>
+     *   <li>Copy the asset to a temp file (cacheDir/imagefs.tar.xz)</li>
+     *   <li>Run {@code /system/bin/tar -xJf <temp> -C <rootDir>}</li>
+     *   <li>Delete the temp file</li>
+     * </ol>
+     *
+     * @return true if extraction succeeded, false if it failed (caller should
+     *         fall back to Java extraction)
+     */
+    private boolean extractWithNativeTar(android.content.Context ctx,
+                                          String assetName, File destDir,
+                                          ProgressListener listener) {
+        File tempFile = new File(ctx.getCacheDir(), "imagefs.tar.xz");
+        try {
+            // Step 1: Copy asset to temp file
+            Log.i(TAG, "Copying imagefs asset to temp file for native extraction…");
+            try (java.io.InputStream in = ctx.getAssets().open(assetName);
+                 java.io.OutputStream out = new java.io.BufferedOutputStream(
+                         new java.io.FileOutputStream(tempFile), 262144)) {
+                byte[] buf = new byte[262144];
+                int n;
+                long total = 0;
+                while ((n = in.read(buf)) > 0) {
+                    out.write(buf, 0, n);
+                    total += n;
+                }
+                Log.i(TAG, "Copied " + (total / 1024 / 1024) + " MB to temp file");
+            }
+            if (listener != null) listener.onProgress(10);
+
+            // Step 2: Run native tar extraction
+            Log.i(TAG, "Running native tar -xJf extraction…");
+            ProcessBuilder pb = new ProcessBuilder(
+                    "/system/bin/tar", "-xJf", tempFile.getAbsolutePath(),
+                    "-C", destDir.getAbsolutePath());
+            pb.redirectErrorStream(true);
+            Process p = pb.start();
+
+            // Read output in a reader thread (tar prints progress to stderr)
+            StringBuilder output = new StringBuilder();
+            Thread reader = new Thread(() -> {
+                try (java.io.BufferedReader r = new java.io.BufferedReader(
+                        new java.io.InputStreamReader(p.getInputStream()))) {
+                    String line;
+                    while ((line = r.readLine()) != null) {
+                        output.append(line).append('\n');
+                    }
+                } catch (Exception ignored) {}
+            }, "wl-tar-reader");
+            reader.start();
+
+            // Wait for tar to finish (timeout: 5 minutes)
+            boolean exited = p.waitFor(5, java.util.concurrent.TimeUnit.MINUTES);
+            if (!exited) {
+                p.destroyForcibly();
+                Log.e(TAG, "Native tar timed out after 5 minutes");
+                return false;
+            }
+            reader.join(2000);
+
+            int exitCode = p.exitValue();
+            if (exitCode != 0) {
+                Log.e(TAG, "Native tar failed (exit=" + exitCode + "): "
+                        + output.toString().trim());
+                return false;
+            }
+
+            Log.i(TAG, "Native tar extraction complete");
+            if (listener != null) listener.onProgress(95);
+            return true;
+
+        } catch (Exception e) {
+            Log.e(TAG, "Native tar extraction error: " + e.getMessage());
+            return false;
+        } finally {
+            // Step 3: Clean up temp file
+            tempFile.delete();
         }
     }
 

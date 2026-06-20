@@ -2,7 +2,7 @@
 #
 # This workflow:
 #   1. Sets up QEMU binfmt for arm64 cross-build (rootfs built on x86_64 runner)
-#   2. Builds the imagefs.tar.zst rootfs (~160 MB, cached between runs)
+#   2. Builds the imagefs.tar.xz rootfs (~160 MB, cached between runs)
 #   3. Verifies proot binary (already bundled in repo — no download needed)
 #   4. Builds the APK with everything bundled (~170 MB APK)
 #   5. Uploads the APK as an artifact
@@ -55,7 +55,7 @@ jobs:
         id: cache-imagefs
         uses: actions/cache@v4
         with:
-          path: app/src/main/assets/imagefs/imagefs.tar.zst
+          path: app/src/main/assets/imagefs/imagefs.tar.xz
           key: imagefs-${{ hashFiles('tools/build-imagefs.sh') }}-v6
 
       # -----------------------------------------------------------------
@@ -66,22 +66,22 @@ jobs:
         run: |
           echo "=== Building imagefs rootfs (this takes ~20 minutes) ==="
           sudo bash tools/build-imagefs.sh
-          if [ ! -f app/src/main/assets/imagefs/imagefs.tar.zst ]; then
-            echo "ERROR: imagefs.tar.zst not created" >&2
+          if [ ! -f app/src/main/assets/imagefs/imagefs.tar.xz ]; then
+            echo "ERROR: imagefs.tar.xz not created" >&2
             exit 1
           fi
-          SIZE=$(stat -c%s app/src/main/assets/imagefs/imagefs.tar.zst)
-          echo "✓ imagefs.tar.zst created ($SIZE bytes, $(numfmt --to=iec $SIZE))"
+          SIZE=$(stat -c%s app/src/main/assets/imagefs/imagefs.tar.xz)
+          echo "✓ imagefs.tar.xz created ($SIZE bytes, $(numfmt --to=iec $SIZE))"
           if [ "$SIZE" -lt 33554432 ]; then
-            echo "ERROR: imagefs.tar.zst is suspiciously small (< 50 MB)" >&2
+            echo "ERROR: imagefs.tar.xz is suspiciously small (< 50 MB)" >&2
             exit 1
           fi
 
       - name: Verify imagefs cache hit
         if: steps.cache-imagefs.outputs.cache-hit == 'true'
         run: |
-          echo "✓ imagefs.tar.zst restored from cache"
-          ls -la app/src/main/assets/imagefs/imagefs.tar.zst
+          echo "✓ imagefs.tar.xz restored from cache"
+          ls -la app/src/main/assets/imagefs/imagefs.tar.xz
 
       - name: Extract glibc linker to jniLibs
         run: |
@@ -92,7 +92,7 @@ jobs:
           # The linker is a symlink: usr/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1
           # → ../../ld-linux-aarch64.so.1 (i.e., usr/lib/ld-linux-aarch64.so.1)
           # Extract ALL matching files (symlink + target) using wildcards
-          zstd -dc app/src/main/assets/imagefs/imagefs.tar.zst 2>/dev/null | \
+          xz -dc app/src/main/assets/imagefs/imagefs.tar.xz 2>/dev/null | \
             tar -xf - -C /tmp/wl-linker-extract \
               --wildcards "*/ld-linux-aarch64.so.1" 2>/dev/null || true
           # Also try xz fallback
@@ -196,9 +196,9 @@ jobs:
       - name: Verify all bundled assets present
         run: |
           echo "=== Pre-build verification ==="
-          echo "imagefs.tar.zst:"
-          ls -la app/src/main/assets/imagefs/imagefs.tar.zst
-          IMG_SIZE=$(stat -c%s app/src/main/assets/imagefs/imagefs.tar.zst)
+          echo "imagefs.tar.xz:"
+          ls -la app/src/main/assets/imagefs/imagefs.tar.xz
+          IMG_SIZE=$(stat -c%s app/src/main/assets/imagefs/imagefs.tar.xz)
           if [ "$IMG_SIZE" -lt 33554432 ]; then
             echo "ERROR: imagefs too small" >&2; exit 1
           fi
