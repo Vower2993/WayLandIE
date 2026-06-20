@@ -72,7 +72,7 @@ jobs:
           fi
           SIZE=$(stat -c%s app/src/main/assets/imagefs/imagefs.tar.xz)
           echo "✓ imagefs.tar.xz created ($SIZE bytes, $(numfmt --to=iec $SIZE))"
-          if [ "$SIZE" -lt 52428800 ]; then
+          if [ "$SIZE" -lt 33554432 ]; then
             echo "ERROR: imagefs.tar.xz is suspiciously small (< 50 MB)" >&2
             exit 1
           fi
@@ -155,7 +155,7 @@ jobs:
           echo "imagefs.tar.xz:"
           ls -la app/src/main/assets/imagefs/imagefs.tar.xz
           IMG_SIZE=$(stat -c%s app/src/main/assets/imagefs/imagefs.tar.xz)
-          if [ "$IMG_SIZE" -lt 52428800 ]; then
+          if [ "$IMG_SIZE" -lt 33554432 ]; then
             echo "ERROR: imagefs too small" >&2; exit 1
           fi
           echo

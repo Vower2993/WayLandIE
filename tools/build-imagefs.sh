@@ -121,11 +121,21 @@ echo 'APT::Get::Assume-Yes "true";' > "$ROOTFS_DIR/etc/apt/apt.conf.d/99assumeye
 echo 'debconf debconf/frontend select Noninteractive' | chroot_run debconf-set-selections 2>/dev/null || true
 
 chroot_run apt-get update -qq
+
+# Group 1: Essential tools — must succeed first so later steps can use them
+echo "  Installing essential tools…"
 chroot_run apt-get install -y --no-install-recommends \
     ca-certificates wget curl xz-utils tar bzip2 gzip unzip binutils \
-    locales bash coreutils findutils \
+    locales bash coreutils findutils gcc pkg-config 2>&1 | tail -3
+
+# Group 2: Wayland + Vulkan + display libraries
+# NOTE: 'wayland-scanner' is not a package in Debian trixie — the binary
+# is provided by 'libwayland-bin'. Using the wrong name causes the entire
+# apt-get to abort, which is why we split into separate groups.
+echo "  Installing Wayland + Vulkan + display libraries…"
+chroot_run apt-get install -y --no-install-recommends \
     libwayland-client0 libwayland-server0 wayland-protocols \
-    wayland-scanner libwayland-dev \
+    libwayland-bin libwayland-dev \
     libvulkan1 vulkan-tools mesa-vulkan-drivers mesa-utils \
     libpulse0 pulseaudio pulseaudio-utils \
     libfreetype6 libfontconfig1 libgnutls30 libxcomposite1 \
@@ -134,7 +144,7 @@ chroot_run apt-get install -y --no-install-recommends \
     libx11-dev libxtst-dev \
     libgl1 libegl1 libgles2 \
     libgstreamer1.0-0 libgstreamer-plugins-base1.0-0 \
-    desktop-file-utils gcc pkg-config 2>&1 | tail -5
+    desktop-file-utils 2>&1 | tail -3 || echo "  WARNING: some display libs failed"
 
 chroot_run locale-gen en_US.UTF-8 2>/dev/null || true
 
