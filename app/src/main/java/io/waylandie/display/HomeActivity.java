@@ -441,10 +441,10 @@ public final class HomeActivity extends Activity {
         }
     }
 
-    // --- Diagnostics (pre-flight check) ---
+    // --- Diagnostics (deep pre-flight check) ---
     private void runDiagnostics() {
-        log("Running pre-flight diagnostics…");
-        io.waylandie.display.shared.util.LogRingBuffer.append("[Diag] Running pre-flight diagnostics…");
+        log("Running deep pre-flight diagnostics…");
+        io.waylandie.display.shared.util.LogRingBuffer.append("[Diag] Running deep pre-flight diagnostics…");
 
         new Thread(() -> {
             try {
@@ -457,7 +457,7 @@ public final class HomeActivity extends Activity {
             String nativeLibDir = getApplicationInfo().nativeLibraryDir;
             File filesDir = getFilesDir();
 
-            results.append("=== WayLandIE Pre-Flight Diagnostics ===\n\n");
+            results.append("=== WayLandIE Deep Pre-Flight Diagnostics ===\n\n");
 
             // === 1. ROOTFS ===
             results.append("--- ROOTFS ---\n");
@@ -472,170 +472,283 @@ public final class HomeActivity extends Activity {
                 failed++;
             }
 
-            // === 2. GLIBC LINKER (libld_glibc.so) ===
-            results.append("\n--- GLIBC LINKER (native launch) ---\n");
+            // === 2. GLIBC LINKER — ACTUALLY EXECUTE it to test SELinux ===
+            results.append("\n--- GLIBC LINKER (execve test) ---\n");
             File linker = new File(nativeLibDir, "libld_glibc.so");
-            if (linker.exists()) {
-                results.append("✓ libld_glibc.so found: " + linker + "\n");
-                results.append("  Size: " + linker.length() + " bytes\n");
-                if (linker.canExecute()) {
-                    results.append("✓ Executable: YES\n");
-                    passed++;
-                } else {
-                    results.append("✗ Executable: NO\n");
-                    failed++;
-                }
-            } else {
+            if (!linker.exists()) {
                 results.append("⚠ libld_glibc.so NOT FOUND — will fall back to proot\n");
                 warned++;
+            } else {
+                results.append("✓ libld_glibc.so found: " + linker + "\n");
+                results.append("  Size: " + linker.length() + " bytes\n");
+                if (!linker.canExecute()) {
+                    results.append("✗ NOT executable (x bit missing on extracted .so)\n");
+                    failed++;
+                } else {
+                    // ACTUALLY execute `libld_glibc.so --version` to confirm SELinux
+                    // allows execve on the extracted .so. If SELinux denies it,
+                    // native launch of wine/bridge will also fail.
+                    try {
+                        ProcessBuilder pb = new ProcessBuilder(
+                                linker.getAbsolutePath(), "--version");
+                        pb.redirectErrorStream(true);
+                        Process p = pb.start();
+                        java.io.BufferedReader br = new java.io.BufferedReader(
+                                new java.io.InputStreamReader(p.getInputStream()));
+                        StringBuilder out = new StringBuilder();
+                        String l;
+                        while ((l = br.readLine()) != null) out.append(l).append('\n');
+                        boolean done = p.waitFor(3, java.util.concurrent.TimeUnit.SECONDS);
+                        int exit = done ? p.exitValue() : -1;
+                        if (!done) p.destroyForcibly();
+                        String firstLine = out.length() > 0
+                                ? out.toString().split("\n", 2)[0] : "";
+                        String low = firstLine.toLowerCase(java.util.Locale.ROOT);
+                        if (done && (exit == 0 || low.contains("glibc") || low.contains("gnu"))) {
+                            results.append("✓ SELinux ALLOWED execve of libld_glibc.so\n");
+                            results.append("  Version: " + firstLine + "\n");
+                            passed++;
+                        } else {
+                            results.append("✗ libld_glibc.so executed but FAILED (exit=" + exit + ")\n");
+                            results.append("  Output: " + out.toString().trim() + "\n");
+                            results.append("  Native launch will FAIL — SELinux likely blocking execve.\n");
+                            failed++;
+                        }
+                    } catch (Exception e) {
+                        results.append("✗ SELinux BLOCKED execve: " + e.getMessage() + "\n");
+                        results.append("  Native launch will fail — proot fallback required.\n");
+                        failed++;
+                    }
+                }
             }
 
-            // === 3. BRIDGE TRANSLATOR ===
-            results.append("\n--- BRIDGE TRANSLATOR ---\n");
+            // === 3. BRIDGE TRANSLATOR — ACTUALLY LAUNCH it with 6 args ===
+            results.append("\n--- BRIDGE TRANSLATOR (launch test) ---\n");
             File bridgeBin = new File(rootDir, "usr/local/bin/waylandie-wayland-bridge");
-            if (bridgeBin.exists()) {
-                results.append("✓ Bridge binary found\n");
-                results.append("  Size: " + bridgeBin.length() + " bytes\n");
-                passed++;
-            } else {
+            if (!bridgeBin.exists()) {
                 results.append("✗ Bridge binary NOT FOUND at " + bridgeBin + "\n");
                 results.append("  Wine will have no Wayland display to render to.\n");
                 results.append("  Rebuild rootfs with libc6-dev + wayland-scanner.\n");
                 failed++;
-            }
+            } else if (!linker.exists()) {
+                results.append("⚠ Bridge binary present but libld_glibc.so missing — cannot launch\n");
+                warned++;
+            } else {
+                results.append("✓ Bridge binary found: " + bridgeBin.length() + " bytes\n");
+                bridgeBin.setExecutable(true, false);
+                // Build the --library-path (same set WineRunner uses)
+                File protonDirProbe = new File(filesDir, "contents/proton/active");
+                String libPath = new File(rootDir, "usr/lib").getAbsolutePath() + ":"
+                        + new File(rootDir, "usr/lib/aarch64-linux-gnu").getAbsolutePath() + ":"
+                        + new File(rootDir, "usr/local/lib").getAbsolutePath() + ":"
+                        + new File(protonDirProbe, "lib").getAbsolutePath() + ":"
+                        + new File(protonDirProbe, "files/lib").getAbsolutePath();
+                File socketFile = new File(rootDir, "tmp/diag-socket.txt");
+                try { socketFile.getParentFile().mkdirs(); socketFile.delete(); } catch (Exception ignored) {}
 
-            // === 4. PROTON ===
-            results.append("\n--- PROTON ---\n");
-            File protonDir = new File(filesDir, "contents/proton/active");
-            if (protonDir.exists()) {
-                File wineBin = new File(protonDir, "files/bin/wine");
-                if (!wineBin.exists()) wineBin = new File(protonDir, "dist/bin/wine");
-                if (!wineBin.exists()) wineBin = new File(protonDir, "bin/wine");
-                if (wineBin.exists()) {
-                    results.append("✓ Wine binary found: " + wineBin.getName() + "\n");
-                    results.append("  Size: " + wineBin.length() + " bytes\n");
-                    // Check ELF architecture
-                    try (java.io.RandomAccessFile raf = new java.io.RandomAccessFile(wineBin, "r")) {
-                        byte[] magic = new byte[20];
-                        raf.readFully(magic);
-                        if (magic[0] == 0x7f && magic[1] == 'E' && magic[2] == 'L' && magic[3] == 'F') {
-                            int eMachine = (magic[19] & 0xFF) << 8 | (magic[18] & 0xFF);
-                            if (eMachine == 183) {
-                                results.append("  Architecture: ARM64 (arm64ec) — native launch\n");
-                            } else if (eMachine == 62) {
-                                results.append("  Architecture: x86_64 — needs box64\n");
-                            } else {
-                                results.append("  Architecture: unknown (e_machine=" + eMachine + ")\n");
-                            }
+                // Bridge requires 6 args:
+                //   argv[1]=bridge_socket  argv[2]=target_commits  argv[3]=socket_file
+                //   argv[4]=timeout_ms     argv[5]=clear_ahb       argv[6]=accept_client
+                List<String> cmd = new ArrayList<>();
+                cmd.add(linker.getAbsolutePath());
+                cmd.add("--library-path");
+                cmd.add(libPath);
+                cmd.add(bridgeBin.getAbsolutePath());
+                cmd.add("waylandie.display.bridge.v1");   // argv[1]
+                cmd.add("1");                              // argv[2] target_commits
+                cmd.add(socketFile.getAbsolutePath());     // argv[3] socket file
+                cmd.add("5000");                           // argv[4] timeout_ms
+                cmd.add("0");                              // argv[5] clear_ahb_outside
+                cmd.add("0");                              // argv[6] accept_client_complete
+
+                try {
+                    ProcessBuilder pb = new ProcessBuilder(cmd);
+                    pb.directory(rootDir);
+                    pb.redirectErrorStream(true);
+                    Process bridge = pb.start();
+                    results.append("  Launched bridge via linker (6 args)\n");
+
+                    // Read its output for up to 3s, looking for "server=ready"
+                    StringBuilder bridgeOut = new StringBuilder();
+                    java.io.BufferedReader br = new java.io.BufferedReader(
+                            new java.io.InputStreamReader(bridge.getInputStream()));
+                    long deadline = System.currentTimeMillis() + 3000;
+                    boolean ready = false;
+                    while (System.currentTimeMillis() < deadline) {
+                        if (br.ready()) {
+                            String ol = br.readLine();
+                            if (ol == null) break;
+                            bridgeOut.append(ol).append('\n');
+                            if (ol.contains("server=ready")) { ready = true; break; }
+                        } else {
+                            try { Thread.sleep(30); } catch (InterruptedException ignored) {}
                         }
                     }
-                    passed++;
-                } else {
-                    results.append("✗ Wine binary NOT FOUND in proton/active\n");
+                    // Kill the bridge regardless of outcome
+                    bridge.destroyForcibly();
+                    try { bridge.waitFor(1, java.util.concurrent.TimeUnit.SECONDS); }
+                    catch (Exception ignored) {}
+
+                    if (bridgeOut.length() == 0) {
+                        results.append("✗ Bridge produced NO output — likely crashed on launch\n");
+                        results.append("  Check LD_LIBRARY_PATH / missing libs in rootfs.\n");
+                        failed++;
+                    } else {
+                        String snippet = bridgeOut.toString();
+                        if (snippet.length() > 500) snippet = snippet.substring(0, 500);
+                        results.append("  Bridge output (first 500 chars):\n");
+                        for (String ol : snippet.split("\n")) {
+                            if (!ol.isEmpty()) results.append("    " + ol + "\n");
+                        }
+                        if (ready) {
+                            results.append("✓ Bridge reported 'server=ready'\n");
+                            passed++;
+                        } else {
+                            results.append("✗ Bridge did NOT report 'server=ready' within 3s\n");
+                            failed++;
+                        }
+                    }
+                    // Check if the socket file was written by the bridge
+                    if (socketFile.exists() && socketFile.length() > 0) {
+                        String sock = new String(
+                                java.nio.file.Files.readAllBytes(socketFile.toPath())).trim();
+                        results.append("✓ Socket file written: '" + sock + "'\n");
+                        passed++;
+                    } else {
+                        results.append("✗ Socket file NOT written (" + socketFile + ")\n");
+                        failed++;
+                    }
+                    try { socketFile.delete(); } catch (Exception ignored) {}
+                } catch (Exception e) {
+                    results.append("✗ Bridge launch failed: " + e.getMessage() + "\n");
                     failed++;
                 }
+            }
+
+            // === 4. PROTON + WINE ===
+            results.append("\n--- PROTON + WINE ---\n");
+            File protonDir = new File(filesDir, "contents/proton/active");
+            File wineBin = null;
+            if (protonDir.exists()) {
+                for (String p : new String[]{"files/bin/wine", "dist/bin/wine", "bin/wine"}) {
+                    File f = new File(protonDir, p);
+                    if (f.exists()) { wineBin = f; break; }
+                }
+            }
+            if (!protonDir.exists() || wineBin == null) {
+                results.append("✗ Proton NOT INSTALLED (wine binary missing)\n");
+                results.append("  Install Proton FIRST — DXVK install alone won't work.\n");
+                failed++;
             } else {
-                results.append("✗ Proton NOT INSTALLED\n");
+                results.append("✓ Wine binary: " + wineBin.getAbsolutePath() + "\n");
+                results.append("  Size: " + wineBin.length() + " bytes\n");
+                passed++;
+                // Read ELF architecture (LITTLE-ENDIAN: lo=byte[18], hi=byte[19])
+                try (java.io.RandomAccessFile raf = new java.io.RandomAccessFile(wineBin, "r")) {
+                    byte[] magic = new byte[20];
+                    raf.readFully(magic);
+                    if (magic[0] == 0x7f && magic[1] == 'E'
+                            && magic[2] == 'L' && magic[3] == 'F') {
+                        int lo = magic[18] & 0xFF;
+                        int hi = magic[19] & 0xFF;
+                        int eMachine = (hi << 8) | lo;   // little-endian
+                        if (eMachine == 183) {
+                            results.append("✓ Architecture: ARM64 (e_machine=183) — native arm64ec launch\n");
+                            passed++;
+                        } else if (eMachine == 62) {
+                            results.append("⚠ Architecture: x86_64 (e_machine=62) — needs box64/emulation\n");
+                            warned++;
+                        } else {
+                            results.append("⚠ Architecture: unknown (e_machine=" + eMachine + ")\n");
+                            warned++;
+                        }
+                    } else {
+                        results.append("✗ Not an ELF file (magic mismatch)\n");
+                        failed++;
+                    }
+                } catch (Exception e) {
+                    results.append("✗ Could not read ELF header: " + e.getMessage() + "\n");
+                    failed++;
+                }
+                // Check Proton lib/ directory
+                File protonLib = new File(protonDir, "lib");
+                if (!protonLib.isDirectory()) protonLib = new File(protonDir, "files/lib");
+                if (protonLib.isDirectory()) {
+                    File[] sos = protonLib.listFiles(
+                            (d, n) -> n.contains(".so"));
+                    int soCount = sos != null ? sos.length : 0;
+                    results.append("✓ Proton lib/ directory present (" + soCount + " .so files)\n");
+                    passed++;
+                } else {
+                    results.append("✗ Proton lib/ directory MISSING at " + protonLib + "\n");
+                    failed++;
+                }
+                // Check prefixPack.txz exists (proves the Proton package ships a prefix)
+                File prefixPack = new File(protonDir, "prefixPack.txz");
+                if (prefixPack.exists()) {
+                    results.append("✓ prefixPack.txz present ("
+                            + (prefixPack.length() / 1024 / 1024) + " MB)\n");
+                    passed++;
+                } else {
+                    results.append("⚠ prefixPack.txz not found in Proton slot (consumed during install?)\n");
+                    warned++;
+                }
+            }
+
+            // === 5. DXVK (DLLs in Wine prefix) ===
+            results.append("\n--- DXVK (Wine prefix check) ---\n");
+            File wineSystem32 = new File(rootDir, "home/xuser/.wine/drive_c/windows/system32");
+            File d3d11 = new File(wineSystem32, "d3d11.dll");
+            if (d3d11.exists()) {
+                results.append("✓ d3d11.dll in Wine prefix system32/ ("
+                        + d3d11.length() + " bytes)\n");
+                passed++;
+            } else {
+                results.append("✗ d3d11.dll NOT in Wine prefix — DXVK won't work\n");
+                results.append("  Reinstall DXVK to copy DLLs to prefix.\n");
                 failed++;
             }
 
-            // === 5. DXVK ===
-            results.append("\n--- DXVK ---\n");
-            File dxvkActive = new File(filesDir, "contents/dxvk/active");
-            if (dxvkActive.exists()) {
-                File dxvkSystem32 = new File(dxvkActive, "system32");
-                File dxvkSyswow64 = new File(dxvkActive, "syswow64");
-                int dllCount = 0;
-                if (dxvkSystem32.isDirectory()) {
-                    File[] dlls = dxvkSystem32.listFiles((d, n) -> n.endsWith(".dll"));
-                    if (dlls != null) dllCount += dlls.length;
-                }
-                if (dxvkSyswow64.isDirectory()) {
-                    File[] dlls = dxvkSyswow64.listFiles((d, n) -> n.endsWith(".dll"));
-                    if (dlls != null) dllCount += dlls.length;
-                }
-                results.append("✓ DXVK installed (" + dllCount + " DLLs in slot)\n");
-
-                // Check if DLLs were copied to Wine prefix
-                File wineSystem32 = new File(rootDir, "home/xuser/.wine/drive_c/windows/system32");
-                File d3d11 = new File(wineSystem32, "d3d11.dll");
-                if (d3d11.exists()) {
-                    results.append("✓ d3d11.dll in Wine prefix system32/\n");
-                    passed++;
-                } else {
-                    results.append("✗ d3d11.dll NOT in Wine prefix — DXVK won't work\n");
-                    results.append("  Reinstall DXVK to copy DLLs to prefix.\n");
-                    failed++;
-                }
+            // === 6. TURNIP ===
+            results.append("\n--- TURNIP (Vulkan ICD) ---\n");
+            File icdJson = new File(rootDir, "usr/local/etc/vulkan/icd.d/freedreno_icd.json");
+            if (!icdJson.exists()) {
+                results.append("✗ ICD JSON NOT FOUND at " + icdJson + "\n");
+                failed++;
             } else {
-                results.append("⚠ DXVK not installed\n");
-                warned++;
+                String json = new String(
+                        java.nio.file.Files.readAllBytes(icdJson.toPath()));
+                if (json.contains("/usr/local/lib/libvulkan_freedreno.so")) {
+                    results.append("✓ ICD JSON points to /usr/local/lib/ (correct for native)\n");
+                    passed++;
+                } else if (json.contains("/opt/turnip/")) {
+                    results.append("✗ ICD JSON points to /opt/turnip/ (proot path — WRONG for native)\n");
+                    results.append("  Reinstall Turnip to fix ICD JSON path.\n");
+                    failed++;
+                } else {
+                    results.append("⚠ ICD JSON has unexpected path:\n  " + json.trim() + "\n");
+                    warned++;
+                }
             }
-
-            // === 6. TURNIP (Vulkan driver) ===
-            results.append("\n--- TURNIP (Vulkan driver) ---\n");
-            File turnipActive = new File(filesDir, "contents/turnip/active");
-            if (turnipActive.exists()) {
-                results.append("✓ Turnip installed\n");
-                // Check ICD JSON
-                File icdJson = new File(rootDir, "usr/local/etc/vulkan/icd.d/freedreno_icd.json");
-                if (icdJson.exists()) {
-                    String json = new String(java.nio.file.Files.readAllBytes(icdJson.toPath()));
-                    if (json.contains("/usr/local/lib/libvulkan_freedreno.so")) {
-                        results.append("✓ ICD JSON points to /usr/local/lib/ (correct for native)\n");
-                        passed++;
-                    } else if (json.contains("/opt/turnip/")) {
-                        results.append("✗ ICD JSON points to /opt/turnip/ (proot path — WRONG for native)\n");
-                        results.append("  Reinstall Turnip to fix ICD JSON path.\n");
-                        failed++;
-                    } else {
-                        results.append("⚠ ICD JSON has unexpected path: " + json + "\n");
-                        warned++;
-                    }
-                } else {
-                    results.append("✗ ICD JSON NOT FOUND at " + icdJson + "\n");
-                    failed++;
-                }
-                // Check .so was copied to rootfs
-                File soInRootfs = new File(rootDir, "usr/local/lib/libvulkan_freedreno.so");
-                if (soInRootfs.exists()) {
-                    results.append("✓ libvulkan_freedreno.so in rootfs/usr/local/lib/\n");
-                    passed++;
-                } else {
-                    results.append("✗ libvulkan_freedreno.so NOT in rootfs/usr/local/lib/\n");
-                    failed++;
-                }
+            File soInRootfs = new File(rootDir, "usr/local/lib/libvulkan_freedreno.so");
+            if (soInRootfs.exists()) {
+                results.append("✓ libvulkan_freedreno.so in rootfs/usr/local/lib/ ("
+                        + soInRootfs.length() + " bytes)\n");
+                passed++;
             } else {
-                results.append("⚠ Turnip not installed\n");
-                warned++;
+                results.append("✗ libvulkan_freedreno.so NOT in rootfs/usr/local/lib/\n");
+                failed++;
             }
 
             // === 7. FEX ===
-            results.append("\n--- FEX ---\n");
-            File fexActive = new File(filesDir, "contents/fex/active");
-            if (fexActive.exists()) {
-                results.append("✓ FEX installed\n");
-                // Check FEXCore DLLs in Wine prefix
-                File fexSystem32 = new File(fexActive, "system32");
-                File libArm64ecFex = new File(fexSystem32, "libarm64ecfex.dll");
-                if (libArm64ecFex.exists()) {
-                    results.append("✓ libarm64ecfex.dll found in FEX slot\n");
-                    // Check if copied to Wine prefix
-                    File wineSystem32 = new File(rootDir, "home/xuser/.wine/drive_c/windows/system32");
-                    File dllInPrefix = new File(wineSystem32, "libarm64ecfex.dll");
-                    if (dllInPrefix.exists()) {
-                        results.append("✓ libarm64ecfex.dll in Wine prefix\n");
-                        passed++;
-                    } else {
-                        results.append("✗ libarm64ecfex.dll NOT in Wine prefix\n");
-                        failed++;
-                    }
-                } else {
-                    results.append("⚠ libarm64ecfex.dll not found in FEX slot\n");
-                    warned++;
-                }
+            results.append("\n--- FEX (arm64ec host override) ---\n");
+            File fexDll = new File(wineSystem32, "libarm64ecfex.dll");
+            if (fexDll.exists()) {
+                results.append("✓ libarm64ecfex.dll in Wine prefix system32/ ("
+                        + fexDll.length() + " bytes)\n");
+                passed++;
             } else {
-                results.append("⚠ FEX not installed\n");
+                results.append("⚠ libarm64ecfex.dll NOT in Wine prefix (FEX not installed?)\n");
                 warned++;
             }
 
@@ -643,46 +756,48 @@ public final class HomeActivity extends Activity {
             results.append("\n--- KEY LIBRARIES (Debian multiarch) ---\n");
             String[] keyLibs = {
                 "usr/lib/aarch64-linux-gnu/libwayland-server.so.0",
+                "usr/lib/aarch64-linux-gnu/libwayland-client.so.0",
                 "usr/lib/aarch64-linux-gnu/libX11.so.6",
                 "usr/lib/aarch64-linux-gnu/libfreetype.so.6",
                 "usr/lib/aarch64-linux-gnu/libvulkan.so.1",
-                "usr/lib/aarch64-linux-gnu/libGL.so.1",
+                "usr/lib/aarch64-linux-gnu/libdl.so.2",
+                "usr/lib/aarch64-linux-gnu/libdl.so",
                 "usr/lib/ld-linux-aarch64.so.1"
             };
             for (String lib : keyLibs) {
                 File libFile = new File(rootDir, lib);
                 if (libFile.exists()) {
-                    results.append("✓ " + lib + " (" + libFile.length() + " bytes)\n");
+                    String note = "";
+                    if (lib.endsWith("/libdl.so")) {
+                        // unversioned symlink — exists() follows symlinks, so this
+                        // confirms the symlink resolves to a real target.
+                        note = " (unversioned symlink ok)";
+                    }
+                    results.append("✓ " + lib + " (" + libFile.length() + " bytes)" + note + "\n");
                     passed++;
                 } else {
                     results.append("✗ " + lib + " MISSING\n");
+                    if (lib.endsWith("/libdl.so")) {
+                        results.append("    Unversioned libdl.so symlink missing — glibc not fully installed.\n");
+                    }
                     failed++;
                 }
             }
 
-            // === 9. SELINUX CHECK ===
-            results.append("\n--- SELINUX CHECK ---\n");
-            // Try to execve the linker — if SELinux blocks it, we'll get permission denied
-            if (linker.exists()) {
-                try {
-                    Process testP = new ProcessBuilder(linker.getAbsolutePath(), "--version").start();
-                    int exitCode = testP.waitFor();
-                    java.io.BufferedReader r = new java.io.BufferedReader(
-                            new java.io.InputStreamReader(testP.getInputStream()));
-                    String firstLine = r.readLine();
-                    if (exitCode == 0 || firstLine != null) {
-                        results.append("✓ SELinux allows execve of libld_glibc.so\n");
-                        if (firstLine != null) results.append("  Version: " + firstLine + "\n");
-                        passed++;
-                    } else {
-                        results.append("✗ libld_glibc.so failed to execute (exit=" + exitCode + ")\n");
-                        failed++;
-                    }
-                } catch (Exception e) {
-                    results.append("✗ SELinux BLOCKED execve: " + e.getMessage() + "\n");
-                    results.append("  Native launch will fail — proot fallback required.\n");
-                    failed++;
-                }
+            // === 9. ANDROID BRIDGE TCP PROBE ===
+            results.append("\n--- ANDROID BRIDGE (TCP 57391) ---\n");
+            Socket tcpProbe = null;
+            try {
+                tcpProbe = new Socket();
+                tcpProbe.connect(new InetSocketAddress("127.0.0.1", 57391), 300);
+                results.append("✓ Android bridge listening on TCP 57391\n");
+                passed++;
+            } catch (IOException notListening) {
+                results.append("✗ Android bridge NOT listening on TCP 57391\n");
+                results.append("  Start the display/bridge from the home screen first.\n");
+                failed++;
+            } finally {
+                if (tcpProbe != null) try { tcpProbe.close(); } catch (IOException ignored) {}
             }
 
             // === 10. PROOT FALLBACK ===
@@ -694,6 +809,30 @@ public final class HomeActivity extends Activity {
             } else {
                 results.append("✗ libproot.so NOT FOUND — no fallback if native fails\n");
                 failed++;
+            }
+
+            // === 11. INSTALL ORDER CHECK ===
+            results.append("\n--- INSTALL ORDER (prefixPack vs DXVK) ---\n");
+            boolean hasWindowsSys = new File(wineSystem32, "kernel32.dll").exists()
+                    && new File(wineSystem32, "ntdll.dll").exists();
+            boolean hasDxvk = d3d11.exists();
+            if (hasWindowsSys && hasDxvk) {
+                results.append("✓ Wine prefix has Windows system DLLs (kernel32, ntdll) AND DXVK (d3d11)\n");
+                results.append("  Install order correct: Proton (prefixPack) first → DXVK.\n");
+                passed++;
+            } else if (hasDxvk && !hasWindowsSys) {
+                results.append("✗ DXVK installed but Windows system DLLs (kernel32.dll/ntdll.dll) MISSING\n");
+                results.append("  prefixPack.txz was NOT unpacked into the Wine prefix.\n");
+                results.append("  → REINSTALL PROTON FIRST (unpacks prefixPack), then reinstall DXVK.\n");
+                failed++;
+            } else if (!hasWindowsSys && !hasDxvk) {
+                results.append("✗ Wine prefix is EMPTY — neither Windows DLLs nor DXVK present\n");
+                results.append("  Install Proton (which unpacks prefixPack.txz) before anything else.\n");
+                failed++;
+            } else {
+                // Windows DLLs present, DXVK pending — warning, not error
+                results.append("⚠ Wine prefix has Windows DLLs but no d3d11.dll (DXVK not yet installed)\n");
+                warned++;
             }
 
             // === SUMMARY ===
@@ -724,7 +863,7 @@ public final class HomeActivity extends Activity {
                 ScrollView scroll = new ScrollView(this);
                 scroll.addView(tv);
                 new AlertDialog.Builder(this)
-                        .setTitle("Pre-Flight Diagnostics")
+                        .setTitle("Deep Pre-Flight Diagnostics")
                         .setView(scroll)
                         .setPositiveButton("OK", null)
                         .setNegativeButton("Copy", (d, w) -> {
