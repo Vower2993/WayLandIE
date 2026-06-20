@@ -93,48 +93,68 @@ jobs:
           echo "  Searching for ld-linux in tarball…"
           xz -dc app/src/main/assets/imagefs/imagefs.tar.xz 2>/dev/null | \
             tar -tf - 2>/dev/null | grep "ld-linux" | head -10
-          # Extract ALL matching files (try multiple patterns — tarball may use ./ prefix)
-          # Pattern 1: */ld-linux-aarch64.so.1 (matches ./usr/lib/ld-linux-aarch64.so.1)
-          # Pattern 2: ld-linux-aarch64.so.1 (exact match)
-          # Pattern 3: *ld-linux* (broadest match)
-          for pattern in "*/ld-linux-aarch64.so.1" "*ld-linux-aarch64*" "*ld-linux*"; do
-            echo "  Trying pattern: $pattern"
-            xz -dc app/src/main/assets/imagefs/imagefs.tar.xz 2>/dev/null | \
-              tar -xf - -C /tmp/wl-linker-extract \
-                --wildcards "$pattern" 2>/dev/null
-            FOUND=$(find /tmp/wl-linker-extract -name "ld-linux-aarch64.so.1" -type f | head -1)
-            if [ -n "$FOUND" ]; then
-              echo "  ✓ Found with pattern: $pattern"
+          # CRITICAL: The ld-linux-aarch64.so.1 entries in the tarball are SYMLINKS.
+          # The REAL ELF binary is at ./lib/aarch64-linux-gnu/ld-linux-aarch64.so.1
+          # (Ubuntu multiarch layout). We must extract the real file, not symlinks.
+          echo "  Extracting all ld-linux entries + ./lib/ …"
+          xz -dc app/src/main/assets/imagefs/imagefs.tar.xz 2>/dev/null | \
+            tar -xf - -C /tmp/wl-linker-extract \
+              --wildcards "*ld-linux-aarch64*" 2>/dev/null
+          xz -dc app/src/main/assets/imagefs/imagefs.tar.xz 2>/dev/null | \
+            tar -xf - -C /tmp/wl-linker-extract \
+              --wildcards "./lib/*ld-linux*" 2>/dev/null
+          echo "  Extracted files:"
+          find /tmp/wl-linker-extract -name "*ld-linux*" -exec ls -la {} \; 2>/dev/null
+          # Find the REAL ELF file (not symlink). Check multiple locations.
+          FOUND=""
+          for candidate in \
+            "/tmp/wl-linker-extract/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1" \
+            "/tmp/wl-linker-extract/usr/lib/ld-linux-aarch64.so.1" \
+            "/tmp/wl-linker-extract/usr/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1"; do
+            if [ -f "$candidate" ] && [ ! -L "$candidate" ]; then
+              FOUND="$candidate"
+              echo "  ✓ Found real ELF at: $FOUND"
               break
             fi
           done
-          # Find the REAL file (not symlink) — the actual ELF binary
-          FOUND=$(find /tmp/wl-linker-extract -name "ld-linux-aarch64.so.1" -type f | head -1)
+          # Fallback: find any regular file matching the name
+          if [ -z "$FOUND" ]; then
+            FOUND=$(find /tmp/wl-linker-extract -name "ld-linux-aarch64.so.1" -type f ! -type l | head -1)
+            if [ -n "$FOUND" ]; then
+              echo "  ✓ Found real ELF via find: $FOUND"
+            fi
+          fi
+          # Last resort: follow a symlink to get the real file
+          if [ -z "$FOUND" ]; then
+            SYMLINK=$(find /tmp/wl-linker-extract -name "ld-linux-aarch64.so.1" | head -1)
+            if [ -n "$SYMLINK" ] && [ -L "$SYMLINK" ]; then
+              TARGET=$(readlink -f "$SYMLINK")
+              echo "  Symlink $SYMLINK → $TARGET"
+              if [ -f "$TARGET" ]; then
+                FOUND="$TARGET"
+                echo "  ✓ Found real ELF via symlink target: $FOUND"
+              fi
+            fi
+          fi
           if [ -n "$FOUND" ]; then
             cp -L "$FOUND" app/src/main/jniLibs/arm64-v8a/libld_glibc.so
             chmod 755 app/src/main/jniLibs/arm64-v8a/libld_glibc.so
             echo "  ✓ libld_glibc.so: $(stat -c%s app/src/main/jniLibs/arm64-v8a/libld_glibc.so) bytes"
             file app/src/main/jniLibs/arm64-v8a/libld_glibc.so
             # CRITICAL: Verify glibc version is < 2.34 to avoid seccomp SIGSYS on Android
-            # glibc 2.34+ calls clone3(), glibc 2.35+ calls rseq() during startup
-            # Both are blocked by Android's seccomp filter → SIGSYS → exit 159
             GLIBC_VER=$(strings "$FOUND" | grep -oP 'GLIBC_\K[0-9]+\.[0-9]+' | sort -V | tail -1)
             echo "  glibc version: $GLIBC_VER"
             GLIBC_MAJOR=$(echo "$GLIBC_VER" | cut -d. -f1)
             GLIBC_MINOR=$(echo "$GLIBC_VER" | cut -d. -f2)
             if [ "$GLIBC_MAJOR" -gt 2 ] || ([ "$GLIBC_MAJOR" -eq 2 ] && [ "$GLIBC_MINOR" -ge 34 ]); then
               echo "  ✗ FATAL: glibc $GLIBC_VER is too new — will trigger SIGSYS on Android"
-              echo "    Need glibc < 2.34. Rebuild rootfs with Ubuntu 20.04 Focal."
               exit 1
             else
               echo "  ✓ glibc $GLIBC_VER is safe (< 2.34 — no seccomp SIGSYS)"
             fi
           else
-            echo "✗ FATAL: glibc linker not found in rootfs tarball"
-            echo "  Listing all files matching ld-linux in tarball:"
-            xz -dc app/src/main/assets/imagefs/imagefs.tar.xz 2>/dev/null | \
-              tar -tf - 2>/dev/null | grep -i "ld-linux\|linker" | head -20
-            echo "  If no files listed, the rootfs was built without glibc installed."
+            echo "✗ FATAL: glibc linker ELF not found in rootfs tarball"
+            find /tmp/wl-linker-extract -name "*ld-linux*" -exec ls -la {} \;
             exit 1
           fi
           rm -rf /tmp/wl-linker-extract
