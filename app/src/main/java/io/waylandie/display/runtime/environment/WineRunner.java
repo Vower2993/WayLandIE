@@ -267,7 +267,25 @@ public final class WineRunner {
         }
 
         Log.i(TAG, "Proot launch command: " + wineCmd);
-        return proot.exec(wineCmd.toString());
+        Process p = proot.exec(wineCmd.toString());
+
+        // Capture Wine output — CRITICAL for debugging. Without this we have
+        // ZERO visibility into why Wine crashes. The proot process stdout/stderr
+        // is merged (redirectErrorStream=true in ProotRunner) so we read it all.
+        new Thread(() -> {
+            try (java.io.BufferedReader reader = new java.io.BufferedReader(
+                    new java.io.InputStreamReader(p.getInputStream()))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    Log.i("WayLandIE/Wine", line);
+                    io.waylandie.display.shared.util.LogRingBuffer.append("[wine] " + line);
+                }
+            } catch (java.io.IOException e) {
+                Log.w(TAG, "Wine output stream closed: " + e.getMessage());
+            }
+        }, "wl-wine-output-proot").start();
+
+        return p;
     }
 
     /**

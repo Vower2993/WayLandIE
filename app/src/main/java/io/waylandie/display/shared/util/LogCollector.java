@@ -224,6 +224,8 @@ public final class LogCollector {
                     "WayLandIE/Tar:V", "WayLandIE/Adrenotools:V",
                     "WayLandIE/Install:V", "WayLandIE/Settings:V",
                     "WayLandIE/Assets:V", "WayLandIE/App:V",
+                    "WayLandIE/Wine:V", "WayLandIE/Diag:V",
+                    "WayLandIE/WineRunner:V", "WayLandIE/Proot:V",
                     "WayLandIE/LogCollector:V",
                     "AndroidRuntime:E", "System.err:W",
                     "*:S");
