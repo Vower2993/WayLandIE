@@ -507,6 +507,24 @@ public final class HomeActivity extends Activity {
                         if (done && (exit == 0 || low.contains("glibc") || low.contains("gnu"))) {
                             results.append("✓ SELinux ALLOWED execve of libld_glibc.so\n");
                             results.append("  Version: " + firstLine + "\n");
+                            // CRITICAL: Check glibc version — 2.34+ triggers SIGSYS on Android
+                            // glibc 2.34+ calls clone3(), glibc 2.35+ calls rseq() during startup
+                            // Both are blocked by Android's seccomp → exit code 159
+                            if (firstLine.contains("release version 2.")) {
+                                String verPart = firstLine.replaceAll(".*release version (2\\.\\d+).*", "$1");
+                                try {
+                                    int minor = Integer.parseInt(verPart.split("\\.")[1]);
+                                    if (minor >= 34) {
+                                        results.append("  ✗ FATAL: glibc 2." + minor + " is too new!\n");
+                                        results.append("    glibc 2.34+ calls clone3/rseq → SIGSYS (exit 159) on Android\n");
+                                        results.append("    Need glibc < 2.34. Rebuild rootfs with Ubuntu 20.04 Focal.\n");
+                                        failed++;
+                                    } else {
+                                        results.append("  ✓ glibc 2." + minor + " is safe (< 2.34 — no seccomp SIGSYS)\n");
+                                        passed++;
+                                    }
+                                } catch (Exception ignored) {}
+                            }
                             passed++;
                         } else {
                             results.append("✗ libld_glibc.so executed but FAILED (exit=" + exit + ")\n");

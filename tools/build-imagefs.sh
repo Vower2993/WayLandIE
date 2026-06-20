@@ -18,7 +18,14 @@
 # Output: app/src/main/assets/imagefs/imagefs.tar.zst (~80-100 MB compressed)
 #
 # The rootfs contains ONLY:
-#   - Debian trixie arm64 base (minimal)
+#   - Ubuntu 20.04 Focal arm64 base (minimal) — glibc 2.31
+#     CRITICAL: glibc 2.31 is the LATEST version that avoids Android's seccomp
+#     SIGSYS issue. glibc 2.34+ calls clone3() and glibc 2.35+ calls rseq()
+#     during __libc_start_main() — both are blocked by Android's seccomp filter
+#     → SIGSYS → exit code 159. Ubuntu 20.04 Focal (glibc 2.31) predates both
+#     and runs natively on Android 16 without seccomp issues.
+#     Reference: Winlator-Ludashi-Plus uses Ubuntu 18.04 Bionic (glibc 2.27).
+#     We use 20.04 Focal for newer Wayland protocol packages (1.20+).
 #   - Wayland client libraries
 #   - Vulkan loader + mesa-vulkan-drivers (llvmpipe fallback only —
 #     Turnip is installed separately via Settings tab)
@@ -45,7 +52,7 @@ ROOTFS_DIR="$WORK_DIR/rootfs"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 OUTPUT_FILE="${OUTPUT_FILE:-$SCRIPT_DIR/../app/src/main/assets/imagefs/imagefs.tar.zst}"
 ARCH="${ARCH:-arm64}"
-DIST="${DIST:-trixie}"
+DIST="${DIST:-focal}"
 
 # Detect host architecture
 HOST_ARCH=$(uname -m)
@@ -94,14 +101,15 @@ chroot_run() { chroot "$ROOTFS_DIR" "$@"; }
 if [ ! -d "$ROOTFS_DIR/usr" ]; then
     echo "[1/7] Bootstrapping $DIST $ARCH base…"
     if [ "$CROSS_BUILD" = "true" ]; then
+        # Ubuntu arm64 uses ports.ubuntu.com (not archive.ubuntu.com)
         debootstrap --arch="$ARCH" --foreign --variant=minbase "$DIST" "$ROOTFS_DIR" \
-            http://deb.debian.org/debian
+            http://ports.ubuntu.com/ubuntu-ports
         [ -n "$QEMU_STATIC" ] && cp "$QEMU_STATIC" "$ROOTFS_DIR/usr/bin/"
         chroot "$ROOTFS_DIR" /debootstrap/debootstrap --second-stage
         rm -f "$ROOTFS_DIR/usr/bin/qemu-aarch64-static"
     else
         debootstrap --arch="$ARCH" --variant=minbase "$DIST" "$ROOTFS_DIR" \
-            http://deb.debian.org/debian
+            http://ports.ubuntu.com/ubuntu-ports
     fi
 else
     echo "[1/7] Rootfs exists, skipping debootstrap."
@@ -112,9 +120,11 @@ fi
 #    NO WINE — Wine/Proton is installed separately via Settings tab
 # ---------------------------------------------------------------------
 echo "[2/7] Configuring apt + installing core libraries (NO WINE)…"
+# Ubuntu arm64 uses ports.ubuntu.com. Include universe for wayland packages.
 cat > "$ROOTFS_DIR/etc/apt/sources.list" <<EOF
-deb http://deb.debian.org/debian $DIST main
-deb http://deb.debian.org/debian $DIST-updates main
+deb http://ports.ubuntu.com/ubuntu-ports $DIST main universe
+deb http://ports.ubuntu.com/ubuntu-ports $DIST-updates main universe
+deb http://ports.ubuntu.com/ubuntu-ports $DIST-security main universe
 EOF
 
 echo 'APT::Get::Assume-Yes "true";' > "$ROOTFS_DIR/etc/apt/apt.conf.d/99assumeyes"
@@ -129,9 +139,9 @@ chroot_run apt-get install -y --no-install-recommends \
     locales bash coreutils findutils gcc pkg-config libc6-dev 2>&1 | tail -3
 
 # Group 2: Wayland + Vulkan + display libraries
-# NOTE: 'wayland-scanner' is not a package in Debian trixie — the binary
-# is provided by 'libwayland-bin'. Using the wrong name causes the entire
-# apt-get to abort, which is why we split into separate groups.
+# Ubuntu 20.04 Focal has wayland-protocols 1.20+ which includes all
+# the protocol XMLs we need (xdg-shell, linux-dmabuf, presentation-time,
+# viewporter, relative-pointer, pointer-constraints).
 echo "  Installing Wayland + Vulkan + display libraries…"
 chroot_run apt-get install -y --no-install-recommends \
     libwayland-client0 libwayland-server0 wayland-protocols \
@@ -243,29 +253,25 @@ else
 fi
 
 # ---------------------------------------------------------------------
-# 3.6. Create missing unversioned .so symlinks for glibc 2.34+
+# 3.6. Verify glibc version is < 2.34 (seccomp safety check)
 # ---------------------------------------------------------------------
-# In glibc 2.34+ (trixie has 2.41), libdl, libpthread, librt, libutil,
-# libanl, libresolv were merged into libc. The versioned .so.2 files
-# exist, but the unversioned .so linker scripts (which some binaries
-# reference) are missing. Create them so Wine can find libdl.so etc.
-echo "[3.6/7] Creating missing glibc .so symlinks…"
-chroot_run bash -c '
-    LIBDIR=/usr/lib/aarch64-linux-gnu
-    # libdl.so → linker script pointing to libc
-    echo "INPUT(libc.so.6)" > $LIBDIR/libdl.so
-    # libpthread.so → linker script (merged into libc in 2.34+)
-    echo "INPUT(libc.so.6)" > $LIBDIR/libpthread.so
-    # librt.so → linker script
-    echo "INPUT(libc.so.6)" > $LIBDIR/librt.so
-    # libutil.so → linker script
-    echo "INPUT(libc.so.6)" > $LIBDIR/libutil.so
-    # libanl.so → linker script
-    echo "INPUT(libc.so.6)" > $LIBDIR/libanl.so
-    # libresolv.so → linker script
-    echo "INPUT(libc.so.6)" > $LIBDIR/libresolv.so
-    echo "  ✓ Created unversioned .so linker scripts for merged glibc libs"
-' 2>&1 | tail -3
+# glibc 2.34+ calls clone3() and glibc 2.35+ calls rseq() during
+# __libc_start_main(). Both are blocked by Android's seccomp filter.
+# Ubuntu 20.04 Focal ships glibc 2.31 which is SAFE. Verify this.
+echo "[3.6/7] Verifying glibc version (must be < 2.34 for seccomp safety)…"
+GLIBC_VERSION=$(chroot_run ldd --version 2>&1 | head -1 | grep -oP '\d+\.\d+' | head -1)
+echo "  glibc version: $GLIBC_VERSION"
+if [ -n "$GLIBC_VERSION" ]; then
+    GLIBC_MAJOR=$(echo "$GLIBC_VERSION" | cut -d. -f1)
+    GLIBC_MINOR=$(echo "$GLIBC_VERSION" | cut -d. -f2)
+    if [ "$GLIBC_MAJOR" -gt 2 ] || ([ "$GLIBC_MAJOR" -eq 2 ] && [ "$GLIBC_MINOR" -ge 34 ]); then
+        echo "  ✗ FATAL: glibc $GLIBC_VERSION is too new — will trigger seccomp SIGSYS on Android"
+        echo "    Need glibc < 2.34. Ubuntu 20.04 Focal has 2.31."
+        exit 1
+    else
+        echo "  ✓ glibc $GLIBC_VERSION is safe (< 2.34) — no clone3/rseq during startup"
+    fi
+fi
 
 # ---------------------------------------------------------------------
 # 4. Disable llvmpipe ICD so user-installed Turnip wins by default
@@ -324,9 +330,10 @@ fi
 echo "[7/7] Creating imagefs.tar.zst…"
 
 # Purge dev packages — only needed for bridge compilation, bloat rootfs 3x
+# Ubuntu 20.04 Focal ships gcc-9 (not gcc-14 like Trixie)
 echo "  Purging dev packages…"
 chroot_run apt-get purge -y --auto-remove \
-    gcc gcc-14 libgcc-14-dev cpp cpp-14 \
+    gcc gcc-9 libgcc-9-dev cpp cpp-9 \
     libc6-dev linux-libc-dev \
     libwayland-dev libwayland-bin \
     libx11-dev libxtst-dev \

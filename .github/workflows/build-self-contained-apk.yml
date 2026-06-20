@@ -108,6 +108,20 @@ jobs:
             chmod 755 app/src/main/jniLibs/arm64-v8a/libld_glibc.so
             echo "  ✓ libld_glibc.so: $(stat -c%s app/src/main/jniLibs/arm64-v8a/libld_glibc.so) bytes"
             file app/src/main/jniLibs/arm64-v8a/libld_glibc.so
+            # CRITICAL: Verify glibc version is < 2.34 to avoid seccomp SIGSYS on Android
+            # glibc 2.34+ calls clone3(), glibc 2.35+ calls rseq() during startup
+            # Both are blocked by Android's seccomp filter → SIGSYS → exit 159
+            GLIBC_VER=$(strings "$FOUND" | grep -oP 'GLIBC_\K[0-9]+\.[0-9]+' | sort -V | tail -1)
+            echo "  glibc version: $GLIBC_VER"
+            GLIBC_MAJOR=$(echo "$GLIBC_VER" | cut -d. -f1)
+            GLIBC_MINOR=$(echo "$GLIBC_VER" | cut -d. -f2)
+            if [ "$GLIBC_MAJOR" -gt 2 ] || ([ "$GLIBC_MAJOR" -eq 2 ] && [ "$GLIBC_MINOR" -ge 34 ]); then
+              echo "  ✗ FATAL: glibc $GLIBC_VER is too new — will trigger SIGSYS on Android"
+              echo "    Need glibc < 2.34. Rebuild rootfs with Ubuntu 20.04 Focal."
+              exit 1
+            else
+              echo "  ✓ glibc $GLIBC_VER is safe (< 2.34 — no seccomp SIGSYS)"
+            fi
           else
             echo "⚠ WARNING: glibc linker not found — proot fallback only"
           fi
