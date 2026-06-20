@@ -252,6 +252,37 @@ echo "[6/7] Installing gamescope (optional)…"
 chroot_run bash -c 'apt-get install -y --no-install-recommends gamescope 2>&1 | tail -2 || echo "  gamescope not in repos"' 2>&1 | tail -3 || true
 
 # ---------------------------------------------------------------------
+# 6.5. Copy glibc dynamic linker to jniLibs for native execution
+# ---------------------------------------------------------------------
+# Android SELinux blocks execve() from app data directories but ALLOWS it
+# from nativeLibraryDir. We bundle the glibc linker as libld_glibc.so so
+# Android extracts it to nativeLibraryDir at install time. WineRunner then
+# launches it directly: nativeLibraryDir/libld_glibc.so --library-path ... wine
+# This gives us native-speed glibc execution without proot or root.
+echo "[6.5/7] Copying glibc linker to jniLibs…"
+JNI_DIR="$SCRIPT_DIR/../app/src/main/jniLibs/arm64-v8a"
+mkdir -p "$JNI_DIR"
+LINKER_SRC=""
+for candidate in \
+    "$ROOTFS_DIR/lib/ld-linux-aarch64.so.1" \
+    "$ROOTFS_DIR/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1" \
+    "$ROOTFS_DIR/lib64/ld-linux-aarch64.so.1"; do
+    if [ -f "$candidate" ]; then
+        LINKER_SRC="$candidate"
+        break
+    fi
+done
+if [ -n "$LINKER_SRC" ]; then
+    cp -L "$LINKER_SRC" "$JNI_DIR/libld_glibc.so"
+    chmod 755 "$JNI_DIR/libld_glibc.so"
+    echo "  ✓ glibc linker → $JNI_DIR/libld_glibc.so"
+    echo "  Source: $LINKER_SRC"
+    file "$JNI_DIR/libld_glibc.so"
+else
+    echo "  ⚠ WARNING: glibc linker not found — native launch will fall back to proot"
+fi
+
+# ---------------------------------------------------------------------
 # 7. Create the tarball
 # ---------------------------------------------------------------------
 echo "[7/7] Creating imagefs.tar.xz…"
