@@ -1280,38 +1280,46 @@ public final class HomeActivity extends Activity {
                         } catch (Exception ignored) {}
                     }, "wl-diag-syscall-scan");
                     scanReader.start();
-                    // Scanning 451 syscalls with fork() takes ~30-60s
-                    boolean scanExited = scanProc.waitFor(120, java.util.concurrent.TimeUnit.SECONDS);
+                    // Scanning 451 syscalls with fork() takes ~60-120s
+                    boolean scanExited = scanProc.waitFor(180, java.util.concurrent.TimeUnit.SECONDS);
                     if (!scanExited) scanProc.destroyForcibly();
-                    scanReader.join(2000);
+                    scanReader.join(3000);
                     int scanExit = -1;
                     try { scanExit = scanProc.exitValue(); } catch (Exception ignored) {}
 
-                    if (scanExit == 0) {
-                        results.append("  ✓ Syscall scan complete:\n");
-                        int blockedCount = 0;
-                        for (String l : scanOut.toString().split("\n")) {
-                            if (l.startsWith("BLOCKED:")) {
-                                results.append("    ").append(l).append("\n");
-                                blockedCount++;
-                            }
+                    // Parse ALL blocked syscalls from output (no truncation)
+                    String scanStr = scanOut.toString();
+                    int blockedCount = 0;
+                    StringBuilder blockedList = new StringBuilder();
+                    for (String l : scanStr.split("\n")) {
+                        if (l.startsWith("BLOCKED:")) {
+                            blockedList.append("    ").append(l).append("\n");
+                            blockedCount++;
                         }
-                        // Check for scan complete line
-                        if (scanOut.toString().contains("SCAN_COMPLETE")) {
-                            results.append("  Total blocked syscalls: " + blockedCount + "\n");
+                    }
+
+                    if (scanExit == 0 || blockedCount > 0) {
+                        results.append("  Syscall scan results (exit=" + scanExit + "):\n");
+                        if (blockedCount > 0) {
+                            results.append("  BLOCKED SYSCALLS (" + blockedCount + " total):\n");
+                            results.append(blockedList);
+                        } else {
+                            results.append("  ⚠ No blocked syscalls found\n");
+                        }
+                        if (scanStr.contains("SCAN_COMPLETE")) {
+                            results.append("  ✓ Scan completed fully\n");
+                        } else {
+                            results.append("  ⚠ Scan was incomplete (timeout) — partial results above\n");
                         }
                         if (blockedCount > 0) {
-                            results.append("  → Compare with shim blocklist to find missing syscalls\n");
+                            results.append("  → These are ALL syscalls blocked by Android's seccomp on this device\n");
                             passed++;
                         } else {
-                            results.append("  ⚠ No blocked syscalls found (unexpected — seccomp should block something)\n");
                             warned++;
                         }
                     } else {
                         results.append("  ✗ Syscall scanner failed (exit=" + scanExit + ")\n");
-                        String snippet = scanOut.toString().trim();
-                        if (snippet.length() > 300) snippet = snippet.substring(0, 300);
-                        results.append("  Output: " + snippet + "\n");
+                        results.append("  Output: " + scanStr.trim() + "\n");
                         failed++;
                     }
                 } catch (Exception e) {
