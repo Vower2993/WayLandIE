@@ -636,6 +636,10 @@ public final class HomeActivity extends Activity {
                     pb.environment().put("WAYLANDIE_FINAL_COPY", "forbidden");
                     pb.environment().put("TMPDIR", tmpDir.getAbsolutePath());
                     pb.environment().put("LANG", "en_US.UTF-8");
+                    // CRITICAL: Disable glibc rseq to avoid SIGSYS from seccomp.
+                    // glibc 2.35+ calls rseq() during __libc_start_main() (before
+                    // main). Android's seccomp blocks rseq() → SIGSYS → exit 159.
+                    pb.environment().put("GLIBC_TUNABLES", "glibc.pthread.rseq=0");
                     Process bridge = pb.start();
                     results.append("  Launched bridge via linker (8 args, output=" + dispW + "x" + dispH + ")\n");
 
@@ -707,6 +711,138 @@ public final class HomeActivity extends Activity {
                     results.append("✗ Bridge launch failed: " + e.getMessage() + "\n");
                     failed++;
                 }
+            }
+
+            // === 3b. SIGSYS DIAGNOSIS ===
+            // If the bridge crashed with exit 159 (SIGSYS from seccomp), run
+            // additional tests to isolate the blocked syscall.
+            results.append("\n--- SIGSYS DIAGNOSIS (exit 159 = signal 31 = blocked syscall) ---\n");
+            File echoBin = new File(rootDir, "usr/bin/echo");
+            File runtimeDirDiag = new File(rootDir, "usr/tmp/runtime");
+            if (!runtimeDirDiag.exists()) runtimeDirDiag.mkdirs();
+            File tmpDirDiag = new File(rootDir, "usr/tmp");
+            // Rebuild libPath (same as bridge section — needed because libPath
+            // was scoped to the bridge else-block above)
+            File protonDirProbeSig = new File(filesDir, "contents/proton/active");
+            String sigsysLibPath = new File(rootDir, "usr/lib").getAbsolutePath() + ":"
+                    + new File(rootDir, "usr/lib/aarch64-linux-gnu").getAbsolutePath() + ":"
+                    + new File(rootDir, "usr/local/lib").getAbsolutePath() + ":"
+                    + new File(protonDirProbeSig, "lib").getAbsolutePath() + ":"
+                    + new File(protonDirProbeSig, "files/lib").getAbsolutePath();
+
+            // Test A: Minimal glibc binary WITHOUT rseq disable
+            // /bin/echo only links libc — if this crashes, glibc's own
+            // startup is making a blocked syscall (likely rseq).
+            if (echoBin.exists() && linker.exists()) {
+                results.append("Test A: /bin/echo via linker (NO rseq disable):\n");
+                try {
+                    List<String> echoCmd = new ArrayList<>();
+                    echoCmd.add(linker.getAbsolutePath());
+                    echoCmd.add("--library-path");
+                    echoCmd.add(sigsysLibPath);
+                    echoCmd.add(echoBin.getAbsolutePath());
+                    echoCmd.add("hello-sigsys-test");
+                    ProcessBuilder echoPb = new ProcessBuilder(echoCmd);
+                    echoPb.directory(rootDir);
+                    echoPb.redirectErrorStream(true);
+                    echoPb.environment().clear();
+                    echoPb.environment().put("LD_LIBRARY_PATH", sigsysLibPath);
+                    echoPb.environment().put("HOME", new File(rootDir, "home/xuser").getAbsolutePath());
+                    echoPb.environment().put("TMPDIR", tmpDirDiag.getAbsolutePath());
+                    echoPb.environment().put("PATH", new File(rootDir, "usr/bin").getAbsolutePath() + ":"
+                            + new File(rootDir, "usr/local/bin").getAbsolutePath());
+                    // NOTE: GLIBC_TUNABLES intentionally NOT set — testing default behavior
+                    Process echoProc = echoPb.start();
+                    StringBuilder echoOut = new StringBuilder();
+                    Thread echoReader = new Thread(() -> {
+                        try (java.io.BufferedReader r = new java.io.BufferedReader(
+                                new java.io.InputStreamReader(echoProc.getInputStream()))) {
+                            String l;
+                            while ((l = r.readLine()) != null) echoOut.append(l).append('\n');
+                        } catch (Exception ex) {
+                            echoOut.append("[read error: ").append(ex.getMessage()).append("]\n");
+                        }
+                    }, "wl-diag-echo-a");
+                    echoReader.start();
+                    boolean echoExited = echoProc.waitFor(5, java.util.concurrent.TimeUnit.SECONDS);
+                    if (!echoExited) echoProc.destroyForcibly();
+                    echoReader.join(1000);
+                    int echoExit = -1;
+                    try { echoExit = echoProc.exitValue(); } catch (Exception ignored) {}
+                    if (echoExit == 0 && echoOut.toString().contains("hello-sigsys-test")) {
+                        results.append("  ✓ /bin/echo succeeded (exit=0) — glibc runtime OK without rseq disable\n");
+                        results.append("  → SIGSYS is bridge-specific (library constructor or early syscall)\n");
+                    } else if (echoExit == 159) {
+                        results.append("  ✗ /bin/echo killed by SIGSYS (exit=159) — glibc startup itself is blocked\n");
+                        results.append("  → Likely rseq() syscall (334) blocked by Android seccomp\n");
+                        failed++;
+                    } else {
+                        results.append("  ⚠ /bin/echo exit=" + echoExit + " output='" + echoOut.toString().trim() + "'\n");
+                        warned++;
+                    }
+                } catch (Exception e) {
+                    results.append("  ⚠ /bin/echo test failed: " + e.getMessage() + "\n");
+                    warned++;
+                }
+            } else {
+                results.append("Test A: SKIP (/bin/echo or linker not found)\n");
+            }
+
+            // Test B: Minimal glibc binary WITH rseq disable
+            // If Test A crashed but Test B works → rseq is confirmed as the culprit.
+            if (echoBin.exists() && linker.exists()) {
+                results.append("Test B: /bin/echo via linker (WITH rseq disable):\n");
+                try {
+                    List<String> echoCmd = new ArrayList<>();
+                    echoCmd.add(linker.getAbsolutePath());
+                    echoCmd.add("--library-path");
+                    echoCmd.add(sigsysLibPath);
+                    echoCmd.add(echoBin.getAbsolutePath());
+                    echoCmd.add("hello-rseq-disabled");
+                    ProcessBuilder echoPb = new ProcessBuilder(echoCmd);
+                    echoPb.directory(rootDir);
+                    echoPb.redirectErrorStream(true);
+                    echoPb.environment().clear();
+                    echoPb.environment().put("LD_LIBRARY_PATH", sigsysLibPath);
+                    echoPb.environment().put("HOME", new File(rootDir, "home/xuser").getAbsolutePath());
+                    echoPb.environment().put("TMPDIR", tmpDirDiag.getAbsolutePath());
+                    echoPb.environment().put("PATH", new File(rootDir, "usr/bin").getAbsolutePath() + ":"
+                            + new File(rootDir, "usr/local/bin").getAbsolutePath());
+                    echoPb.environment().put("GLIBC_TUNABLES", "glibc.pthread.rseq=0");
+                    Process echoProc = echoPb.start();
+                    StringBuilder echoOut = new StringBuilder();
+                    Thread echoReader = new Thread(() -> {
+                        try (java.io.BufferedReader r = new java.io.BufferedReader(
+                                new java.io.InputStreamReader(echoProc.getInputStream()))) {
+                            String l;
+                            while ((l = r.readLine()) != null) echoOut.append(l).append('\n');
+                        } catch (Exception ex) {
+                            echoOut.append("[read error: ").append(ex.getMessage()).append("]\n");
+                        }
+                    }, "wl-diag-echo-b");
+                    echoReader.start();
+                    boolean echoExited = echoProc.waitFor(5, java.util.concurrent.TimeUnit.SECONDS);
+                    if (!echoExited) echoProc.destroyForcibly();
+                    echoReader.join(1000);
+                    int echoExit = -1;
+                    try { echoExit = echoProc.exitValue(); } catch (Exception ignored) {}
+                    if (echoExit == 0 && echoOut.toString().contains("hello-rseq-disabled")) {
+                        results.append("  ✓ /bin/echo succeeded (exit=0) with rseq disabled\n");
+                        passed++;
+                    } else if (echoExit == 159) {
+                        results.append("  ✗ /bin/echo STILL killed by SIGSYS (exit=159) even with rseq disabled\n");
+                        results.append("  → rseq is NOT the culprit — another glibc syscall is blocked\n");
+                        failed++;
+                    } else {
+                        results.append("  ⚠ /bin/echo exit=" + echoExit + " output='" + echoOut.toString().trim() + "'\n");
+                        warned++;
+                    }
+                } catch (Exception e) {
+                    results.append("  ⚠ /bin/echo (rseq disabled) test failed: " + e.getMessage() + "\n");
+                    warned++;
+                }
+            } else {
+                results.append("Test B: SKIP (/bin/echo or linker not found)\n");
             }
 
             // === 4. PROTON + WINE ===

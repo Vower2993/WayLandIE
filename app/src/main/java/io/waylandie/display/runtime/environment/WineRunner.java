@@ -442,6 +442,15 @@ public final class WineRunner {
         env.put("TMPDIR", tmpDir.getAbsolutePath());
         env.put("XDG_RUNTIME_DIR", runtimeDir.getAbsolutePath());
 
+        // CRITICAL: Disable glibc rseq (restartable sequences) to avoid SIGSYS.
+        // glibc 2.35+ calls the rseq() syscall (334 on arm64) during
+        // __libc_start_main() — BEFORE main() runs. Android's seccomp filter
+        // blocks rseq() with SECCOMP_RET_KILL_PROCESS → SIGSYS → exit code 159.
+        // This kills the bridge (and Wine) before any output is produced.
+        // Setting GLIBC_TUNABLES=glibc.pthread.rseq=0 tells glibc to skip rseq
+        // registration, avoiding the blocked syscall entirely.
+        env.put("GLIBC_TUNABLES", "glibc.pthread.rseq=0");
+
         // Wine prefix — created during Proton install (prefixPack.txz unpacked there)
         File winePrefix = new File(homeDir, ".wine");
         if (!winePrefix.exists()) winePrefix.mkdirs();
