@@ -647,7 +647,7 @@ public final class HomeActivity extends Activity {
                 "usr/lib/aarch64-linux-gnu/libfreetype.so.6",
                 "usr/lib/aarch64-linux-gnu/libvulkan.so.1",
                 "usr/lib/aarch64-linux-gnu/libGL.so.1",
-                "lib/ld-linux-aarch64.so.1"
+                "usr/lib/ld-linux-aarch64.so.1"
             };
             for (String lib : keyLibs) {
                 File libFile = new File(rootDir, lib);

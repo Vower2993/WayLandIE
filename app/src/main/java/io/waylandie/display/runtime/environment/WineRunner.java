@@ -189,6 +189,20 @@ public final class WineRunner {
                 setupEnvironment(bridgeEnv, rootDir, protonDir, isArm64ec, fexCoreInstalled);
                 Process bridgeProcess = pbBridge.start();
                 Log.i(TAG, "Bridge translator started (pid=" + getPid(bridgeProcess) + ")");
+
+                // Capture bridge output — if the bridge crashes we need to see why
+                new Thread(() -> {
+                    try (java.io.BufferedReader reader = new java.io.BufferedReader(
+                            new java.io.InputStreamReader(bridgeProcess.getInputStream()))) {
+                        String line;
+                        while ((line = reader.readLine()) != null) {
+                            Log.i("WayLandIE/Bridge", line);
+                            io.waylandie.display.shared.util.LogRingBuffer.append("[bridge] " + line);
+                        }
+                    } catch (java.io.IOException e) {
+                        Log.w(TAG, "Bridge output stream closed: " + e.getMessage());
+                    }
+                }, "wl-bridge-output").start();
                 // Give the bridge 2s to create the Wayland socket
                 try { Thread.sleep(2000); } catch (InterruptedException ignored) {}
                 // Read the socket name the bridge created (e.g. "wayland-0")

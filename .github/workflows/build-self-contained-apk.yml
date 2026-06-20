@@ -40,7 +40,7 @@ jobs:
       - name: Set up QEMU binfmt for arm64 cross-build
         run: |
           sudo apt-get update
-          sudo apt-get install -y qemu-user-static debootstrap binfmt-support
+          sudo apt-get install -y qemu-user-static debootstrap binfmt-support zstd
           sudo update-binfmts --enable qemu-aarch64 || true
           if [ -f /proc/sys/fs/binfmt_misc/qemu-aarch64 ]; then
             echo "✓ qemu-aarch64 binfmt registered"
