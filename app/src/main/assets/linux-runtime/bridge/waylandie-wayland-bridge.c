@@ -3352,10 +3352,11 @@ static void bind_seat(struct wl_client *client, void *data, uint32_t version, ui
     wl_seat_send_capabilities(
             resource,
             WL_SEAT_CAPABILITY_POINTER | WL_SEAT_CAPABILITY_KEYBOARD | WL_SEAT_CAPABILITY_TOUCH);
-    if (bind_version >= 4) {
-        /* wl_seat_send_name was added in v4 (wayland 1.20) */
+    if (bind_version >= 7) {
+        /* wl_seat_send_name was added in v7 (wayland 1.20) — NOT v4.
+         * Calling it on v4-v6 resources sends an event the client doesn't
+         * expect, causing strict clients to disconnect. */
         wl_seat_send_name(resource, "waylandie-android-seat");
-        /* wl_seat_send_name was added in v4 (wayland 1.20) */
     }
 }
 

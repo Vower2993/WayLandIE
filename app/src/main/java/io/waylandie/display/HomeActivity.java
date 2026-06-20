@@ -596,19 +596,25 @@ public final class HomeActivity extends Activity {
                 File socketFile = new File(rootDir, "tmp/diag-socket.txt");
                 try { socketFile.getParentFile().mkdirs(); socketFile.delete(); } catch (Exception ignored) {}
 
-                // --- ldd probe: run linker --list bridge to find missing libs ---
+                // --- ldd probe: use LD_TRACE_LOADED_OBJECTS=1 to list dependencies ---
                 // This catches "error while loading shared libraries" BEFORE the
                 // bridge launch, giving us a clear error message instead of a
                 // silent crash.
+                // NOTE: We can't use 'linker --list bridge' because glibc 2.31's
+                // ld-linux treats --list as a program name (same bug as --version).
+                // Instead, set LD_TRACE_LOADED_OBJECTS=1 env var which makes the
+                // linker print library dependencies and exit (this is what ldd does).
                 try {
                     List<String> lddCmd = new ArrayList<>();
                     lddCmd.add(linker.getAbsolutePath());
-                    lddCmd.add("--list");
+                    lddCmd.add("--library-path");
+                    lddCmd.add(libPath);
                     lddCmd.add(bridgeBin.getAbsolutePath());
                     ProcessBuilder lddPb = new ProcessBuilder(lddCmd);
                     lddPb.redirectErrorStream(true);
                     lddPb.environment().clear();
                     lddPb.environment().put("LD_LIBRARY_PATH", libPath);
+                    lddPb.environment().put("LD_TRACE_LOADED_OBJECTS", "1");
                     Process lddProc = lddPb.start();
                     StringBuilder lddOut = new StringBuilder();
                     java.io.BufferedReader lddReader = new java.io.BufferedReader(

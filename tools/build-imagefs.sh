@@ -46,6 +46,7 @@
 #   ARCH=arm64 DIST=trixie bash build-imagefs.sh
 
 set -e
+set -o pipefail  # CRITICAL: without this, 'cmd | tail' masks cmd failures
 
 WORK_DIR="${WORK_DIR:-/tmp/waylandie-imagefs-build}"
 ROOTFS_DIR="$WORK_DIR/rootfs"
@@ -189,7 +190,7 @@ if ! chroot_run bash -c 'set -e; export PATH=/usr/local/bin:$PATH; cd /tmp && \
     wget -q https://gitlab.freedesktop.org/wayland/wayland/-/archive/1.22.0/wayland-1.22.0.tar.gz && \
     tar xf wayland-1.22.0.tar.gz && \
     cd wayland-1.22.0 && \
-    meson setup build --prefix=/usr -Ddocumentation=false -Dtests=false -Dlibraries=true && \
+    meson setup build --prefix=/usr --libdir=lib/aarch64-linux-gnu -Ddocumentation=false -Dtests=false -Dlibraries=true && \
     ninja -C build install && \
     ldconfig && \
     echo "  ✓ libwayland 1.22.0 built + installed" && \

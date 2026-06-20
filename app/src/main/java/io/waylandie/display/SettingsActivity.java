@@ -468,10 +468,20 @@ public final class SettingsActivity extends Activity {
                             activeLink.toPath(),
                             new File(kindDir, slot).toPath());
                 } catch (Exception e) {
-                    // Fallback: if symlink fails (rare on Android), try rename
-                    output.append("WARNING: symlink failed, trying rename: ")
+                    // Fallback: if symlink fails, write slot name as text file.
+                    // Callers that check isDirectory() will fail, but at least
+                    // the slot name is preserved for debugging. Do NOT create
+                    // an empty file — that silently breaks all driver launches.
+                    output.append("WARNING: symlink failed: ")
                             .append(e.getMessage()).append('\n');
-                    activeLink.createNewFile();
+                    try {
+                        java.nio.file.Files.write(activeLink.toPath(),
+                                slot.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                        output.append("  Wrote slot name to active marker file as fallback\n");
+                    } catch (Exception writeEx) {
+                        output.append("ERROR: Could not create active marker: ")
+                                .append(writeEx.getMessage()).append('\n');
+                    }
                 }
                 output.append("Activated: ").append(activeLink).append(" → ").append(slot).append('\n');
 
