@@ -42,7 +42,10 @@ public final class ImageFsManager {
     // .deb extraction via ar, and strings validation via grep -a fallback).
     // Bumping from 1 → 2 forces re-extraction on existing installs so they
     // get the new packages without manually clearing app data.
-    public static final int LATEST_VERSION = 2;
+    // Version 3: symlink extraction fix — symlinks were created as 0-byte files
+    // because the extraction code created a regular file FIRST, then tried to
+    // replace it with a symlink (which failed). All libraries were broken.
+    public static final int LATEST_VERSION = 3;
     private static final String IMAGEFS_ARCHIVE = "imagefs/imagefs.tar.zst";
     private static final long IMAGEFS_EXTRACTED_BYTES = 500_000_000L;
 

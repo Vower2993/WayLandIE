@@ -637,7 +637,9 @@ public final class SettingsActivity extends Activity {
                         if (kernel32.exists()) {
                             output.append("  ✓ kernel32.dll found — prefix is valid\n");
                         } else {
-                            output.append("  ⚠ kernel32.dll NOT found — prefixPack may have different layout\n");
+                            output.append("  ⚠ kernel32.dll NOT found — listing prefix contents:\n");
+                            // List what IS in the prefix to diagnose layout
+                            listDirContents(winePrefix, output, "    ", 2);
                         }
                     } else {
                         output.append("  ✗ Prefix pack extraction FAILED\n");
@@ -1152,6 +1154,23 @@ public final class SettingsActivity extends Activity {
             setBackground(null);
             setSingleLine(true);
             setTextSize(14);
+        }
+    }
+
+    private void listDirContents(File dir, StringBuilder output, String indent, int maxDepth) {
+        if (dir == null || !dir.isDirectory() || maxDepth <= 0) return;
+        File[] kids = dir.listFiles();
+        if (kids == null) return;
+        for (File kid : kids) {
+            if (kid.getName().startsWith(".")) continue;
+            if (kid.isDirectory()) {
+                int count = kid.list() != null ? kid.list().length : 0;
+                output.append(indent).append(kid.getName()).append("/ (").append(count).append(" items)\n");
+                if (maxDepth > 1) listDirContents(kid, output, indent + "  ", maxDepth - 1);
+            } else {
+                output.append(indent).append(kid.getName()).append(" (").append(kid.length()).append(" bytes)\n");
+            }
+            if (output.length() > 5000) break;
         }
     }
 }

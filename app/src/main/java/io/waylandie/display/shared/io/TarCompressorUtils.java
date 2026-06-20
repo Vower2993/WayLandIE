@@ -220,6 +220,19 @@ public final class TarCompressorUtils {
             }
             if (entry.isDirectory()) {
                 outFile.mkdirs();
+            } else if (entry.isSymbolicLink()) {
+                // CRITICAL: Check symlink BEFORE creating file.
+                // If we create a regular file first, createSymbolicLink() fails
+                // because the file already exists → 0-byte file → "file too short"
+                outFile.getParentFile().mkdirs();
+                if (outFile.exists()) outFile.delete();
+                try {
+                    java.nio.file.Files.createSymbolicLink(
+                            outFile.toPath(), new File(entry.getLinkName()).toPath());
+                } catch (Exception e) {
+                    Log.w(TAG, "Symlink failed for " + name + ": " + e.getMessage());
+                    try { outFile.createNewFile(); } catch (Exception ignored) {}
+                }
             } else {
                 outFile.getParentFile().mkdirs();
                 try (OutputStream out = new BufferedOutputStream(new FileOutputStream(outFile), 262144)) {
@@ -235,14 +248,6 @@ public final class TarCompressorUtils {
                 }
                 if (name.contains("/bin/") || name.startsWith("bin/")) {
                     outFile.setExecutable(true, false);
-                }
-                if (entry.isSymbolicLink()) {
-                    try {
-                        java.nio.file.Files.createSymbolicLink(
-                                outFile.toPath(), new File(entry.getLinkName()).toPath());
-                    } catch (Exception e) {
-                        Log.w(TAG, "Symlink failed for " + name + ": " + e.getMessage());
-                    }
                 }
             }
         }
@@ -283,6 +288,17 @@ public final class TarCompressorUtils {
                 }
                 if (entry.isDirectory()) {
                     outFile.mkdirs();
+                } else if (entry.isSymbolicLink()) {
+                    outFile.getParentFile().mkdirs();
+                    if (outFile.exists()) outFile.delete();
+                    try {
+                        java.nio.file.Files.createSymbolicLink(
+                                outFile.toPath(),
+                                new File(entry.getLinkName()).toPath());
+                    } catch (Exception e) {
+                        Log.w(TAG, "Symlink failed for " + name + ": " + e.getMessage());
+                        try { outFile.createNewFile(); } catch (Exception ignored) {}
+                    }
                 } else {
                     outFile.getParentFile().mkdirs();
                     try (OutputStream out = new BufferedOutputStream(new FileOutputStream(outFile), 65536)) {
@@ -296,19 +312,8 @@ public final class TarCompressorUtils {
                             }
                         }
                     }
-                    // Set executable for bin/ entries
                     if (name.contains("/bin/") || name.startsWith("bin/")) {
                         outFile.setExecutable(true, false);
-                    }
-                    // Handle symlinks
-                    if (entry.isSymbolicLink()) {
-                        try {
-                            java.nio.file.Files.createSymbolicLink(
-                                    outFile.toPath(),
-                                    new File(entry.getLinkName()).toPath());
-                        } catch (Exception e) {
-                            Log.w(TAG, "Symlink failed for " + name + ": " + e.getMessage());
-                        }
                     }
                 }
             }
@@ -411,10 +416,20 @@ public final class TarCompressorUtils {
 
                 if (entry.isDirectory()) {
                     outFile.mkdirs();
+                } else if (entry.isSymbolicLink()) {
+                    outFile.getParentFile().mkdirs();
+                    if (outFile.exists()) outFile.delete();
+                    try {
+                        java.nio.file.Files.createSymbolicLink(
+                                outFile.toPath(), new File(entry.getLinkName()).toPath());
+                    } catch (Exception e) {
+                        Log.w(TAG, "Symlink failed for " + name + ": " + e.getMessage());
+                        try { outFile.createNewFile(); } catch (Exception ignored) {}
+                    }
                 } else {
                     outFile.getParentFile().mkdirs();
                     try (OutputStream out = new BufferedOutputStream(new FileOutputStream(outFile), 262144)) {
-                        byte[] buf = new byte[262144]; // 256KB buffer — much faster than 64KB
+                        byte[] buf = new byte[262144];
                         int n;
                         while ((n = tar.read(buf)) > 0) {
                             out.write(buf, 0, n);
@@ -426,14 +441,6 @@ public final class TarCompressorUtils {
                     }
                     if (name.contains("/bin/") || name.startsWith("bin/")) {
                         outFile.setExecutable(true, false);
-                    }
-                    if (entry.isSymbolicLink()) {
-                        try {
-                            java.nio.file.Files.createSymbolicLink(
-                                    outFile.toPath(), new File(entry.getLinkName()).toPath());
-                        } catch (Exception e) {
-                            Log.w(TAG, "Symlink failed for " + name + ": " + e.getMessage());
-                        }
                     }
                 }
             }
@@ -606,14 +613,14 @@ public final class TarCompressorUtils {
                 String linkTarget = readString(header, 157, 100);
                 File linkFile = new File(outDir, fullName);
                 linkFile.getParentFile().mkdirs();
+                if (linkFile.exists()) linkFile.delete();
                 try {
                     java.nio.file.Files.createSymbolicLink(
                             linkFile.toPath(),
                             new File(linkTarget).toPath());
                 } catch (Exception e) {
-                    // Symlinks may fail on Android — create a regular file as fallback
                     Log.w(TAG, "Symlink failed for " + fullName + ": " + e.getMessage());
-                    linkFile.createNewFile();
+                    try { linkFile.createNewFile(); } catch (Exception ignored) {}
                 }
             } else if (typeFlag == '0' || typeFlag == 0 || typeFlag == '7') {
                 // Regular file
