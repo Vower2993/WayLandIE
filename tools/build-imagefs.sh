@@ -126,7 +126,7 @@ chroot_run apt-get update -qq
 echo "  Installing essential tools…"
 chroot_run apt-get install -y --no-install-recommends \
     ca-certificates wget curl xz-utils tar bzip2 gzip unzip binutils \
-    locales bash coreutils findutils gcc pkg-config 2>&1 | tail -3
+    locales bash coreutils findutils gcc pkg-config libc6-dev 2>&1 | tail -3
 
 # Group 2: Wayland + Vulkan + display libraries
 # NOTE: 'wayland-scanner' is not a package in Debian trixie — the binary
