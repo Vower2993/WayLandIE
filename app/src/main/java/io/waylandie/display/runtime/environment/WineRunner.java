@@ -420,6 +420,23 @@ public final class WineRunner {
         env.put("XDG_CONFIG_DIRS", new File(rootDir, "usr/etc/xdg").getAbsolutePath());
         // Add /system/lib64 to LD_LIBRARY_PATH — some glibc libs link against Android system libs
         env.put("LD_LIBRARY_PATH", env.get("LD_LIBRARY_PATH") + ":/system/lib64");
+        // Winlator-inspired env vars — Wine needs these for proper operation
+        env.put("WINE_DISABLE_FULLSCREEN_HACK", "1");
+        env.put("WINE_X11FORCEGLX", "1");
+        env.put("WINE_GST_NO_GL", "1");
+        env.put("VK_LAYER_PATH", new File(rootDir, "usr/share/vulkan/implicit_layer.d").getAbsolutePath()
+                + ":" + new File(rootDir, "usr/share/vulkan/explicit_layer.d").getAbsolutePath());
+        env.put("PREFIX", new File(rootDir, "usr").getAbsolutePath());
+        env.put("GST_PLUGIN_FEATURE_RANK", "ximagesink:3000");
+        env.put("ALSA_CONFIG_PATH", new File(rootDir, "usr/share/alsa/alsa.conf").getAbsolutePath());
+        env.put("ALSA_PLUGIN_DIR", new File(rootDir, "usr/lib/alsa-lib").getAbsolutePath());
+        env.put("OPENSSL_CONF", new File(rootDir, "usr/etc/tls/openssl.cnf").getAbsolutePath());
+        env.put("SSL_CERT_FILE", new File(rootDir, "usr/etc/tls/cert.pem").getAbsolutePath());
+        env.put("SSL_CERT_DIR", new File(rootDir, "usr/etc/tls/certs").getAbsolutePath());
+        env.put("PROTON_AUDIO_CONVERT", "0");
+        env.put("PROTON_VIDEO_CONVERT", "0");
+        env.put("PROTON_DEMUX", "0");
+        env.put("SteamGameId", "0");
 
         // Proton env
         env.put("PROTONPATH", protonDir.getAbsolutePath());
