@@ -3342,7 +3342,7 @@ static const struct wl_seat_interface seat_impl = {
 };
 
 static void bind_seat(struct wl_client *client, void *data, uint32_t version, uint32_t id) {
-    uint32_t bind_version = version > 9 ? 9 : version;
+    uint32_t bind_version = version > 8 ? 8 : version;
     struct wl_resource *resource = wl_resource_create(client, &wl_seat_interface, bind_version, id);
     if (resource == NULL) {
         wl_client_post_no_memory(client);
@@ -3699,7 +3699,7 @@ static const struct wl_compositor_interface compositor_impl = {
 };
 
 static void bind_compositor(struct wl_client *client, void *data, uint32_t version, uint32_t id) {
-    struct wl_resource *resource = wl_resource_create(client, &wl_compositor_interface, version > 5 ? 5 : version, id);
+    struct wl_resource *resource = wl_resource_create(client, &wl_compositor_interface, version > 4 ? 4 : version, id);
     struct server_state *state = data;
     if (state != NULL) {
         state->client_seen = 1;
@@ -3797,9 +3797,9 @@ int main(int argc, char **argv) {
         printf("wayland-shm-ahb server=fail reason=display-create\n");
         return 1;
     }
-    if (wl_global_create(state.display, &wl_compositor_interface, 5, &state, bind_compositor) == NULL
+    if (wl_global_create(state.display, &wl_compositor_interface, 4, &state, bind_compositor) == NULL
             || wl_global_create(state.display, &wl_subcompositor_interface, 1, NULL, bind_subcompositor) == NULL
-            || wl_global_create(state.display, &wl_seat_interface, 9, &state, bind_seat) == NULL
+            || wl_global_create(state.display, &wl_seat_interface, 8, &state, bind_seat) == NULL
             || wl_global_create(state.display, &wl_shm_interface, 1, NULL, bind_shm) == NULL
              || wl_global_create(state.display, &wl_output_interface, 4, &state, bind_output) == NULL
              || wl_global_create(state.display, &xdg_wm_base_interface, 6, NULL, bind_xdg_wm_base) == NULL

@@ -159,6 +159,52 @@ chroot_run apt-get install -y --no-install-recommends \
 chroot_run locale-gen en_US.UTF-8 2>/dev/null || true
 
 # ---------------------------------------------------------------------
+# 2.5. Build libwayland 1.22 from source + vendor wayland-protocols 1.27
+# ---------------------------------------------------------------------
+# CRITICAL: The Wayland bridge translator uses features from:
+#   - wl_seat v8 (wl_seat_send_name — added in wayland 1.21)
+#   - wl_output v4 (done event semantics — added in wayland 1.20)
+#   - zwp_linux_dmabuf_v1 v4 (dmabuf feedback — added in wayland-protocols 1.23)
+#
+# Ubuntu 20.04 Focal ships libwayland 1.18 + wayland-protocols 1.20, which
+# are too old. We MUST build libwayland 1.22 from source and vendor newer
+# wayland-protocols XMLs. The bridge won't compile or run without these.
+#
+# We keep Focal's glibc 2.31 (safe for Android seccomp) but override wayland.
+echo "[2.5/7] Building libwayland 1.22 from source + vendoring wayland-protocols 1.27…"
+
+# Install build dependencies for wayland
+chroot_run apt-get install -y -qq meson ninja-build libffi-dev libexpat1-dev libxml2-dev 2>&1 | tail -2
+
+# Download + build wayland 1.22 (provides wl_seat v8, wl_output v4)
+chroot_run bash -c '
+    cd /tmp && \
+    wget -q https://gitlab.freedesktop.org/wayland/wayland/-/archive/1.22.0/wayland-1.22.0.tar.gz && \
+    tar xf wayland-1.22.0.tar.gz && \
+    cd wayland-1.22.0 && \
+    meson setup build --prefix=/usr -Ddocumentation=false -Dtests=false -Dlibraries=true && \
+    ninja -C build install && \
+    ldconfig && \
+    echo "  ✓ libwayland 1.22.0 built + installed" && \
+    rm -rf /tmp/wayland-1.22.0*
+' 2>&1 | tail -5
+
+# Download + install wayland-protocols 1.27 (provides linux-dmabuf v4, xdg_wm_base v6)
+chroot_run bash -c '
+    cd /tmp && \
+    wget -q https://gitlab.freedesktop.org/wayland/wayland-protocols/-/archive/1.27/wayland-protocols-1.27.tar.gz && \
+    tar xf wayland-protocols-1.27.tar.gz && \
+    cd wayland-protocols-1.27 && \
+    meson setup build --prefix=/usr && \
+    ninja -C build install && \
+    echo "  ✓ wayland-protocols 1.27 installed" && \
+    rm -rf /tmp/wayland-protocols-1.27*
+' 2>&1 | tail -3
+
+# Verify wayland version
+chroot_run bash -c 'wayland-scanner --version 2>&1 || echo "wayland-scanner version check failed"'
+
+# ---------------------------------------------------------------------
 # 3. Install box64 (BIONIC build — Android-native, no glibc needed)
 # ---------------------------------------------------------------------
 # We use the BIONIC box64 from StevenMXZ/Winlator-Ludashi (MIT license).
@@ -169,7 +215,7 @@ chroot_run locale-gen en_US.UTF-8 2>/dev/null || true
 # and uses FEXCore (libarm64ecfex.dll) for x86_64 game code instead.
 echo "[3/7] Installing bionic box64 (Android-native, for x86_64 Wine fallback)…"
 chroot_run bash -c 'mkdir -p /usr/bin && cd /tmp && \
-    wget -qO box64.tzst "https://github.com/StevenMXZ/Winlator-Ludashi/raw/main/app/src/main/assets/box64/box64-0.4.1.tzst" && \
+    wget -qO box64.tzst "https://github.com/StevenMXZ/Winlator-Ludashi/raw/ludashi-3.0/app/src/main/assets/box64/box64-0.4.1.tzst" && \
     if command -v zstd >/dev/null 2>&1; then \
         zstd -d box64.tzst -o box64.tar && tar -xf box64.tar -C / && chmod +x /usr/bin/box64 && echo "  bionic box64 installed (zstd)"; \
     else \
@@ -331,13 +377,20 @@ echo "[7/7] Creating imagefs.tar.zst…"
 
 # Purge dev packages — only needed for bridge compilation, bloat rootfs 3x
 # Ubuntu 20.04 Focal ships gcc-9 (not gcc-14 like Trixie)
+# Also purge wayland build deps (meson, ninja, libffi-dev, etc.) — only needed
+# to build libwayland 1.22 from source, not at runtime.
+# NOTE: Do NOT purge libwayland-dev/libwayland-bin — we built libwayland 1.22
+# from source over the Focal packages. Purging the packages could remove the
+# runtime library (libwayland-server0) that the bridge links against.
 echo "  Purging dev packages…"
 chroot_run apt-get purge -y --auto-remove \
     gcc gcc-9 libgcc-9-dev cpp cpp-9 \
     libc6-dev linux-libc-dev \
-    libwayland-dev libwayland-bin \
     libx11-dev libxtst-dev \
+    meson ninja-build libffi-dev libexpat1-dev libxml2-dev \
     pkg-config binutils 2>&1 | tail -3 || echo "  (some purge failures OK)"
+# Mark libwayland-server0 as manually installed so it survives auto-remove
+chroot_run apt-mark manual libwayland-server0 libwayland-client0 2>/dev/null || true
 
 # Clean up apt cache + temp + docs
 rm -rf "$ROOTFS_DIR/var/cache/apt/archives/"*.deb 2>/dev/null || true
