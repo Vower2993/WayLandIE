@@ -274,6 +274,7 @@ JNI_DIR="$SCRIPT_DIR/../app/src/main/jniLibs/arm64-v8a"
 mkdir -p "$JNI_DIR"
 LINKER_SRC=""
 for candidate in \
+    "$ROOTFS_DIR/usr/lib/ld-linux-aarch64.so.1" \
     "$ROOTFS_DIR/lib/ld-linux-aarch64.so.1" \
     "$ROOTFS_DIR/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1" \
     "$ROOTFS_DIR/lib64/ld-linux-aarch64.so.1"; do
