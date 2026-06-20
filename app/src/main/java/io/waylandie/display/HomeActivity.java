@@ -1258,6 +1258,71 @@ public final class HomeActivity extends Activity {
                 warned++;
             }
 
+            // Test H: Syscall scanner — identifies EXACT blocked syscalls.
+            // Runs a bionic binary that forks for each syscall number (0-450).
+            // If a child exits with SIGSYS (signal 31), that syscall is blocked.
+            // This gives us the device's EXACT seccomp blocklist so we can
+            // expand the shim to intercept the right syscalls.
+            results.append("Test H: Syscall scanner (identifies ALL blocked syscalls):\n");
+            File scanBin = new File(nativeLibDir, "libwaylandie_syscall_scan.so");
+            if (scanBin.exists()) {
+                try {
+                    scanBin.setExecutable(true, false);
+                    ProcessBuilder scanPb = new ProcessBuilder(scanBin.getAbsolutePath());
+                    scanPb.redirectErrorStream(true);
+                    Process scanProc = scanPb.start();
+                    StringBuilder scanOut = new StringBuilder();
+                    Thread scanReader = new Thread(() -> {
+                        try (java.io.BufferedReader r = new java.io.BufferedReader(
+                                new java.io.InputStreamReader(scanProc.getInputStream()))) {
+                            String l;
+                            while ((l = r.readLine()) != null) scanOut.append(l).append('\n');
+                        } catch (Exception ignored) {}
+                    }, "wl-diag-syscall-scan");
+                    scanReader.start();
+                    // Scanning 451 syscalls with fork() takes ~30-60s
+                    boolean scanExited = scanProc.waitFor(120, java.util.concurrent.TimeUnit.SECONDS);
+                    if (!scanExited) scanProc.destroyForcibly();
+                    scanReader.join(2000);
+                    int scanExit = -1;
+                    try { scanExit = scanProc.exitValue(); } catch (Exception ignored) {}
+
+                    if (scanExit == 0) {
+                        results.append("  ✓ Syscall scan complete:\n");
+                        int blockedCount = 0;
+                        for (String l : scanOut.toString().split("\n")) {
+                            if (l.startsWith("BLOCKED:")) {
+                                results.append("    ").append(l).append("\n");
+                                blockedCount++;
+                            }
+                        }
+                        // Check for scan complete line
+                        if (scanOut.toString().contains("SCAN_COMPLETE")) {
+                            results.append("  Total blocked syscalls: " + blockedCount + "\n");
+                        }
+                        if (blockedCount > 0) {
+                            results.append("  → Compare with shim blocklist to find missing syscalls\n");
+                            passed++;
+                        } else {
+                            results.append("  ⚠ No blocked syscalls found (unexpected — seccomp should block something)\n");
+                            warned++;
+                        }
+                    } else {
+                        results.append("  ✗ Syscall scanner failed (exit=" + scanExit + ")\n");
+                        String snippet = scanOut.toString().trim();
+                        if (snippet.length() > 300) snippet = snippet.substring(0, 300);
+                        results.append("  Output: " + snippet + "\n");
+                        failed++;
+                    }
+                } catch (Exception e) {
+                    results.append("  ⚠ Syscall scanner failed: " + e.getMessage() + "\n");
+                    warned++;
+                }
+            } else {
+                results.append("Test H: SKIP (libwaylandie_syscall_scan.so not found)\n");
+                warned++;
+            }
+
             // === 4. PROTON + WINE ===
             results.append("\n--- PROTON + WINE ---\n");
             File protonDir = new File(filesDir, "contents/proton/active");

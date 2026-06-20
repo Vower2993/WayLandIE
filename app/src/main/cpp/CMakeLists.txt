@@ -96,3 +96,17 @@ set_target_properties(waylandie_bionic_test PROPERTIES
 # Link against bionic libc + liblog for __android_log_print (if needed)
 target_link_libraries(waylandie_bionic_test log)
 
+# ----------------------------------------------------------------------
+# Syscall scanner — identifies EXACT blocked syscalls on this device.
+# Tests each syscall number in a forked child. If child exits with
+# SIGSYS (159), that syscall is blocked by seccomp.
+# Same jniLibs packaging trick: libwaylandie_syscall_scan.so
+# ----------------------------------------------------------------------
+add_executable(waylandie_syscall_scan syscall_scan.c)
+set_target_properties(waylandie_syscall_scan PROPERTIES
+    OUTPUT_NAME "waylandie_syscall_scan"
+    PREFIX "lib"
+    SUFFIX ".so"
+)
+target_link_libraries(waylandie_syscall_scan log)
+
