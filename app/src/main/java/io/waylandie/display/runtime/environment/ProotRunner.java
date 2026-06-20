@@ -262,6 +262,21 @@ public final class ProotRunner {
         pb.environment().put("TMPDIR", "/tmp");
         pb.environment().put("XDG_RUNTIME_DIR", "/tmp");
 
+        // CRITICAL: proot needs a writable temp directory for its "glue rootfs".
+        // Without PROOT_TMP_DIR, proot tries to use /tmp (which is bind-mounted
+        // from imagefs/usr/tmp) but the default Android TMPDIR may not be writable.
+        // Setting PROOT_TMP_DIR to the app's cacheDir (always writable) fixes:
+        //   "proot error: can't create temporary directory: Permission denied"
+        File prootTmp = new File(context.getCacheDir(), "proot-tmp");
+        if (!prootTmp.exists()) prootTmp.mkdirs();
+        pb.environment().put("PROOT_TMP_DIR", prootTmp.getAbsolutePath());
+        Log.i(TAG, "PROOT_TMP_DIR=" + prootTmp.getAbsolutePath());
+
+        // Also set PROOT_L2S_DIR for proot's link2symlink extension
+        File prootL2s = new File(context.getCacheDir(), "proot-l2s");
+        if (!prootL2s.exists()) prootL2s.mkdirs();
+        pb.environment().put("PROOT_L2S_DIR", prootL2s.getAbsolutePath());
+
         // Contents dir — where driver slots + 'active' symlinks live.
         // waylandie-install-driver reads this to know where to install.
         // Must match the bind-mount in buildProotCommand().
