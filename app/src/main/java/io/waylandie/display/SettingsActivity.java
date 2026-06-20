@@ -608,14 +608,20 @@ public final class SettingsActivity extends Activity {
                 if (prefixPack.exists()) {
                     io.waylandie.display.runtime.environment.ImageFsManager imgFs =
                             new io.waylandie.display.runtime.environment.ImageFsManager(this);
-                    File winePrefix = new File(imgFs.getRootDir(), "home/xuser/.wine");
+                    // CRITICAL: Extract prefixPack to home/xuser/ (NOT .wine/) because
+                    // the prefixPack contains paths like .wine/drive_c/... internally.
+                    // Extracting to .wine/ creates .wine/.wine/drive_c/... (double nested).
+                    // Extracting to home/xuser/ creates home/xuser/.wine/drive_c/... (correct).
+                    File homeDir = new File(imgFs.getRootDir(), "home/xuser");
+                    if (!homeDir.exists()) homeDir.mkdirs();
+                    File winePrefix = new File(homeDir, ".wine");
                     winePrefix.mkdirs();
-                    output.append("Unpacking prefixPack.txz to Wine prefix…\n");
+                    output.append("Unpacking prefixPack.txz to home dir (prefixPack contains .wine/ internally)…\n");
                     boolean unpacked = io.waylandie.display.shared.io.TarCompressorUtils.extractFileWithType(
-                            prefixPack, winePrefix,
+                            prefixPack, homeDir,
                             io.waylandie.display.shared.io.TarCompressorUtils.Type.XZ, null);
                     if (unpacked) {
-                        output.append("  ✓ Prefix pack unpacked to: ").append(winePrefix).append('\n');
+                        output.append("  ✓ Prefix pack unpacked to: ").append(homeDir.getAbsolutePath()).append("/.wine\n");
                         // Create dosdevices symlinks (like winlator does)
                         File dosdevices = new File(winePrefix, "dosdevices");
                         dosdevices.mkdirs();

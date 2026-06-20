@@ -322,10 +322,25 @@ fi
 # 7. Create the tarball
 # ---------------------------------------------------------------------
 echo "[7/7] Creating imagefs.tar.zst…"
-# Clean up to reduce size
+
+# Purge dev packages — only needed for bridge compilation, bloat rootfs 3x
+echo "  Purging dev packages…"
+chroot_run apt-get purge -y --auto-remove \
+    gcc gcc-14 libgcc-14-dev cpp cpp-14 \
+    libc6-dev linux-libc-dev \
+    libwayland-dev libwayland-bin \
+    libx11-dev libxtst-dev \
+    pkg-config binutils 2>&1 | tail -3 || echo "  (some purge failures OK)"
+
+# Clean up apt cache + temp + docs
 rm -rf "$ROOTFS_DIR/var/cache/apt/archives/"*.deb 2>/dev/null || true
 rm -rf "$ROOTFS_DIR/var/lib/apt/lists/"* 2>/dev/null || true
 rm -rf "$ROOTFS_DIR/tmp/"* 2>/dev/null || true
+rm -rf "$ROOTFS_DIR/usr/share/doc" 2>/dev/null || true
+rm -rf "$ROOTFS_DIR/usr/share/man" 2>/dev/null || true
+rm -rf "$ROOTFS_DIR/usr/share/locale" 2>/dev/null || true
+rm -rf "$ROOTFS_DIR/usr/share/info" 2>/dev/null || true
+echo "  ✓ Cleanup complete"
 
 cd "$ROOTFS_DIR"
 tar --xattrs -cf - . | zstd -19 -T0 -o "$OUTPUT_FILE"
