@@ -991,6 +991,69 @@ public final class HomeActivity extends Activity {
                 results.append("Test D: SKIP (libproot.so or /bin/echo not found)\n");
             }
 
+            // Test E: Bionic test binary (compiled with NDK, linked against bionic).
+            // This is the KEY test — if bionic works, it proves the seccomp issue
+            // is glibc-specific and bionic is the correct native path.
+            // The binary also tests individual syscalls (rseq, getcpu, clone3, etc.)
+            // to identify which ones Android's seccomp blocks.
+            results.append("Test E: bionic test binary (NDK-compiled, NO glibc):\n");
+            File bionicTest = new File(nativeLibDir, "libwaylandie_bionic_test.so");
+            if (bionicTest.exists()) {
+                try {
+                    bionicTest.setExecutable(true, false);
+                    // Direct execve — bionic binary doesn't need a linker wrapper.
+                    // Android's own linker (linker64) handles it natively.
+                    ProcessBuilder bionicPb = new ProcessBuilder(bionicTest.getAbsolutePath());
+                    bionicPb.redirectErrorStream(true);
+                    Process bionicProc = bionicPb.start();
+                    StringBuilder bionicOut = new StringBuilder();
+                    Thread bionicReader = new Thread(() -> {
+                        try (java.io.BufferedReader r = new java.io.BufferedReader(
+                                new java.io.InputStreamReader(bionicProc.getInputStream()))) {
+                            String l;
+                            while ((l = r.readLine()) != null) bionicOut.append(l).append('\n');
+                        } catch (Exception ex) {
+                            bionicOut.append("[read error: ").append(ex.getMessage()).append("]\n");
+                        }
+                    }, "wl-diag-bionic");
+                    bionicReader.start();
+                    boolean bionicExited = bionicProc.waitFor(5, java.util.concurrent.TimeUnit.SECONDS);
+                    if (!bionicExited) bionicProc.destroyForcibly();
+                    bionicReader.join(1000);
+                    int bionicExit = -1;
+                    try { bionicExit = bionicProc.exitValue(); } catch (Exception ignored) {}
+                    String bionicStr = bionicOut.toString();
+                    if (bionicExit == 0 && bionicStr.contains("hello-bionic")) {
+                        results.append("  ✓ BIONIC TEST PASSED (exit=0)\n");
+                        results.append("  → Bionic executes WITHOUT SIGSYS — seccomp issue is glibc-specific\n");
+                        results.append("  → Bionic is the correct native path (no glibc, no proot needed)\n");
+                        for (String l : bionicStr.split("\n")) {
+                            if (!l.isEmpty() && !l.equals("hello-bionic")) {
+                                results.append("    ").append(l).append("\n");
+                            }
+                        }
+                        passed++;
+                    } else if (bionicExit == 159) {
+                        results.append("  ✗ Bionic test ALSO killed by SIGSYS (exit=159)\n");
+                        results.append("  → seccomp blocks bionic too — deeper kernel-level issue\n");
+                        failed++;
+                    } else {
+                        results.append("  ⚠ Bionic test exit=" + bionicExit + " output:\n");
+                        for (String l : bionicStr.split("\n")) {
+                            if (!l.isEmpty()) results.append("    ").append(l).append("\n");
+                        }
+                        warned++;
+                    }
+                } catch (Exception e) {
+                    results.append("  ⚠ Bionic test failed: " + e.getMessage() + "\n");
+                    warned++;
+                }
+            } else {
+                results.append("Test E: SKIP (libwaylandie_bionic_test.so not found in nativeLibDir)\n");
+                results.append("  → APK may not include the bionic test binary\n");
+                warned++;
+            }
+
             // === 4. PROTON + WINE ===
             results.append("\n--- PROTON + WINE ---\n");
             File protonDir = new File(filesDir, "contents/proton/active");

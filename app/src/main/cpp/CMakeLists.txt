@@ -79,3 +79,20 @@ if(CMAKE_BUILD_TYPE STREQUAL "Release")
                 $<TARGET_FILE:waylandie_display_native>
         COMMENT "Stripping waylandie_display_native.so")
 endif()
+
+# ----------------------------------------------------------------------
+# Bionic test binary — proves bionic works without SIGSYS on Android 16.
+# Compiled as a PIE executable, but named lib*.so so Android packages it
+# in jniLibs. Android extracts it to nativeLibraryDir where we can execve
+# it directly (same trick as libld_glibc.so and libproot.so).
+# ----------------------------------------------------------------------
+add_executable(waylandie_bionic_test bionic_test.c)
+# Android requires .so naming for jniLibs packaging
+set_target_properties(waylandie_bionic_test PROPERTIES
+    OUTPUT_NAME "waylandie_bionic_test"
+    PREFIX "lib"
+    SUFFIX ".so"
+)
+# Link against bionic libc + liblog for __android_log_print (if needed)
+target_link_libraries(waylandie_bionic_test log)
+
