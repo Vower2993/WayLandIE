@@ -145,9 +145,12 @@ public final class WineRunner {
         // CRITICAL: Debian multiarch puts libs in /usr/lib/aarch64-linux-gnu/
         // not /usr/lib/. Without this path, wine + bridge can't find libX11,
         // libwayland-server, libfreetype, etc.
+        // Also include protonDir/lib (flat layout) AND protonDir/files/lib
+        // (standard layout) — covers both Proton package formats.
         String libPath = new File(rootDir, "usr/lib").getAbsolutePath() + ":"
                 + new File(rootDir, "usr/lib/aarch64-linux-gnu").getAbsolutePath() + ":"
                 + new File(rootDir, "usr/local/lib").getAbsolutePath() + ":"
+                + new File(protonDir, "lib").getAbsolutePath() + ":"
                 + new File(protonDir, "files/lib").getAbsolutePath();
 
         // Start bridge translator FIRST (in background, via glibc linker)
@@ -304,21 +307,41 @@ public final class WineRunner {
 
         env.put("HOME", homeDir.getAbsolutePath());
         env.put("USER", "xuser");
-        env.put("PATH", new File(protonDir, "files/bin").getAbsolutePath() + ":"
+        env.put("PATH", new File(protonDir, "bin").getAbsolutePath() + ":"
+                + new File(protonDir, "files/bin").getAbsolutePath() + ":"
                 + new File(rootDir, "usr/bin").getAbsolutePath() + ":"
                 + new File(rootDir, "usr/local/bin").getAbsolutePath());
+        // LD_LIBRARY_PATH — include both flat (lib/) and standard (files/lib) Proton layouts
         env.put("LD_LIBRARY_PATH",
                 new File(rootDir, "usr/lib").getAbsolutePath() + ":"
+                + new File(rootDir, "usr/lib/aarch64-linux-gnu").getAbsolutePath() + ":"
                 + new File(rootDir, "usr/local/lib").getAbsolutePath() + ":"
+                + new File(protonDir, "lib").getAbsolutePath() + ":"
                 + new File(protonDir, "files/lib").getAbsolutePath());
         env.put("LANG", "en_US.UTF-8");
         env.put("TERM", "xterm-256color");
         env.put("TMPDIR", tmpDir.getAbsolutePath());
         env.put("XDG_RUNTIME_DIR", runtimeDir.getAbsolutePath());
 
-        // Wine env
+        // Wine prefix — unpack prefixPack.txz if present (Proton pre-built prefix)
         File winePrefix = new File(homeDir, ".wine");
-        if (!winePrefix.exists()) winePrefix.mkdirs();
+        if (!winePrefix.exists() || winePrefix.list() == null || winePrefix.list().length == 0) {
+            winePrefix.mkdirs();
+            // Check for prefixPack.txz in Proton and unpack it
+            File prefixPack = new File(protonDir, "prefixPack.txz");
+            if (prefixPack.exists()) {
+                Log.i(TAG, "Unpacking Proton prefix pack: " + prefixPack);
+                try {
+                    io.waylandie.display.shared.io.TarCompressorUtils.extractFileWithType(
+                            prefixPack, winePrefix,
+                            io.waylandie.display.shared.io.TarCompressorUtils.Type.XZ, null);
+                    Log.i(TAG, "Prefix pack unpacked to " + winePrefix);
+                } catch (Exception e) {
+                    Log.w(TAG, "Failed to unpack prefix pack: " + e.getMessage()
+                            + " — Wine will create a new prefix on first run");
+                }
+            }
+        }
         env.put("WINEPREFIX", winePrefix.getAbsolutePath());
         env.put("WINEDLLOVERRIDES", "d3d9,d3d10core,d3d11,dxgi=native");
         env.put("DXVK_STATE_CACHE_PATH", new File(homeDir, ".dxvk-cache").getAbsolutePath());
@@ -406,8 +429,14 @@ public final class WineRunner {
             raf.readFully(magic);
             if (magic[0] != 0x7f || magic[1] != 'E' || magic[2] != 'L' || magic[3] != 'F')
                 return false;
+            // CRITICAL: ELF e_machine is little-endian on ARM64.
+            // readUnsignedShort() reads big-endian (Java default) — WRONG.
+            // Must read bytes manually in little-endian order.
             raf.seek(18);
-            int eMachine = raf.readUnsignedShort();
+            int lo = raf.readUnsignedByte();
+            int hi = raf.readUnsignedByte();
+            int eMachine = (hi << 8) | lo;  // little-endian
+            Log.i(TAG, "Wine ELF e_machine=" + eMachine + " (183=ARM64, 62=x86_64)");
             return eMachine == 183; // EM_AARCH64
         } catch (Exception e) {
             return false;
