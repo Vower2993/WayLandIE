@@ -48,7 +48,9 @@ public final class ImageFsManager {
     // Version 4: Switched rootfs from Debian Trixie (glibc 2.41) to
     // Ubuntu 20.04 Focal (glibc 2.31). glibc 2.41 triggers SIGSYS on
     // Android 16 (seccomp blocks rseq/clone3). glibc 2.31 is safe.
-    public static final int LATEST_VERSION = 4;
+    // Version 5: Added LD_PRELOAD syscall shim (libwaylandie_shim.so) to
+    // intercept blocked syscalls from libwayland-server/libvulkan constructors.
+    public static final int LATEST_VERSION = 5;
     private static final String IMAGEFS_ARCHIVE = "imagefs/imagefs.tar.xz";
     private static final long IMAGEFS_EXTRACTED_BYTES = 500_000_000L;
 

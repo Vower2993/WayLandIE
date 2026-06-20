@@ -696,6 +696,13 @@ public final class HomeActivity extends Activity {
                     // glibc 2.35+ calls rseq() during __libc_start_main() (before
                     // main). Android's seccomp blocks rseq() → SIGSYS → exit 159.
                     pb.environment().put("GLIBC_TUNABLES", "glibc.pthread.rseq=0");
+                    // LD_PRELOAD syscall shim — intercepts blocked syscalls from
+                    // libwayland-server/libvulkan constructors (Test F finding)
+                    File diagShim = new File(rootDir, "usr/local/lib/libwaylandie_shim.so");
+                    if (diagShim.exists()) {
+                        pb.environment().put("LD_PRELOAD", diagShim.getAbsolutePath());
+                        results.append("  (with LD_PRELOAD shim)\n");
+                    }
                     Process bridge = pb.start();
                     results.append("  Launched bridge via linker (8 args, output=" + dispW + "x" + dispH + ")\n");
 
@@ -1181,6 +1188,74 @@ public final class HomeActivity extends Activity {
                 }
             } else {
                 results.append("Test F: SKIP (/bin/echo or linker not found)\n");
+            }
+
+            // Test G: Verify the LD_PRELOAD syscall shim fixes libwayland-server SIGSYS.
+            // Test F showed libwayland-server triggers SIGSYS. The shim intercepts
+            // blocked syscalls. This test verifies: /bin/echo + shim + libwayland-server
+            // = exit 0 (shim catches the blocked syscall).
+            results.append("Test G: LD_PRELOAD shim + libwayland-server test:\n");
+            File shimFile = new File(rootDir, "usr/local/lib/libwaylandie_shim.so");
+            File wlServerLib = new File(rootDir, "usr/lib/aarch64-linux-gnu/libwayland-server.so.0");
+            if (shimFile.exists() && echoBinF.exists() && linkerF.exists() && wlServerLib.exists()) {
+                try {
+                    List<String> cmd = new ArrayList<>();
+                    cmd.add(linkerF.getAbsolutePath());
+                    cmd.add("--library-path");
+                    cmd.add(sigsysLibPath);
+                    cmd.add(echoBinF.getAbsolutePath());
+                    cmd.add("shim-test-ok");
+                    ProcessBuilder pb = new ProcessBuilder(cmd);
+                    pb.redirectErrorStream(true);
+                    pb.environment().clear();
+                    pb.environment().put("LD_LIBRARY_PATH", sigsysLibPath);
+                    pb.environment().put("LD_PRELOAD", shimFile.getAbsolutePath() + ":"
+                            + wlServerLib.getAbsolutePath());
+                    pb.environment().put("WAYLANDIE_SHIM_DEBUG", "1");
+                    Process p = pb.start();
+                    StringBuilder out = new StringBuilder();
+                    Thread reader = new Thread(() -> {
+                        try (java.io.BufferedReader r = new java.io.BufferedReader(
+                                new java.io.InputStreamReader(p.getInputStream()))) {
+                            String l;
+                            while ((l = r.readLine()) != null) out.append(l).append('\n');
+                        } catch (Exception ignored) {}
+                    }, "wl-diag-shim");
+                    reader.start();
+                    boolean exited = p.waitFor(5, java.util.concurrent.TimeUnit.SECONDS);
+                    if (!exited) p.destroyForcibly();
+                    reader.join(500);
+                    int exit = -1;
+                    try { exit = p.exitValue(); } catch (Exception ignored) {}
+                    if (exit == 0 && out.toString().contains("shim-test-ok")) {
+                        results.append("  ✓ SHIM WORKS! /bin/echo + shim + libwayland-server = exit 0\n");
+                        results.append("  → The shim successfully intercepted the blocked syscall\n");
+                        // Show which syscalls were intercepted
+                        for (String l : out.toString().split("\n")) {
+                            if (l.contains("WAYLANDIE_SHIM:")) {
+                                results.append("    ").append(l).append("\n");
+                            }
+                        }
+                        passed++;
+                    } else if (exit == 159) {
+                        results.append("  ✗ Shim did NOT fix libwayland-server SIGSYS (exit=159)\n");
+                        results.append("  → The blocked syscall is NOT in our intercept list\n");
+                        results.append("  → Need to identify the exact syscall (expand shim blocklist)\n");
+                        failed++;
+                    } else {
+                        String snippet = out.toString().trim();
+                        if (snippet.length() > 200) snippet = snippet.substring(0, 200);
+                        results.append("  ⚠ exit=").append(exit).append(" output: ").append(snippet).append("\n");
+                        warned++;
+                    }
+                } catch (Exception e) {
+                    results.append("  ⚠ Shim test failed: " + e.getMessage() + "\n");
+                    warned++;
+                }
+            } else {
+                results.append("Test G: SKIP (shim or libwayland-server not found)\n");
+                results.append("  shim: " + shimFile.exists() + " wl-server: " + wlServerLib.exists() + "\n");
+                warned++;
             }
 
             // === 4. PROTON + WINE ===

@@ -451,6 +451,19 @@ public final class WineRunner {
         // registration, avoiding the blocked syscall entirely.
         env.put("GLIBC_TUNABLES", "glibc.pthread.rseq=0");
 
+        // CRITICAL: LD_PRELOAD syscall shim — intercepts syscalls blocked by
+        // Android's seccomp filter (rseq, clone3, openat2, io_uring, etc.).
+        // Test F showed libwayland-server 1.22 and libvulkan trigger SIGSYS
+        // (exit 159). The shim returns ENOSYS so libraries fall back to
+        // older methods. Compiled in build-imagefs.sh → /usr/local/lib/
+        File shimFile = new File(rootDir, "usr/local/lib/libwaylandie_shim.so");
+        if (shimFile.exists()) {
+            env.put("LD_PRELOAD", shimFile.getAbsolutePath());
+            Log.i(TAG, "LD_PRELOAD syscall shim: " + shimFile.getAbsolutePath());
+        } else {
+            Log.w(TAG, "libwaylandie_shim.so NOT FOUND — bridge/Wine may crash with SIGSYS");
+        }
+
         // Wine prefix — created during Proton install (prefixPack.txz unpacked there)
         File winePrefix = new File(homeDir, ".wine");
         if (!winePrefix.exists()) winePrefix.mkdirs();

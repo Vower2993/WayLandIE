@@ -320,6 +320,30 @@ else
 fi
 
 # ---------------------------------------------------------------------
+# 3.55. Compile the LD_PRELOAD syscall shim
+# ---------------------------------------------------------------------
+# Test F showed libwayland-server 1.22 triggers SIGSYS (exit 159) from
+# Android's seccomp filter. The shim intercepts blocked syscalls via
+# LD_PRELOAD and returns ENOSYS so the library falls back to older methods.
+# The shim is compiled with glibc 2.31 (safe — no rseq/clone3 during startup).
+echo "[3.55/7] Compiling LD_PRELOAD syscall shim…"
+SHIM_SRC="$SCRIPT_DIR/../app/src/main/assets/linux-runtime/shim/waylandie_syscall_shim.c"
+if [ -f "$SHIM_SRC" ]; then
+    cp "$SHIM_SRC" "$ROOTFS_DIR/tmp/waylandie_syscall_shim.c"
+    if ! chroot_run bash -c 'set -e; \
+        cc -shared -fPIC -O2 -o /usr/local/lib/libwaylandie_shim.so \
+            /tmp/waylandie_syscall_shim.c -ldl && \
+        echo "  ✓ shim compiled → /usr/local/lib/libwaylandie_shim.so" && \
+        ls -la /usr/local/lib/libwaylandie_shim.so'; then
+        echo "  ✗ FATAL: shim compilation FAILED"
+        exit 1
+    fi
+    rm -f "$ROOTFS_DIR/tmp/waylandie_syscall_shim.c"
+else
+    echo "  ⚠ shim source not found at $SHIM_SRC — skipping"
+fi
+
+# ---------------------------------------------------------------------
 # 3.6. Verify glibc version is < 2.34 (seccomp safety check)
 # ---------------------------------------------------------------------
 # glibc 2.34+ calls clone3() and glibc 2.35+ calls rseq() during
