@@ -174,7 +174,7 @@ chroot_run locale-gen en_US.UTF-8 2>/dev/null || true
 echo "[2.5/7] Building libwayland 1.22 from source + vendoring wayland-protocols 1.27…"
 
 # Install build dependencies for wayland
-chroot_run apt-get install -y -qq meson ninja-build libffi-dev libexpat1-dev libxml2-dev 2>&1 | tail -2
+ tail -2| tail -2
 
 # Download + build wayland 1.22 (provides wl_seat v8, wl_output v4)
 # CRITICAL: Do NOT pipe through tail — it masks the exit code and causes
@@ -398,6 +398,7 @@ chroot_run apt-get purge -y --auto-remove \
     libc6-dev linux-libc-dev \
     libx11-dev libxtst-dev \
     meson ninja-build libffi-dev libexpat1-dev libxml2-dev \
+    python3-pip \
     pkg-config binutils 2>&1 | tail -3 || echo "  (some purge failures OK)"
 # Mark libwayland-server0 as manually installed so it survives auto-remove
 chroot_run apt-mark manual libwayland-server0 libwayland-client0 2>/dev/null || true

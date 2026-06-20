@@ -1402,7 +1402,7 @@ static void bind_output(struct wl_client *client, void *data, uint32_t version, 
             width,
             height,
             refresh_millihz);
-    if (bind_version >= 2) {
+    if (bind_version >= 4) {
         wl_output_send_scale(resource, 1);
         wl_output_send_done(resource);
     }
@@ -3355,6 +3355,7 @@ static void bind_seat(struct wl_client *client, void *data, uint32_t version, ui
     if (bind_version >= 4) {
         /* wl_seat_send_name was added in v4 (wayland 1.20) */
         wl_seat_send_name(resource, "waylandie-android-seat");
+        /* wl_seat_send_name was added in v4 (wayland 1.20) */
     }
 }
 
