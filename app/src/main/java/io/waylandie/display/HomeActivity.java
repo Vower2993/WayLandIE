@@ -845,6 +845,152 @@ public final class HomeActivity extends Activity {
                 results.append("Test B: SKIP (/bin/echo or linker not found)\n");
             }
 
+            // Test C: Capture logcat for seccomp audit messages.
+            // When Android's seccomp filter kills a process with SIGSYS, the
+            // kernel/auditd logs the blocked syscall number. We capture logcat
+            // output after the echo crash and search for "syscall=" to identify
+            // the exact blocked syscall.
+            results.append("Test C: logcat seccomp capture (identifies blocked syscall):\n");
+            try {
+                // Give logcat a moment to flush the seccomp message
+                try { Thread.sleep(500); } catch (InterruptedException ignored) {}
+                // Capture last 200 lines from main + kernel buffers
+                ProcessBuilder logcatPb = new ProcessBuilder(
+                        "logcat", "-d", "-b", "main", "-b", "crash", "-b", "kernel", "-t", "200");
+                logcatPb.redirectErrorStream(true);
+                Process logcatProc = logcatPb.start();
+                StringBuilder logcatOut = new StringBuilder();
+                Thread logcatReader = new Thread(() -> {
+                    try (java.io.BufferedReader r = new java.io.BufferedReader(
+                            new java.io.InputStreamReader(logcatProc.getInputStream()))) {
+                        String l;
+                        while ((l = r.readLine()) != null) logcatOut.append(l).append('\n');
+                    } catch (Exception ex) {
+                        logcatOut.append("[read error: ").append(ex.getMessage()).append("]\n");
+                    }
+                }, "wl-diag-logcat");
+                logcatReader.start();
+                logcatProc.waitFor(3, java.util.concurrent.TimeUnit.SECONDS);
+                logcatReader.join(1000);
+                String logcatStr = logcatOut.toString();
+                // Search for seccomp/SIGSYS/syscall messages
+                boolean found = false;
+                for (String l : logcatStr.split("\n")) {
+                    String lower = l.toLowerCase();
+                    if (lower.contains("seccomp") || lower.contains("sigsys")
+                            || lower.contains("syscall=") || lower.contains("fatal signal 31")
+                            || lower.contains("sys_seccomp") || lower.contains("auditd")) {
+                        results.append("  ").append(l.trim()).append("\n");
+                        found = true;
+                    }
+                }
+                if (!found) {
+                    results.append("  (no seccomp/SIGSYS messages found in logcat)\n");
+                    results.append("  Note: kernel buffer may require root. Trying dmesg…\n");
+                    // Try dmesg as fallback
+                    try {
+                        ProcessBuilder dmesgPb = new ProcessBuilder("dmesg");
+                        dmesgPb.redirectErrorStream(true);
+                        Process dmesgProc = dmesgPb.start();
+                        StringBuilder dmesgOut = new StringBuilder();
+                        Thread dmesgReader = new Thread(() -> {
+                            try (java.io.BufferedReader r = new java.io.BufferedReader(
+                                    new java.io.InputStreamReader(dmesgProc.getInputStream()))) {
+                                String l;
+                                while ((l = r.readLine()) != null) dmesgOut.append(l).append('\n');
+                            } catch (Exception ex) { /* ignore */ }
+                        }, "wl-diag-dmesg");
+                        dmesgReader.start();
+                        dmesgProc.waitFor(2, java.util.concurrent.TimeUnit.SECONDS);
+                        dmesgReader.join(500);
+                        for (String l : dmesgOut.toString().split("\n")) {
+                            String lower = l.toLowerCase();
+                            if (lower.contains("seccomp") || lower.contains("sigsys")
+                                    || lower.contains("syscall=")) {
+                                results.append("  [dmesg] ").append(l.trim()).append("\n");
+                                found = true;
+                            }
+                        }
+                        if (!found) results.append("  (no seccomp messages in dmesg either)\n");
+                    } catch (Exception de) {
+                        results.append("  (dmesg not available: ").append(de.getMessage()).append(")\n");
+                    }
+                }
+                if (found) {
+                    results.append("  → The 'syscall=NNN' number above identifies the blocked syscall\n");
+                    passed++;
+                } else {
+                    results.append("  ⚠ Could not capture seccomp audit log (may need root)\n");
+                    warned++;
+                }
+            } catch (Exception e) {
+                results.append("  ⚠ logcat capture failed: " + e.getMessage() + "\n");
+                warned++;
+            }
+
+            // Test D: /bin/echo via PROOT (bypasses native seccomp).
+            // Proot translates syscalls via ptrace, potentially avoiding the
+            // blocked syscall. If this works, proot is a viable fallback.
+            results.append("Test D: /bin/echo via proot (bypasses native seccomp):\n");
+            File prootBinary = new File(nativeLibDir, "libproot.so");
+            if (prootBinary.exists() && echoBin.exists()) {
+                try {
+                    List<String> prootCmd = new ArrayList<>();
+                    prootCmd.add(prootBinary.getAbsolutePath());
+                    prootCmd.add("-r");
+                    prootCmd.add(rootDir.getAbsolutePath());
+                    prootCmd.add("-w");
+                    prootCmd.add("/home/xuser");
+                    prootCmd.add("-b");
+                    prootCmd.add("/dev:/dev");
+                    prootCmd.add("-b");
+                    prootCmd.add("/proc:/proc");
+                    prootCmd.add("-b");
+                    prootCmd.add("/sys:/sys");
+                    prootCmd.add("/bin/echo");
+                    prootCmd.add("hello-from-proot");
+                    ProcessBuilder prootPb = new ProcessBuilder(prootCmd);
+                    prootPb.redirectErrorStream(true);
+                    Process prootProc = prootPb.start();
+                    StringBuilder prootOut = new StringBuilder();
+                    Thread prootReader = new Thread(() -> {
+                        try (java.io.BufferedReader r = new java.io.BufferedReader(
+                                new java.io.InputStreamReader(prootProc.getInputStream()))) {
+                            String l;
+                            while ((l = r.readLine()) != null) prootOut.append(l).append('\n');
+                        } catch (Exception ex) {
+                            prootOut.append("[read error: ").append(ex.getMessage()).append("]\n");
+                        }
+                    }, "wl-diag-proot");
+                    prootReader.start();
+                    boolean prootExited = prootProc.waitFor(10, java.util.concurrent.TimeUnit.SECONDS);
+                    if (!prootExited) prootProc.destroyForcibly();
+                    prootReader.join(1000);
+                    int prootExit = -1;
+                    try { prootExit = prootProc.exitValue(); } catch (Exception ignored) {}
+                    if (prootExit == 0 && prootOut.toString().contains("hello-from-proot")) {
+                        results.append("  ✓ /bin/echo succeeded via proot (exit=0)\n");
+                        results.append("  → PROOT WORKS — proot bypasses the seccomp-blocked syscall\n");
+                        results.append("  → Recommend: use proot mode for bridge + Wine until native seccomp is resolved\n");
+                        passed++;
+                    } else if (prootExit == 159) {
+                        results.append("  ✗ /bin/echo killed by SIGSYS via proot too (exit=159)\n");
+                        results.append("  → seccomp blocks proot as well — deeper issue\n");
+                        failed++;
+                    } else {
+                        String snippet = prootOut.toString();
+                        if (snippet.length() > 200) snippet = snippet.substring(0, 200);
+                        results.append("  ⚠ /bin/echo via proot exit=" + prootExit + " output='" + snippet.trim() + "'\n");
+                        warned++;
+                    }
+                } catch (Exception e) {
+                    results.append("  ⚠ proot echo test failed: " + e.getMessage() + "\n");
+                    warned++;
+                }
+            } else {
+                results.append("Test D: SKIP (libproot.so or /bin/echo not found)\n");
+            }
+
             // === 4. PROTON + WINE ===
             results.append("\n--- PROTON + WINE ---\n");
             File protonDir = new File(filesDir, "contents/proton/active");
