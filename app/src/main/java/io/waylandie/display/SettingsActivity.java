@@ -615,8 +615,24 @@ public final class SettingsActivity extends Activity {
                     File homeDir = new File(imgFs.getRootDir(), "home/xuser");
                     if (!homeDir.exists()) homeDir.mkdirs();
                     File winePrefix = new File(homeDir, ".wine");
+
+                    // WIPE corrupt prefix before extraction. A prefix is corrupt if
+                    // .wine/ exists but system.reg is missing (partial/failed prior
+                    // extraction). Without this, the new extraction merges into the
+                    // corrupt prefix, leaving broken symlinks and missing files.
+                    File existingSystemReg = new File(winePrefix, "system.reg");
+                    if (winePrefix.exists() && !existingSystemReg.exists()) {
+                        output.append("  ⚠ Existing prefix is corrupt (no system.reg) — wiping before extraction…\n");
+                        try {
+                            deleteRecursive(winePrefix);
+                        } catch (Exception e) {
+                            output.append("  ⚠ Wipe failed (will try extraction anyway): ").append(e.getMessage()).append('\n');
+                        }
+                    }
+
                     winePrefix.mkdirs();
                     output.append("Unpacking prefixPack.txz to home dir (prefixPack contains .wine/ internally)…\n");
+                    output.append("  prefixPack size: ").append(prefixPack.length()).append(" bytes\n");
                     boolean unpacked = io.waylandie.display.shared.io.TarCompressorUtils.extractFileWithType(
                             prefixPack, homeDir,
                             io.waylandie.display.shared.io.TarCompressorUtils.Type.XZ, null);
@@ -641,16 +657,31 @@ public final class SettingsActivity extends Activity {
                         } else {
                             output.append("  ✓ dosdevices already present (from prefixPack)\n");
                         }
-                        // Verify Windows system DLLs are present
-                        // Use recursive search — arm64ec Wine prefixes may have
-                        // system32 as a symlink (→ sysarm64_x64) so fixed path
-                        // check fails on broken symlinks.
-                        File kernel32 = findFileRecursiveFile(winePrefix, "kernel32.dll");
-                        if (kernel32 != null) {
-                            output.append("  ✓ kernel32.dll found: ").append(kernel32.getAbsolutePath()).append("\n");
+                        // Verify prefix validity via system.reg (NOT kernel32.dll).
+                        // kernel32.dll is NOT in the prefix — Wine provides built-in
+                        // DLLs from its lib/wine/ directory at runtime. system.reg
+                        // is the Wine registry file that proves the prefix was
+                        // properly created/unpacked.
+                        File systemReg = new File(winePrefix, "system.reg");
+                        if (systemReg.exists() && systemReg.length() > 0) {
+                            output.append("  ✓ Prefix valid: system.reg found (").append(systemReg.length()).append(" bytes)\n");
                         } else {
-                            output.append("  ⚠ kernel32.dll NOT found — listing prefix contents:\n");
+                            output.append("  ⚠ system.reg NOT found — prefix may be incomplete. Listing:\n");
                             listDirContents(winePrefix, output, "    ", 3);
+                        }
+                        // Also log drive_c/windows/system32/ existence for debugging
+                        File dcSys32 = new File(winePrefix, "drive_c/windows/system32");
+                        if (dcSys32.isDirectory()) {
+                            int dllCount = 0;
+                            File[] sys32Kids = dcSys32.listFiles();
+                            if (sys32Kids != null) {
+                                for (File k : sys32Kids) {
+                                    if (k.getName().endsWith(".dll")) dllCount++;
+                                }
+                            }
+                            output.append("  ✓ system32/ exists (").append(dllCount).append(" .dll files)\n");
+                        } else {
+                            output.append("  ⚠ system32/ NOT found at drive_c/windows/system32\n");
                         }
                     } else {
                         output.append("  ✗ Prefix pack extraction FAILED\n");

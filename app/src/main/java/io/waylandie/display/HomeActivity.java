@@ -546,9 +546,60 @@ public final class HomeActivity extends Activity {
                 File socketFile = new File(rootDir, "tmp/diag-socket.txt");
                 try { socketFile.getParentFile().mkdirs(); socketFile.delete(); } catch (Exception ignored) {}
 
-                // Bridge requires 6 args:
+                // --- ldd probe: run linker --list bridge to find missing libs ---
+                // This catches "error while loading shared libraries" BEFORE the
+                // bridge launch, giving us a clear error message instead of a
+                // silent crash.
+                try {
+                    List<String> lddCmd = new ArrayList<>();
+                    lddCmd.add(linker.getAbsolutePath());
+                    lddCmd.add("--list");
+                    lddCmd.add(bridgeBin.getAbsolutePath());
+                    ProcessBuilder lddPb = new ProcessBuilder(lddCmd);
+                    lddPb.redirectErrorStream(true);
+                    lddPb.environment().clear();
+                    lddPb.environment().put("LD_LIBRARY_PATH", libPath);
+                    Process lddProc = lddPb.start();
+                    StringBuilder lddOut = new StringBuilder();
+                    java.io.BufferedReader lddReader = new java.io.BufferedReader(
+                            new java.io.InputStreamReader(lddProc.getInputStream()));
+                    String lddLine;
+                    while ((lddLine = lddReader.readLine()) != null) {
+                        lddOut.append(lddLine).append('\n');
+                    }
+                    lddProc.waitFor(3, java.util.concurrent.TimeUnit.SECONDS);
+                    lddProc.destroyForcibly();
+                    String lddStr = lddOut.toString();
+                    if (lddStr.contains("not found")) {
+                        results.append("✗ ldd probe found MISSING libraries:\n");
+                        for (String l : lddStr.split("\n")) {
+                            if (l.contains("not found")) {
+                                results.append("    ").append(l.trim()).append("\n");
+                            }
+                        }
+                        failed++;
+                    } else {
+                        results.append("✓ ldd probe: all shared libraries resolved\n");
+                        passed++;
+                    }
+                } catch (Exception e) {
+                    results.append("⚠ ldd probe failed: " + e.getMessage() + "\n");
+                    warned++;
+                }
+
+                // Bridge requires 8 args (argc=9):
                 //   argv[1]=bridge_socket  argv[2]=target_commits  argv[3]=socket_file
                 //   argv[4]=timeout_ms     argv[5]=clear_ahb       argv[6]=accept_client
+                //   argv[7]=output_width   argv[8]=output_height
+                // Without all 8, the bridge prints a usage message to stderr and exits(2).
+                int dispW = 2688, dispH = 1216;
+                try {
+                    android.graphics.Point sz = new android.graphics.Point();
+                    getWindowManager().getDefaultDisplay().getRealSize(sz);
+                    dispW = Math.max(sz.x, sz.y);
+                    dispH = Math.min(sz.x, sz.y);
+                } catch (Exception ignored) {}
+
                 List<String> cmd = new ArrayList<>();
                 cmd.add(linker.getAbsolutePath());
                 cmd.add("--library-path");
@@ -560,6 +611,8 @@ public final class HomeActivity extends Activity {
                 cmd.add("5000");                           // argv[4] timeout_ms
                 cmd.add("0");                              // argv[5] clear_ahb_outside
                 cmd.add("0");                              // argv[6] accept_client_complete
+                cmd.add(String.valueOf(dispW));            // argv[7] output_width
+                cmd.add(String.valueOf(dispH));            // argv[8] output_height
 
                 try {
                     ProcessBuilder pb = new ProcessBuilder(cmd);
@@ -584,45 +637,58 @@ public final class HomeActivity extends Activity {
                     pb.environment().put("TMPDIR", tmpDir.getAbsolutePath());
                     pb.environment().put("LANG", "en_US.UTF-8");
                     Process bridge = pb.start();
-                    results.append("  Launched bridge via linker (6 args)\n");
+                    results.append("  Launched bridge via linker (8 args, output=" + dispW + "x" + dispH + ")\n");
 
-                    // Read its output for up to 3s, looking for "server=ready"
+                    // Drain ALL output in a reader thread (avoids race where
+                    // process exits before we read buffered data).
                     StringBuilder bridgeOut = new StringBuilder();
-                    java.io.BufferedReader br = new java.io.BufferedReader(
-                            new java.io.InputStreamReader(bridge.getInputStream()));
-                    long deadline = System.currentTimeMillis() + 3000;
-                    boolean ready = false;
-                    while (System.currentTimeMillis() < deadline) {
-                        if (br.ready()) {
-                            String ol = br.readLine();
-                            if (ol == null) break;
-                            bridgeOut.append(ol).append('\n');
-                            if (ol.contains("server=ready")) { ready = true; break; }
-                        } else {
-                            try { Thread.sleep(30); } catch (InterruptedException ignored) {}
+                    Thread reader = new Thread(() -> {
+                        try (java.io.BufferedReader br = new java.io.BufferedReader(
+                                new java.io.InputStreamReader(bridge.getInputStream()))) {
+                            String line;
+                            while ((line = br.readLine()) != null) {
+                                bridgeOut.append(line).append('\n');
+                            }
+                        } catch (java.io.IOException e) {
+                            bridgeOut.append("[read error: ").append(e.getMessage()).append("]\n");
                         }
+                    }, "wl-diag-bridge-reader");
+                    reader.start();
+
+                    // Wait up to 6s for the bridge to exit (bridge has 5s timeout)
+                    boolean exited = bridge.waitFor(6, java.util.concurrent.TimeUnit.SECONDS);
+                    if (!exited) {
+                        bridge.destroyForcibly();
+                        bridge.waitFor(1, java.util.concurrent.TimeUnit.SECONDS);
                     }
-                    // Kill the bridge regardless of outcome
-                    bridge.destroyForcibly();
-                    try { bridge.waitFor(1, java.util.concurrent.TimeUnit.SECONDS); }
-                    catch (Exception ignored) {}
+                    // Wait for reader to finish draining
+                    reader.join(1000);
+
+                    int exitCode = -1;
+                    try { exitCode = bridge.exitValue(); } catch (Exception ignored) {}
+
+                    boolean ready = bridgeOut.toString().contains("server=ready");
 
                     if (bridgeOut.length() == 0) {
                         results.append("✗ Bridge produced NO output — likely crashed on launch\n");
-                        results.append("  Check LD_LIBRARY_PATH / missing libs in rootfs.\n");
+                        results.append("  Exit code: " + exitCode + "\n");
+                        results.append("  Check LD_LIBRARY_PATH / missing libs (see ldd probe above).\n");
                         failed++;
                     } else {
                         String snippet = bridgeOut.toString();
-                        if (snippet.length() > 500) snippet = snippet.substring(0, 500);
-                        results.append("  Bridge output (first 500 chars):\n");
+                        if (snippet.length() > 800) snippet = snippet.substring(0, 800);
+                        results.append("  Bridge output (exit=" + exitCode + ", first 800 chars):\n");
                         for (String ol : snippet.split("\n")) {
                             if (!ol.isEmpty()) results.append("    " + ol + "\n");
                         }
                         if (ready) {
                             results.append("✓ Bridge reported 'server=ready'\n");
                             passed++;
+                        } else if (exitCode == 2) {
+                            results.append("✗ Bridge exited with code 2 (usage error — wrong arg count)\n");
+                            failed++;
                         } else {
-                            results.append("✗ Bridge did NOT report 'server=ready' within 3s\n");
+                            results.append("✗ Bridge did NOT report 'server=ready' (exit=" + exitCode + ")\n");
                             failed++;
                         }
                     }
@@ -830,26 +896,59 @@ public final class HomeActivity extends Activity {
             }
 
             // === 11. INSTALL ORDER CHECK ===
+            // NOTE: kernel32.dll / ntdll.dll are NOT in the Wine prefix's system32/.
+            // Wine provides built-in DLLs from its lib/wine/ directory at runtime.
+            // The prefix only needs: system.reg (Wine registry) + drive_c/windows/
+            // structure. Checking for kernel32.dll in the prefix was a false negative.
             results.append("\n--- INSTALL ORDER (prefixPack vs DXVK) ---\n");
-            boolean hasWindowsSys = new File(wineSystem32, "kernel32.dll").exists()
-                    && new File(wineSystem32, "ntdll.dll").exists();
+            File winePrefixDir = new File(rootDir, "home/xuser/.wine");
+            File systemReg = new File(winePrefixDir, "system.reg");
+            File prefixSystem32 = new File(winePrefixDir, "drive_c/windows/system32");
+            boolean hasPrefix = systemReg.exists() && prefixSystem32.isDirectory();
             boolean hasDxvk = d3d11.exists();
-            if (hasWindowsSys && hasDxvk) {
-                results.append("✓ Wine prefix has Windows system DLLs (kernel32, ntdll) AND DXVK (d3d11)\n");
+
+            // Also verify Wine's built-in DLLs exist in lib/wine/
+            File protonLibWine = new File(protonDir, "lib/wine");
+            if (!protonLibWine.isDirectory()) protonLibWine = new File(protonDir, "files/lib/wine");
+            boolean hasWineBuiltinDlls = false;
+            if (protonLibWine.isDirectory()) {
+                // Wine stores built-in DLLs in subdirs like x86_64-windows/, aarch64-windows/, arm64ec/
+                File[] wineSubdirs = protonLibWine.listFiles(File::isDirectory);
+                if (wineSubdirs != null) {
+                    for (File sd : wineSubdirs) {
+                        File k32 = new File(sd, "kernel32.dll");
+                        if (k32.exists()) { hasWineBuiltinDlls = true; break; }
+                    }
+                }
+            }
+
+            if (hasPrefix && hasDxvk) {
+                results.append("✓ Wine prefix valid (system.reg + system32/) AND DXVK (d3d11) installed\n");
                 results.append("  Install order correct: Proton (prefixPack) first → DXVK.\n");
                 passed++;
-            } else if (hasDxvk && !hasWindowsSys) {
-                results.append("✗ DXVK installed but Windows system DLLs (kernel32.dll/ntdll.dll) MISSING\n");
-                results.append("  prefixPack.txz was NOT unpacked into the Wine prefix.\n");
+            } else if (hasDxvk && !hasPrefix) {
+                results.append("✗ DXVK installed but Wine prefix INVALID (system.reg or system32/ missing)\n");
+                results.append("  prefixPack.txz was NOT properly unpacked into the Wine prefix.\n");
+                results.append("  system.reg exists: " + systemReg.exists() + "\n");
+                results.append("  system32/ exists: " + prefixSystem32.isDirectory() + "\n");
                 results.append("  → REINSTALL PROTON FIRST (unpacks prefixPack), then reinstall DXVK.\n");
                 failed++;
-            } else if (!hasWindowsSys && !hasDxvk) {
-                results.append("✗ Wine prefix is EMPTY — neither Windows DLLs nor DXVK present\n");
+            } else if (!hasPrefix && !hasDxvk) {
+                results.append("✗ Wine prefix is EMPTY — no system.reg, no DXVK\n");
                 results.append("  Install Proton (which unpacks prefixPack.txz) before anything else.\n");
                 failed++;
             } else {
-                // Windows DLLs present, DXVK pending — warning, not error
-                results.append("⚠ Wine prefix has Windows DLLs but no d3d11.dll (DXVK not yet installed)\n");
+                // Prefix present, DXVK pending — warning, not error
+                results.append("⚠ Wine prefix valid but no d3d11.dll (DXVK not yet installed)\n");
+                warned++;
+            }
+            // Report Wine built-in DLL status
+            if (hasWineBuiltinDlls) {
+                results.append("✓ Wine built-in DLLs (kernel32.dll) found in " + protonLibWine + "\n");
+                passed++;
+            } else {
+                results.append("⚠ Wine built-in DLLs (kernel32.dll) NOT found in " + protonLibWine + "\n");
+                results.append("  Wine may still provide them at runtime — this is informational.\n");
                 warned++;
             }
 

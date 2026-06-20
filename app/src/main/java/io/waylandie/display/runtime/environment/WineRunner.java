@@ -50,6 +50,35 @@ public final class WineRunner {
     }
 
     /**
+     * Returns the device's screen size in landscape orientation as [width, height].
+     *
+     * <p>The bridge translator requires output-width and output-height as
+     * argv[7] and argv[8]. Using the real display size ensures the Wayland
+     * output advertises the correct resolution to Wine. Falls back to the
+     * bridge's built-in defaults (2688x1216) if the display can't be queried.
+     */
+    private String[] getDisplaySize() {
+        try {
+            android.view.WindowManager wm = (android.view.WindowManager)
+                    context.getSystemService(Context.WINDOW_SERVICE);
+            if (wm != null && wm.getDefaultDisplay() != null) {
+                android.graphics.Point size = new android.graphics.Point();
+                wm.getDefaultDisplay().getRealSize(size);
+                // Landscape: width = larger dimension
+                int w = Math.max(size.x, size.y);
+                int h = Math.min(size.x, size.y);
+                if (w > 0 && h > 0) {
+                    return new String[]{String.valueOf(w), String.valueOf(h)};
+                }
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "Could not get display size: " + e.getMessage());
+        }
+        // Bridge defaults (match waylandie-wayland-bridge.c main() fallback)
+        return new String[]{"2688", "1216"};
+    }
+
+    /**
      * Checks if the native glibc linker is available in nativeLibraryDir.
      */
     private boolean hasNativeLinker() {
@@ -173,13 +202,18 @@ public final class WineRunner {
                 bridgeCmd.add("--library-path");
                 bridgeCmd.add(libPath);
                 bridgeCmd.add(bridgeBin.getAbsolutePath());
-                // Bridge requires 6 args: bridge_socket, target_commits, socket_file, timeout_ms, clear_ahb, accept_client
+                // Bridge requires 8 args (argc=9): bridge_socket, target_commits,
+                // socket_file, timeout_ms, clear_ahb, accept_client, output_width, output_height.
+                // Without all 8, the bridge prints a usage message to stderr and exits(2).
+                String[] displaySize = getDisplaySize();
                 bridgeCmd.add("waylandie.display.bridge.v1");  // argv[1]: Android bridge socket name
                 bridgeCmd.add("1");                              // argv[2]: target_commits
                 bridgeCmd.add(new File(runtimeDir, "socket-name.txt").getAbsolutePath()); // argv[3]: socket file
                 bridgeCmd.add("15000");                          // argv[4]: timeout_ms
                 bridgeCmd.add("0");                              // argv[5]: clear_ahb_outside
                 bridgeCmd.add("0");                              // argv[6]: accept_client_complete
+                bridgeCmd.add(displaySize[0]);                   // argv[7]: output_width
+                bridgeCmd.add(displaySize[1]);                   // argv[8]: output_height
 
                 ProcessBuilder pbBridge = new ProcessBuilder(bridgeCmd);
                 pbBridge.directory(rootDir);
@@ -296,6 +330,7 @@ public final class WineRunner {
         if (bridgeBin.exists()) {
             Log.i(TAG, "Starting bridge translator via proot (background)…");
             try {
+                String[] displaySize = getDisplaySize();
                 proot.exec(
                         "XDG_RUNTIME_DIR=/tmp WAYLAND_DISPLAY=waylandie "
                         + "WAYLANDIE_BRIDGE_SOCKET=waylandie.display.bridge.v1 "
@@ -306,7 +341,9 @@ public final class WineRunner {
                         + "/tmp/socket-name.txt "         // socket file
                         + "15000 "                         // timeout ms
                         + "0 "                             // clear ahb outside
-                        + "0 &");                          // accept client complete
+                        + "0 "                             // accept client complete
+                        + displaySize[0] + " "             // output width
+                        + displaySize[1] + " &");           // output height
                 try { Thread.sleep(2000); } catch (InterruptedException ignored) {}
                 // Read the socket name the bridge created (inside proot /tmp =
                 // rootDir/tmp on host) and override WAYLAND_DISPLAY for Wine.
