@@ -93,26 +93,26 @@ jobs:
           echo "  Searching for ld-linux in tarball…"
           xz -dc app/src/main/assets/imagefs/imagefs.tar.xz 2>/dev/null | \
             tar -tf - 2>/dev/null | grep "ld-linux" | head -10 || true
-          # CRITICAL: The ld-linux-aarch64.so.1 entries in the tarball are SYMLINKS.
-          # The REAL ELF binary is at ./lib/aarch64-linux-gnu/ld-linux-aarch64.so.1
-          # (Ubuntu multiarch layout). We must extract the real file, not symlinks.
-          echo "  Extracting all ld-linux entries + ./lib/ …"
-          # NOTE: tar returns non-zero when --wildcards matches nothing. With set -e,
-          # this kills the script. Append || true to prevent that.
+          # CRITICAL: The ld-linux-aarch64.so.1 entries in the tarball are SYMLINKS
+          # pointing to ld-2.31.so (the REAL ELF). We must extract ld-2.31.so too.
+          # Use tar -h (dereference) to extract symlink TARGETS as real files.
+          echo "  Extracting ld-linux + ld-2.31.so (dereferenced)…"
+          # Pattern matches both ld-linux-aarch64.so.1 (symlink) and ld-2.31.so (real)
           xz -dc app/src/main/assets/imagefs/imagefs.tar.xz 2>/dev/null | \
-            tar -xf - -C /tmp/wl-linker-extract \
+            tar -xhf - -C /tmp/wl-linker-extract \
               --wildcards "*ld-linux-aarch64*" 2>/dev/null || true
           xz -dc app/src/main/assets/imagefs/imagefs.tar.xz 2>/dev/null | \
-            tar -xf - -C /tmp/wl-linker-extract \
-              --wildcards "./lib/*ld-linux*" 2>/dev/null || true
+            tar -xhf - -C /tmp/wl-linker-extract \
+              --wildcards "*ld-2.*.so" 2>/dev/null || true
           echo "  Extracted files:"
-          find /tmp/wl-linker-extract -name "*ld-linux*" -exec ls -la {} \; 2>/dev/null
-          # Find the REAL ELF file (not symlink). Check multiple locations.
+          find /tmp/wl-linker-extract -name "*ld-*" -exec ls -la {} \; 2>/dev/null || true
+          # Find the REAL ELF file (not symlink).
           FOUND=""
           for candidate in \
-            "/tmp/wl-linker-extract/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1" \
+            "/tmp/wl-linker-extract/usr/lib/aarch64-linux-gnu/ld-2.31.so" \
+            "/tmp/wl-linker-extract/usr/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1" \
             "/tmp/wl-linker-extract/usr/lib/ld-linux-aarch64.so.1" \
-            "/tmp/wl-linker-extract/usr/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1"; do
+            "/tmp/wl-linker-extract/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1"; do
             if [ -f "$candidate" ] && [ ! -L "$candidate" ]; then
               FOUND="$candidate"
               echo "  ✓ Found real ELF at: $FOUND"
