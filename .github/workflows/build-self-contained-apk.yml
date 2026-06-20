@@ -221,6 +221,31 @@ jobs:
       # -----------------------------------------------------------------
       # Build the APK
       # -----------------------------------------------------------------
+      # CRITICAL: Use a fixed debug keystore so APK updates work.
+      # Without this, each CI run generates a new keystore, and Android
+      # refuses to update the app (signing key mismatch) — user must
+      # uninstall first, losing all installed components + Wine prefix.
+      # The keystore is stored as a GitHub Actions secret (WL_DEBUG_KEYSTORE)
+      # and is base64-encoded. If the secret is not set, falls back to the
+      # default debug keystore (updates won't work but build succeeds).
+      - name: Configure debug signing
+        run: |
+          if [ -n "${{ secrets.WL_DEBUG_KEYSTORE }}" ]; then
+            echo "${{ secrets.WL_DEBUG_KEYSTORE }}" | base64 -d > app/debug.keystore
+            echo "✓ Using fixed debug keystore from secret"
+            cat >> app/build.gradle.kts << 'GRADLE'
+            android.signingConfigs.getByName("debug") {
+                storeFile = file("debug.keystore")
+                storePassword = "waylandie"
+                keyAlias = "waylandie-debug"
+                keyPassword = "waylandie"
+            }
+            GRADLE
+          else
+            echo "⚠ WL_DEBUG_KEYSTORE secret not set — using default debug keystore"
+            echo "  APK updates will require uninstall first"
+          fi
+
       - name: Build debug APK
         run: ./gradlew assembleDebug --no-daemon --stacktrace
 

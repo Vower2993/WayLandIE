@@ -352,15 +352,20 @@ public final class ImageFsManager {
             }
             if (listener != null) listener.onProgress(10);
 
-            // Step 2: Run native tar extraction
-            Log.i(TAG, "Running native tar -xJf extraction…");
+            // Step 2: Run native extraction
+            // Try multiple approaches — Samsung's toybox tar may not support -J (xz)
+            // Approach 1: tar -xJf (if toybox has xz support)
+            // Approach 2: xz -dc | tar -xf - (more widely supported)
+            Log.i(TAG, "Running native tar extraction…");
+
+            // Try approach 1: tar -xJf
             ProcessBuilder pb = new ProcessBuilder(
                     "/system/bin/tar", "-xJf", tempFile.getAbsolutePath(),
                     "-C", destDir.getAbsolutePath());
             pb.redirectErrorStream(true);
             Process p = pb.start();
 
-            // Read output in a reader thread (tar prints progress to stderr)
+            // Read output in a reader thread
             StringBuilder output = new StringBuilder();
             Thread reader = new Thread(() -> {
                 try (java.io.BufferedReader r = new java.io.BufferedReader(
@@ -373,18 +378,47 @@ public final class ImageFsManager {
             }, "wl-tar-reader");
             reader.start();
 
-            // Wait for tar to finish (timeout: 5 minutes)
-            boolean exited = p.waitFor(5, java.util.concurrent.TimeUnit.MINUTES);
+            boolean exited = p.waitFor(3, java.util.concurrent.TimeUnit.MINUTES);
             if (!exited) {
                 p.destroyForcibly();
-                Log.e(TAG, "Native tar timed out after 5 minutes");
+                Log.e(TAG, "Native tar -xJf timed out");
                 return false;
             }
             reader.join(2000);
-
             int exitCode = p.exitValue();
+
+            // If tar -xJf failed, try approach 2: xz -dc | tar -xf -
             if (exitCode != 0) {
-                Log.e(TAG, "Native tar failed (exit=" + exitCode + "): "
+                Log.w(TAG, "tar -xJf failed (exit=" + exitCode + "), trying xz | tar pipeline");
+                output.setLength(0);
+                // Use shell to pipe: xz -dc <file> | tar -xf - -C <dir>
+                pb = new ProcessBuilder("/system/bin/sh", "-c",
+                        "/system/bin/xz -dc " + tempFile.getAbsolutePath()
+                                + " | /system/bin/tar -xf - -C " + destDir.getAbsolutePath());
+                pb.redirectErrorStream(true);
+                Process p2 = pb.start();
+                reader = new Thread(() -> {
+                    try (java.io.BufferedReader r = new java.io.BufferedReader(
+                            new java.io.InputStreamReader(p2.getInputStream()))) {
+                        String line;
+                        while ((line = r.readLine()) != null) {
+                            output.append(line).append('\n');
+                        }
+                    } catch (Exception ignored) {}
+                }, "wl-tar-reader2");
+                reader.start();
+                exited = p2.waitFor(5, java.util.concurrent.TimeUnit.MINUTES);
+                if (!exited) {
+                    p2.destroyForcibly();
+                    Log.e(TAG, "xz | tar pipeline timed out");
+                    return false;
+                }
+                reader.join(2000);
+                exitCode = p2.exitValue();
+            }
+
+            if (exitCode != 0) {
+                Log.e(TAG, "Native extraction failed (exit=" + exitCode + "): "
                         + output.toString().trim());
                 return false;
             }
