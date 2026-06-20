@@ -174,13 +174,18 @@ chroot_run locale-gen en_US.UTF-8 2>/dev/null || true
 echo "[2.5/7] Building libwayland 1.22 from source + vendoring wayland-protocols 1.27…"
 
 # Install build dependencies for wayland
- tail -2| tail -2
+# CRITICAL: Focal's meson 0.53.2 is too old for wayland 1.22 (needs >= 0.56.0).
+# Install python3-pip + upgrade meson via pip to get a newer version.
+echo "  Installing wayland build deps + upgrading meson via pip…"
+chroot_run apt-get install -y -qq python3-pip ninja-build libffi-dev libexpat1-dev libxml2-dev 2>&1 | tail -2
+chroot_run bash -c 'pip3 install "meson>=0.56.0" 2>&1 | tail -2 || echo "  pip install meson failed"'
+chroot_run bash -c 'meson --version 2>&1'
 
 # Download + build wayland 1.22 (provides wl_seat v8, wl_output v4)
 # CRITICAL: Do NOT pipe through tail — it masks the exit code and causes
 # silent failures. If this build fails, the bridge won't compile.
 echo "  Building libwayland 1.22.0 from source…"
-if ! chroot_run bash -c 'set -e; cd /tmp && \
+if ! chroot_run bash -c 'set -e; export PATH=/usr/local/bin:$PATH; cd /tmp && \
     wget -q https://gitlab.freedesktop.org/wayland/wayland/-/archive/1.22.0/wayland-1.22.0.tar.gz && \
     tar xf wayland-1.22.0.tar.gz && \
     cd wayland-1.22.0 && \
@@ -196,7 +201,7 @@ fi
 
 # Download + install wayland-protocols 1.27 (provides linux-dmabuf v4, xdg_wm_base v6)
 echo "  Installing wayland-protocols 1.27…"
-if ! chroot_run bash -c 'set -e; cd /tmp && \
+if ! chroot_run bash -c 'set -e; export PATH=/usr/local/bin:$PATH; cd /tmp && \
     wget -q https://gitlab.freedesktop.org/wayland/wayland-protocols/-/archive/1.27/wayland-protocols-1.27.tar.gz && \
     tar xf wayland-protocols-1.27.tar.gz && \
     cd wayland-protocols-1.27 && \
@@ -262,7 +267,7 @@ if [ -f "$BRIDGE_SRC" ]; then
     cp "$BRIDGE_SRC" "$ROOTFS_DIR/tmp/waylandie-wayland-bridge.c"
 
     # Generate Wayland protocol headers + source files
-    chroot_run bash -c '
+    if ! chroot_run bash -c 'set -e; export PATH=/usr/local/bin:$PATH; \
         cd /tmp && \
         XML_DIR=/usr/share/wayland-protocols && \
         wayland-scanner server-header $XML_DIR/stable/xdg-shell/xdg-shell.xml /tmp/xdg-shell-server-protocol.h && \
@@ -277,11 +282,14 @@ if [ -f "$BRIDGE_SRC" ]; then
         wayland-scanner private-code $XML_DIR/unstable/relative-pointer/relative-pointer-unstable-v1.xml /tmp/relative-pointer-unstable-v1-protocol.c && \
         wayland-scanner server-header $XML_DIR/unstable/pointer-constraints/pointer-constraints-unstable-v1.xml /tmp/pointer-constraints-unstable-v1-server-protocol.h && \
         wayland-scanner private-code $XML_DIR/unstable/pointer-constraints/pointer-constraints-unstable-v1.xml /tmp/pointer-constraints-unstable-v1-protocol.c && \
-        echo "  protocol headers generated"
-    ' 2>&1 | tail -2
+        echo "  protocol headers generated"'; then
+        echo "  ✗ FATAL: wayland protocol header generation FAILED"
+        exit 1
+    fi
 
     # Compile the bridge
-    chroot_run bash -c '
+    # CRITICAL: Do NOT pipe through tail — masks exit code.
+    if ! chroot_run bash -c 'set -e; export PATH=/usr/local/bin:$PATH; \
         cc -Wall -Wextra -o /usr/local/bin/waylandie-wayland-bridge \
             /tmp/waylandie-wayland-bridge.c \
             /tmp/xdg-shell-protocol.c \
@@ -292,8 +300,10 @@ if [ -f "$BRIDGE_SRC" ]; then
             /tmp/pointer-constraints-unstable-v1-protocol.c \
             $(pkg-config --cflags --libs wayland-server x11 xtst) && \
         chmod +x /usr/local/bin/waylandie-wayland-bridge && \
-        echo "  bridge compiled → /usr/local/bin/waylandie-wayland-bridge"
-    ' 2>&1 | tail -5
+        echo "  bridge compiled → /usr/local/bin/waylandie-wayland-bridge"'; then
+        echo "  ✗ FATAL: bridge compilation FAILED"
+        exit 1
+    fi
 
     # Clean up temp files
     rm -f "$ROOTFS_DIR/tmp/waylandie-wayland-bridge.c" "$ROOTFS_DIR/tmp/"*-protocol.{c,h}
