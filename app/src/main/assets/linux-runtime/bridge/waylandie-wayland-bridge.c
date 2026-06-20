@@ -3352,7 +3352,8 @@ static void bind_seat(struct wl_client *client, void *data, uint32_t version, ui
     wl_seat_send_capabilities(
             resource,
             WL_SEAT_CAPABILITY_POINTER | WL_SEAT_CAPABILITY_KEYBOARD | WL_SEAT_CAPABILITY_TOUCH);
-    if (bind_version >= 2) {
+    if (bind_version >= 4) {
+        /* wl_seat_send_name was added in v4 (wayland 1.20) */
         wl_seat_send_name(resource, "waylandie-android-seat");
     }
 }
@@ -3648,7 +3649,7 @@ static const struct wl_surface_interface surface_impl = {
 
 static void compositor_create_surface(struct wl_client *client, struct wl_resource *resource, uint32_t id) {
     struct server_state *state = wl_resource_get_user_data(resource);
-    struct wl_resource *surface_resource = wl_resource_create(client, &wl_surface_interface, 5, id);
+    struct wl_resource *surface_resource = wl_resource_create(client, &wl_surface_interface, 4, id);
     struct surface_state *surface = calloc(1, sizeof(*surface));
     if (surface_resource == NULL || surface == NULL) {
         wl_client_post_no_memory(client);

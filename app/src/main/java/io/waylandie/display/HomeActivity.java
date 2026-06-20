@@ -543,7 +543,6 @@ public final class HomeActivity extends Activity {
                                         glibcVersion = String.valueOf(maxVer);
                                         results.append("  glibc version: " + glibcVersion + "\n");
                                         // Check version safety
-                                        int minor = (int) ((maxVer - 2.0) * 100 + 0.5);
                                         if (maxVer >= 2.34) {
                                             results.append("  ✗ FATAL: glibc " + glibcVersion + " is too new!\n");
                                             results.append("    glibc 2.34+ calls clone3/rseq → SIGSYS (exit 159) on Android\n");
