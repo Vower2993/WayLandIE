@@ -485,13 +485,25 @@ public final class HomeActivity extends Activity {
                     results.append("✗ NOT executable (x bit missing on extracted .so)\n");
                     failed++;
                 } else {
-                    // ACTUALLY execute `libld_glibc.so --version` to confirm SELinux
-                    // allows execve on the extracted .so. If SELinux denies it,
-                    // native launch of wine/bridge will also fail.
+                    // ACTUALLY execute `libld_glibc.so /bin/echo test` to confirm
+                    // SELinux allows execve on the extracted .so AND the glibc
+                    // runtime works (no SIGSYS from seccomp).
+                    // NOTE: We can't use `--version` because glibc 2.31's linker
+                    // treats it as a program name when invoked standalone.
+                    // Instead, we run /bin/echo (which links libc) and read the
+                    // glibc version from libc.so.6 strings.
                     try {
+                        File echoBin = new File(rootDir, "usr/bin/echo");
+                        String libPath = new File(rootDir, "usr/lib").getAbsolutePath() + ":"
+                                + new File(rootDir, "usr/lib/aarch64-linux-gnu").getAbsolutePath();
                         ProcessBuilder pb = new ProcessBuilder(
-                                linker.getAbsolutePath(), "--version");
+                                linker.getAbsolutePath(),
+                                "--library-path", libPath,
+                                echoBin.getAbsolutePath(),
+                                "waylandie-linker-ok");
                         pb.redirectErrorStream(true);
+                        pb.environment().clear();
+                        pb.environment().put("LD_LIBRARY_PATH", libPath);
                         Process p = pb.start();
                         java.io.BufferedReader br = new java.io.BufferedReader(
                                 new java.io.InputStreamReader(p.getInputStream()));
@@ -501,35 +513,56 @@ public final class HomeActivity extends Activity {
                         boolean done = p.waitFor(3, java.util.concurrent.TimeUnit.SECONDS);
                         int exit = done ? p.exitValue() : -1;
                         if (!done) p.destroyForcibly();
-                        String firstLine = out.length() > 0
-                                ? out.toString().split("\n", 2)[0] : "";
-                        String low = firstLine.toLowerCase(java.util.Locale.ROOT);
-                        if (done && (exit == 0 || low.contains("glibc") || low.contains("gnu"))) {
+                        if (done && exit == 0 && out.toString().contains("waylandie-linker-ok")) {
                             results.append("✓ SELinux ALLOWED execve of libld_glibc.so\n");
-                            results.append("  Version: " + firstLine + "\n");
-                            // CRITICAL: Check glibc version — 2.34+ triggers SIGSYS on Android
-                            // glibc 2.34+ calls clone3(), glibc 2.35+ calls rseq() during startup
-                            // Both are blocked by Android's seccomp → exit code 159
-                            if (firstLine.contains("release version 2.")) {
-                                String verPart = firstLine.replaceAll(".*release version (2\\.\\d+).*", "$1");
-                                try {
-                                    int minor = Integer.parseInt(verPart.split("\\.")[1]);
-                                    if (minor >= 34) {
-                                        results.append("  ✗ FATAL: glibc 2." + minor + " is too new!\n");
-                                        results.append("    glibc 2.34+ calls clone3/rseq → SIGSYS (exit 159) on Android\n");
-                                        results.append("    Need glibc < 2.34. Rebuild rootfs with Ubuntu 20.04 Focal.\n");
-                                        failed++;
-                                    } else {
-                                        results.append("  ✓ glibc 2." + minor + " is safe (< 2.34 — no seccomp SIGSYS)\n");
-                                        passed++;
-                                    }
-                                } catch (Exception ignored) {}
-                            }
+                            results.append("✓ glibc linker executes /bin/echo successfully (exit=0)\n");
                             passed++;
+
+                            // Read glibc version from libc.so.6 strings
+                            File libcSo = new File(rootDir, "usr/lib/aarch64-linux-gnu/libc.so.6");
+                            String glibcVersion = "";
+                            if (libcSo.exists()) {
+                                try {
+                                    java.io.RandomAccessFile raf = new java.io.RandomAccessFile(libcSo, "r");
+                                    byte[] data = new byte[(int) Math.min(raf.length(), 2 * 1024 * 1024)];
+                                    raf.readFully(data);
+                                    raf.close();
+                                    String content = new String(data, java.nio.charset.StandardCharsets.US_ASCII);
+                                    // Look for "GLIBC_2.XX" or "release version 2.XX"
+                                    java.util.regex.Pattern pat = java.util.regex.Pattern.compile(
+                                            "(?:GLIBC_|release version )(\\d+\\.\\d+)");
+                                    java.util.regex.Matcher m = pat.matcher(content);
+                                    double maxVer = 0;
+                                    while (m.find()) {
+                                        try {
+                                            double v = Double.parseDouble(m.group(1));
+                                            if (v > maxVer) maxVer = v;
+                                        } catch (Exception ignored) {}
+                                    }
+                                    if (maxVer > 0) {
+                                        glibcVersion = String.valueOf(maxVer);
+                                        results.append("  glibc version: " + glibcVersion + "\n");
+                                        // Check version safety
+                                        int minor = (int) ((maxVer - 2.0) * 100 + 0.5);
+                                        if (maxVer >= 2.34) {
+                                            results.append("  ✗ FATAL: glibc " + glibcVersion + " is too new!\n");
+                                            results.append("    glibc 2.34+ calls clone3/rseq → SIGSYS (exit 159) on Android\n");
+                                            results.append("    Need glibc < 2.34. Rebuild rootfs with Ubuntu 20.04 Focal.\n");
+                                            failed++;
+                                        } else {
+                                            results.append("  ✓ glibc " + glibcVersion + " is safe (< 2.34 — no seccomp SIGSYS)\n");
+                                            passed++;
+                                        }
+                                    }
+                                } catch (Exception e) {
+                                    results.append("  ⚠ Could not read glibc version: " + e.getMessage() + "\n");
+                                    warned++;
+                                }
+                            }
                         } else {
                             results.append("✗ libld_glibc.so executed but FAILED (exit=" + exit + ")\n");
                             results.append("  Output: " + out.toString().trim() + "\n");
-                            results.append("  Native launch will FAIL — SELinux likely blocking execve.\n");
+                            results.append("  Native launch will FAIL — check glibc version + seccomp.\n");
                             failed++;
                         }
                     } catch (Exception e) {

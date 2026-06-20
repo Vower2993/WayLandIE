@@ -141,29 +141,46 @@ public final class TarCompressorUtils {
             Log.e(TAG, "Failed to mkdir " + outDir);
             return false;
         }
-        try {
-            if (type == Type.ZIP) {
-                extractZip(archiveFile, outDir, listener);
-            } else if (type == Type.ZSTD) {
-                // Use Apache Commons Compress for zstd — same as winlator
-                extractZstdTar(archiveFile, outDir, listener);
-            } else if (type == Type.XZ) {
-                // Use Apache Commons Compress for XZ too — the hand-rolled
-                // extractTarStream parser fails on PAX/GNU tar entries in
-                // prefixPack.txz. Apache Commons Compress handles all variants.
-                extractXzTar(archiveFile, outDir, listener);
-            } else if (type == Type.GZIP) {
-                extractGzipTar(archiveFile, outDir, listener);
-            } else {
-                // Plain TAR — use Apache Commons Compress
-                extractPlainTar(archiveFile, outDir, listener);
+        // Retry loop — transient I/O errors (EOFException, read timeouts)
+        // can occur when reading from external storage (sdcard). These are
+        // especially common with large XZ archives on Samsung devices.
+        // Retry up to 3 times with a short delay between attempts.
+        int maxRetries = 3;
+        for (int attempt = 1; attempt <= maxRetries; attempt++) {
+            try {
+                if (type == Type.ZIP) {
+                    extractZip(archiveFile, outDir, listener);
+                } else if (type == Type.ZSTD) {
+                    extractZstdTar(archiveFile, outDir, listener);
+                } else if (type == Type.XZ) {
+                    extractXzTar(archiveFile, outDir, listener);
+                } else if (type == Type.GZIP) {
+                    extractGzipTar(archiveFile, outDir, listener);
+                } else {
+                    extractPlainTar(archiveFile, outDir, listener);
+                }
+                Log.i(TAG, "Extracted " + archiveFile + " → " + outDir
+                        + (attempt > 1 ? " (attempt " + attempt + ")" : ""));
+                return true;
+            } catch (java.io.EOFException eof) {
+                // Transient XZ/LZMA stream corruption — retry
+                Log.w(TAG, "Extraction EOFException on attempt " + attempt
+                        + "/" + maxRetries + " for " + archiveFile + ": " + eof.getMessage());
+                if (attempt < maxRetries) {
+                    try { Thread.sleep(1000 * attempt); } catch (InterruptedException ignored) {}
+                    // Clean up partial extraction before retrying
+                    deleteRecursive(outDir);
+                    outDir.mkdirs();
+                } else {
+                    Log.e(TAG, "Extraction failed after " + maxRetries + " attempts: " + archiveFile, eof);
+                    return false;
+                }
+            } catch (Exception e) {
+                Log.e(TAG, "Extraction failed for " + archiveFile, e);
+                return false;
             }
-            Log.i(TAG, "Extracted " + archiveFile + " → " + outDir);
-            return true;
-        } catch (Exception e) {
-            Log.e(TAG, "Extraction failed for " + archiveFile, e);
-            return false;
         }
+        return false;
     }
 
     /**
@@ -768,5 +785,17 @@ public final class TarCompressorUtils {
             }
         }
         return total;
+    }
+
+    /** Recursively deletes a file or directory. Used for cleanup on retry. */
+    private static void deleteRecursive(File f) {
+        if (f == null || !f.exists()) return;
+        if (f.isDirectory()) {
+            File[] kids = f.listFiles();
+            if (kids != null) {
+                for (File kid : kids) deleteRecursive(kid);
+            }
+        }
+        f.delete();
     }
 }
