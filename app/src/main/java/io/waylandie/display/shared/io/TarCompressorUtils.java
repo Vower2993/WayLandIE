@@ -147,18 +147,16 @@ public final class TarCompressorUtils {
             } else if (type == Type.ZSTD) {
                 // Use Apache Commons Compress for zstd — same as winlator
                 extractZstdTar(archiveFile, outDir, listener);
+            } else if (type == Type.XZ) {
+                // Use Apache Commons Compress for XZ too — the hand-rolled
+                // extractTarStream parser fails on PAX/GNU tar entries in
+                // prefixPack.txz. Apache Commons Compress handles all variants.
+                extractXzTar(archiveFile, outDir, listener);
+            } else if (type == Type.GZIP) {
+                extractGzipTar(archiveFile, outDir, listener);
             } else {
-                InputStream fileIn = new BufferedInputStream(new FileInputStream(archiveFile), 65536);
-                InputStream decompressed;
-                if (type == Type.XZ) {
-                    decompressed = new org.tukaani.xz.XZInputStream(fileIn);
-                } else if (type == Type.GZIP) {
-                    decompressed = new GZIPInputStream(fileIn);
-                } else {
-                    decompressed = fileIn;
-                }
-                extractTarStream(decompressed, outDir, listener, archiveFile.length());
-                decompressed.close();
+                // Plain TAR — use Apache Commons Compress
+                extractPlainTar(archiveFile, outDir, listener);
             }
             Log.i(TAG, "Extracted " + archiveFile + " → " + outDir);
             return true;
@@ -166,6 +164,91 @@ public final class TarCompressorUtils {
             Log.e(TAG, "Extraction failed for " + archiveFile, e);
             return false;
         }
+    }
+
+    /**
+     * Extracts a .tar.xz archive using Apache Commons Compress.
+     * Handles PAX/GNU/ustar tar variants correctly — the hand-rolled
+     * extractTarStream fails on PAX headers in prefixPack.txz.
+     */
+    private static void extractXzTar(File archiveFile, File outDir, OnExtractFileListener listener)
+            throws IOException {
+        extractCompressedTar(archiveFile, outDir, listener,
+                new org.apache.commons.compress.compressors.xz.XZCompressorInputStream(
+                        new BufferedInputStream(new FileInputStream(archiveFile), 262144)));
+    }
+
+    /**
+     * Extracts a .tar.gz archive using Apache Commons Compress.
+     */
+    private static void extractGzipTar(File archiveFile, File outDir, OnExtractFileListener listener)
+            throws IOException {
+        extractCompressedTar(archiveFile, outDir, listener,
+                new GZIPInputStream(new BufferedInputStream(new FileInputStream(archiveFile), 262144)));
+    }
+
+    /**
+     * Extracts a plain .tar archive using Apache Commons Compress.
+     */
+    private static void extractPlainTar(File archiveFile, File outDir, OnExtractFileListener listener)
+            throws IOException {
+        extractCompressedTar(archiveFile, outDir, listener,
+                new BufferedInputStream(new FileInputStream(archiveFile), 262144));
+    }
+
+    /**
+     * Common extraction logic using Apache Commons Compress TarArchiveInputStream.
+     * Handles all tar variants (ustar, PAX, GNU) correctly.
+     */
+    private static void extractCompressedTar(File archiveFile, File outDir,
+            OnExtractFileListener listener, InputStream decompressed) throws IOException {
+        long totalExtracted = 0;
+        org.apache.commons.compress.archivers.tar.TarArchiveInputStream tarIn =
+                new org.apache.commons.compress.archivers.tar.TarArchiveInputStream(decompressed);
+        org.apache.commons.compress.archivers.tar.TarArchiveEntry entry;
+        while ((entry = tarIn.getNextTarEntry()) != null) {
+            String name = entry.getName();
+            if (name == null || name.isEmpty()) continue;
+            if (name.startsWith("./")) name = name.substring(2);
+            File outFile = new File(outDir, name);
+            String outDirCanonical = outDir.getCanonicalPath();
+            String outFileCanonical = outFile.getCanonicalPath();
+            if (!outFileCanonical.startsWith(outDirCanonical + File.separator)
+                    && !outFileCanonical.equals(outDirCanonical)) {
+                Log.w(TAG, "Skipping tar entry with path traversal: " + name);
+                continue;
+            }
+            if (entry.isDirectory()) {
+                outFile.mkdirs();
+            } else {
+                outFile.getParentFile().mkdirs();
+                try (OutputStream out = new BufferedOutputStream(new FileOutputStream(outFile), 262144)) {
+                    byte[] buf = new byte[262144];
+                    int n;
+                    while ((n = tarIn.read(buf)) > 0) {
+                        out.write(buf, 0, n);
+                        totalExtracted += n;
+                        if (listener != null && (totalExtracted % (1024 * 1024)) < 262144) {
+                            listener.onExtractedBytes(totalExtracted);
+                        }
+                    }
+                }
+                if (name.contains("/bin/") || name.startsWith("bin/")) {
+                    outFile.setExecutable(true, false);
+                }
+                if (entry.isSymbolicLink()) {
+                    try {
+                        java.nio.file.Files.createSymbolicLink(
+                                outFile.toPath(), new File(entry.getLinkName()).toPath());
+                    } catch (Exception e) {
+                        Log.w(TAG, "Symlink failed for " + name + ": " + e.getMessage());
+                    }
+                }
+            }
+        }
+        tarIn.close();
+        decompressed.close();
+        Log.i(TAG, "Apache Commons tar extraction complete. Total: " + totalExtracted + " bytes");
     }
 
     /**

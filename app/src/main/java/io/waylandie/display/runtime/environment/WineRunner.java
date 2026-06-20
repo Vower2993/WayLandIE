@@ -412,6 +412,14 @@ public final class WineRunner {
         env.put("WINEDLLOVERRIDES", "d3d9,d3d10core,d3d11,dxgi=native");
         env.put("DXVK_STATE_CACHE_PATH", new File(homeDir, ".dxvk-cache").getAbsolutePath());
         env.put("MESA_VK_WSI_PRESENT_MODE", "immediate");
+        // Winlator-inspired env vars — Wine needs these for proper operation
+        env.put("WINE_NO_DUPLICATE_EXPLORER", "1");
+        env.put("FONTCONFIG_PATH", new File(rootDir, "usr/etc/fonts").getAbsolutePath());
+        env.put("GST_PLUGIN_PATH", new File(rootDir, "usr/lib/gstreamer-1.0").getAbsolutePath());
+        env.put("XDG_DATA_DIRS", new File(rootDir, "usr/share").getAbsolutePath());
+        env.put("XDG_CONFIG_DIRS", new File(rootDir, "usr/etc/xdg").getAbsolutePath());
+        // Add /system/lib64 to LD_LIBRARY_PATH — some glibc libs link against Android system libs
+        env.put("LD_LIBRARY_PATH", env.get("LD_LIBRARY_PATH") + ":/system/lib64");
 
         // Proton env
         env.put("PROTONPATH", protonDir.getAbsolutePath());

@@ -3319,8 +3319,11 @@ public final class MainActivity extends Activity
             return true;
         }
         SharedPreferences launchPrefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
-        return launchPrefs.getBoolean(PREF_BRIDGE_SERVER, false)
-                && launchPrefs.getBoolean(PREF_EXTERNAL_PRESENT_ONLY, false);
+        // Keep bridge alive if bridge_server was enabled via Intent extra,
+        // even without external_present_only. This allows the user to
+        // navigate back to HomeActivity (to run diagnostics, install
+        // components, etc.) without the bridge TCP listener dying.
+        return launchPrefs.getBoolean(PREF_BRIDGE_SERVER, false);
     }
 
     private void restoreStickyExternalBridgeSessionIfNeeded(String reason) {
