@@ -622,30 +622,35 @@ public final class SettingsActivity extends Activity {
                             io.waylandie.display.shared.io.TarCompressorUtils.Type.XZ, null);
                     if (unpacked) {
                         output.append("  ✓ Prefix pack unpacked to: ").append(homeDir.getAbsolutePath()).append("/.wine\n");
-                        // Create dosdevices symlinks (like winlator does)
+                        // Create dosdevices symlinks ONLY if they don't exist
+                        // (prefixPack may already contain them)
                         File dosdevices = new File(winePrefix, "dosdevices");
-                        dosdevices.mkdirs();
-                        try {
-                            // c: → ../drive_c
-                            java.nio.file.Files.createSymbolicLink(
-                                    new File(dosdevices, "c:").toPath(),
-                                    new File("../drive_c").toPath());
-                            // z: → rootfs (for file access)
-                            java.nio.file.Files.createSymbolicLink(
-                                    new File(dosdevices, "z:").toPath(),
-                                    imgFs.getRootDir().toPath());
-                            output.append("  ✓ dosdevices symlinks created (c:, z:)\n");
-                        } catch (Exception e) {
-                            output.append("  ⚠ dosdevices symlink failed: ").append(e.getMessage()).append('\n');
+                        if (!new File(dosdevices, "c:").exists()) {
+                            dosdevices.mkdirs();
+                            try {
+                                java.nio.file.Files.createSymbolicLink(
+                                        new File(dosdevices, "c:").toPath(),
+                                        new File("../drive_c").toPath());
+                                java.nio.file.Files.createSymbolicLink(
+                                        new File(dosdevices, "z:").toPath(),
+                                        imgFs.getRootDir().toPath());
+                                output.append("  ✓ dosdevices symlinks created (c:, z:)\n");
+                            } catch (Exception e) {
+                                output.append("  ⚠ dosdevices symlink failed: ").append(e.getMessage()).append('\n');
+                            }
+                        } else {
+                            output.append("  ✓ dosdevices already present (from prefixPack)\n");
                         }
                         // Verify Windows system DLLs are present
-                        File kernel32 = new File(winePrefix, "drive_c/windows/system32/kernel32.dll");
-                        if (kernel32.exists()) {
-                            output.append("  ✓ kernel32.dll found — prefix is valid\n");
+                        // Use recursive search — arm64ec Wine prefixes may have
+                        // system32 as a symlink (→ sysarm64_x64) so fixed path
+                        // check fails on broken symlinks.
+                        File kernel32 = findFileRecursiveFile(winePrefix, "kernel32.dll");
+                        if (kernel32 != null) {
+                            output.append("  ✓ kernel32.dll found: ").append(kernel32.getAbsolutePath()).append("\n");
                         } else {
                             output.append("  ⚠ kernel32.dll NOT found — listing prefix contents:\n");
-                            // List what IS in the prefix to diagnose layout
-                            listDirContents(winePrefix, output, "    ", 2);
+                            listDirContents(winePrefix, output, "    ", 3);
                         }
                     } else {
                         output.append("  ✗ Prefix pack extraction FAILED\n");

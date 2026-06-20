@@ -565,6 +565,24 @@ public final class HomeActivity extends Activity {
                     ProcessBuilder pb = new ProcessBuilder(cmd);
                     pb.directory(rootDir);
                     pb.redirectErrorStream(true);
+                    // CRITICAL: Set env vars the bridge needs.
+                    // Without XDG_RUNTIME_DIR, wl_display_add_socket_auto() fails
+                    // and the bridge crashes with no output.
+                    File runtimeDir = new File(rootDir, "usr/tmp/runtime");
+                    if (!runtimeDir.exists()) runtimeDir.mkdirs();
+                    File tmpDir = new File(rootDir, "usr/tmp");
+                    pb.environment().clear();
+                    pb.environment().put("HOME", new File(rootDir, "home/xuser").getAbsolutePath());
+                    pb.environment().put("PATH", new File(rootDir, "usr/bin").getAbsolutePath() + ":"
+                            + new File(rootDir, "usr/local/bin").getAbsolutePath());
+                    pb.environment().put("LD_LIBRARY_PATH", libPath);
+                    pb.environment().put("XDG_RUNTIME_DIR", runtimeDir.getAbsolutePath());
+                    pb.environment().put("WAYLAND_DISPLAY", "waylandie");
+                    pb.environment().put("WAYLANDIE_BRIDGE_SOCKET", "waylandie.display.bridge.v1");
+                    pb.environment().put("WAYLANDIE_BRIDGE_PORT", "57391");
+                    pb.environment().put("WAYLANDIE_FINAL_COPY", "forbidden");
+                    pb.environment().put("TMPDIR", tmpDir.getAbsolutePath());
+                    pb.environment().put("LANG", "en_US.UTF-8");
                     Process bridge = pb.start();
                     results.append("  Launched bridge via linker (6 args)\n");
 
