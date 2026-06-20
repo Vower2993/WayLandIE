@@ -828,7 +828,10 @@ public final class MainActivity extends Activity
         restoreStickyExternalBridgeSessionIfNeeded(reason);
         setBridgePresenterStatus(
                 presentLayer == null ? "background-wait-layer" : "background-ready");
-        moveTaskToBack(true);
+        // Instead of moveTaskToBack (quits to Android home), launch HomeActivity
+        Intent homeIntent = new Intent(this, HomeActivity.class);
+        homeIntent.addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
+        startActivity(homeIntent);
         return true;
     }
 
