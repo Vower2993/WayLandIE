@@ -243,6 +243,31 @@ else
 fi
 
 # ---------------------------------------------------------------------
+# 3.6. Create missing unversioned .so symlinks for glibc 2.34+
+# ---------------------------------------------------------------------
+# In glibc 2.34+ (trixie has 2.41), libdl, libpthread, librt, libutil,
+# libanl, libresolv were merged into libc. The versioned .so.2 files
+# exist, but the unversioned .so linker scripts (which some binaries
+# reference) are missing. Create them so Wine can find libdl.so etc.
+echo "[3.6/7] Creating missing glibc .so symlinks…"
+chroot_run bash -c '
+    LIBDIR=/usr/lib/aarch64-linux-gnu
+    # libdl.so → linker script pointing to libc
+    echo "INPUT(libc.so.6)" > $LIBDIR/libdl.so
+    # libpthread.so → linker script (merged into libc in 2.34+)
+    echo "INPUT(libc.so.6)" > $LIBDIR/libpthread.so
+    # librt.so → linker script
+    echo "INPUT(libc.so.6)" > $LIBDIR/librt.so
+    # libutil.so → linker script
+    echo "INPUT(libc.so.6)" > $LIBDIR/libutil.so
+    # libanl.so → linker script
+    echo "INPUT(libc.so.6)" > $LIBDIR/libanl.so
+    # libresolv.so → linker script
+    echo "INPUT(libc.so.6)" > $LIBDIR/libresolv.so
+    echo "  ✓ Created unversioned .so linker scripts for merged glibc libs"
+' 2>&1 | tail -3
+
+# ---------------------------------------------------------------------
 # 4. Disable llvmpipe ICD so user-installed Turnip wins by default
 #    (Turnip is installed separately via Settings tab, bind-mounted in)
 # ---------------------------------------------------------------------
