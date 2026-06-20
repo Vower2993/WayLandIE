@@ -141,6 +141,15 @@ public final class WineRunner {
 
         File linker = new File(nativeLibDir, "libld_glibc.so");
 
+        // XDG_RUNTIME_DIR — must match the path used by setupEnvironment()
+        // (rootDir/usr/tmp/runtime) so the bridge writes socket-name.txt where
+        // Wine will look for the Wayland socket.
+        File runtimeDir = new File(new File(rootDir, "usr/tmp"), "runtime");
+        if (!runtimeDir.exists()) runtimeDir.mkdirs();
+        // Socket name the bridge creates (filled in after bridge starts; applied
+        // to the Wine env below once env is built).
+        String waylandSocketName = null;
+
         // Build library path: rootfs libs + proton libs
         // CRITICAL: Debian multiarch puts libs in /usr/lib/aarch64-linux-gnu/
         // not /usr/lib/. Without this path, wine + bridge can't find libX11,
@@ -164,6 +173,13 @@ public final class WineRunner {
                 bridgeCmd.add("--library-path");
                 bridgeCmd.add(libPath);
                 bridgeCmd.add(bridgeBin.getAbsolutePath());
+                // Bridge requires 6 args: bridge_socket, target_commits, socket_file, timeout_ms, clear_ahb, accept_client
+                bridgeCmd.add("waylandie.display.bridge.v1");  // argv[1]: Android bridge socket name
+                bridgeCmd.add("1");                              // argv[2]: target_commits
+                bridgeCmd.add(new File(runtimeDir, "socket-name.txt").getAbsolutePath()); // argv[3]: socket file
+                bridgeCmd.add("15000");                          // argv[4]: timeout_ms
+                bridgeCmd.add("0");                              // argv[5]: clear_ahb_outside
+                bridgeCmd.add("0");                              // argv[6]: accept_client_complete
 
                 ProcessBuilder pbBridge = new ProcessBuilder(bridgeCmd);
                 pbBridge.directory(rootDir);
@@ -175,6 +191,21 @@ public final class WineRunner {
                 Log.i(TAG, "Bridge translator started (pid=" + getPid(bridgeProcess) + ")");
                 // Give the bridge 2s to create the Wayland socket
                 try { Thread.sleep(2000); } catch (InterruptedException ignored) {}
+                // Read the socket name the bridge created (e.g. "wayland-0")
+                // and stash it; applied to WAYLAND_DISPLAY below once the Wine
+                // env is built (env doesn't exist yet in this scope).
+                File socketNameFile = new File(runtimeDir, "socket-name.txt");
+                if (socketNameFile.exists()) {
+                    try {
+                        String socketName = new String(java.nio.file.Files.readAllBytes(socketNameFile.toPath())).trim();
+                        if (!socketName.isEmpty()) {
+                            waylandSocketName = socketName;
+                            Log.i(TAG, "Wayland socket: " + socketName + " (from bridge)");
+                        }
+                    } catch (Exception e) {
+                        Log.w(TAG, "Could not read socket name: " + e.getMessage());
+                    }
+                }
             } catch (IOException e) {
                 Log.w(TAG, "Bridge failed to start: " + e.getMessage());
             }
@@ -202,6 +233,13 @@ public final class WineRunner {
         Map<String, String> env = pb.environment();
         env.clear();
         setupEnvironment(env, rootDir, protonDir, isArm64ec, fexCoreInstalled);
+
+        // Override WAYLAND_DISPLAY with the actual socket name the bridge
+        // created (e.g. "wayland-0") — setupEnvironment() sets it to the
+        // default "waylandie" guess, which won't match wl_display_add_socket_auto().
+        if (waylandSocketName != null) {
+            env.put("WAYLAND_DISPLAY", waylandSocketName);
+        }
 
         Process p = pb.start();
 
@@ -235,6 +273,10 @@ public final class WineRunner {
             throw new IOException("ProotRunner not ready (fallback).");
         }
 
+        // Socket name the bridge creates inside proot /tmp (filled in after
+        // bridge starts; applied to WAYLAND_DISPLAY below).
+        String prootWaylandSocket = null;
+
         // Start bridge via proot (background)
         File bridgeBin = new File(rootDir, "usr/local/bin/waylandie-wayland-bridge");
         if (bridgeBin.exists()) {
@@ -244,8 +286,29 @@ public final class WineRunner {
                         "XDG_RUNTIME_DIR=/tmp WAYLAND_DISPLAY=waylandie "
                         + "WAYLANDIE_BRIDGE_SOCKET=waylandie.display.bridge.v1 "
                         + "WAYLANDIE_BRIDGE_PORT=57391 "
-                        + "/usr/local/bin/waylandie-wayland-bridge &");
+                        + "/usr/local/bin/waylandie-wayland-bridge "
+                        + "waylandie.display.bridge.v1 "  // bridge socket name
+                        + "1 "                             // target commits
+                        + "/tmp/socket-name.txt "         // socket file
+                        + "15000 "                         // timeout ms
+                        + "0 "                             // clear ahb outside
+                        + "0 &");                          // accept client complete
                 try { Thread.sleep(2000); } catch (InterruptedException ignored) {}
+                // Read the socket name the bridge created (inside proot /tmp =
+                // rootDir/tmp on host) and override WAYLAND_DISPLAY for Wine.
+                File prootSocketNameFile = new File(new File(rootDir, "tmp"), "socket-name.txt");
+                if (prootSocketNameFile.exists()) {
+                    try {
+                        String socketName = new String(
+                                java.nio.file.Files.readAllBytes(prootSocketNameFile.toPath())).trim();
+                        if (!socketName.isEmpty()) {
+                            prootWaylandSocket = socketName;
+                            Log.i(TAG, "Wayland socket (proot): " + socketName);
+                        }
+                    } catch (Exception e) {
+                        Log.w(TAG, "Could not read proot socket name: " + e.getMessage());
+                    }
+                }
             } catch (IOException e) {
                 Log.w(TAG, "Bridge proot launch failed: " + e.getMessage());
             }
@@ -263,6 +326,11 @@ public final class WineRunner {
         StringBuilder wineCmd = new StringBuilder();
         if (fexCoreInstalled && isArm64ec) {
             wineCmd.append("HODLL=libarm64ecfex.dll ");
+        }
+        // Override WAYLAND_DISPLAY with the actual socket name the bridge created
+        // (default "waylandie" guess won't match wl_display_add_socket_auto()).
+        if (prootWaylandSocket != null) {
+            wineCmd.append("WAYLAND_DISPLAY=").append(prootWaylandSocket).append(" ");
         }
         wineCmd.append(wineGuestPath).append(" ").append(exePath);
         if (extraArgs != null) {
@@ -323,25 +391,9 @@ public final class WineRunner {
         env.put("TMPDIR", tmpDir.getAbsolutePath());
         env.put("XDG_RUNTIME_DIR", runtimeDir.getAbsolutePath());
 
-        // Wine prefix — unpack prefixPack.txz if present (Proton pre-built prefix)
+        // Wine prefix — created during Proton install (prefixPack.txz unpacked there)
         File winePrefix = new File(homeDir, ".wine");
-        if (!winePrefix.exists() || winePrefix.list() == null || winePrefix.list().length == 0) {
-            winePrefix.mkdirs();
-            // Check for prefixPack.txz in Proton and unpack it
-            File prefixPack = new File(protonDir, "prefixPack.txz");
-            if (prefixPack.exists()) {
-                Log.i(TAG, "Unpacking Proton prefix pack: " + prefixPack);
-                try {
-                    io.waylandie.display.shared.io.TarCompressorUtils.extractFileWithType(
-                            prefixPack, winePrefix,
-                            io.waylandie.display.shared.io.TarCompressorUtils.Type.XZ, null);
-                    Log.i(TAG, "Prefix pack unpacked to " + winePrefix);
-                } catch (Exception e) {
-                    Log.w(TAG, "Failed to unpack prefix pack: " + e.getMessage()
-                            + " — Wine will create a new prefix on first run");
-                }
-            }
-        }
+        if (!winePrefix.exists()) winePrefix.mkdirs();
         env.put("WINEPREFIX", winePrefix.getAbsolutePath());
         env.put("WINEDLLOVERRIDES", "d3d9,d3d10core,d3d11,dxgi=native");
         env.put("DXVK_STATE_CACHE_PATH", new File(homeDir, ".dxvk-cache").getAbsolutePath());

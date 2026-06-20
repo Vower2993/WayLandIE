@@ -1,5 +1,5 @@
 #!/bin/bash
-# build-imagefs.sh — generates the BASE rootfs (imagefs.tar.xz) that
+# build-imagefs.sh — generates the BASE rootfs (imagefs.tar.zst) that
 # ships inside the WayLandIE APK.
 #
 # IMPORTANT: This rootfs does NOT include Wine. Wine/Proton/DXVK/Turnip
@@ -15,7 +15,7 @@
 #      Uses debootstrap --foreign + --second-stage with qemu-user-static
 #      binfmt support.
 #
-# Output: app/src/main/assets/imagefs/imagefs.tar.xz (~80-100 MB compressed)
+# Output: app/src/main/assets/imagefs/imagefs.tar.zst (~80-100 MB compressed)
 #
 # The rootfs contains ONLY:
 #   - Debian trixie arm64 base (minimal)
@@ -43,7 +43,7 @@ set -e
 WORK_DIR="${WORK_DIR:-/tmp/waylandie-imagefs-build}"
 ROOTFS_DIR="$WORK_DIR/rootfs"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-OUTPUT_FILE="${OUTPUT_FILE:-$SCRIPT_DIR/../app/src/main/assets/imagefs/imagefs.tar.xz}"
+OUTPUT_FILE="${OUTPUT_FILE:-$SCRIPT_DIR/../app/src/main/assets/imagefs/imagefs.tar.zst}"
 ARCH="${ARCH:-arm64}"
 DIST="${DIST:-trixie}"
 
@@ -321,14 +321,14 @@ fi
 # ---------------------------------------------------------------------
 # 7. Create the tarball
 # ---------------------------------------------------------------------
-echo "[7/7] Creating imagefs.tar.xz…"
+echo "[7/7] Creating imagefs.tar.zst…"
 # Clean up to reduce size
 rm -rf "$ROOTFS_DIR/var/cache/apt/archives/"*.deb 2>/dev/null || true
 rm -rf "$ROOTFS_DIR/var/lib/apt/lists/"* 2>/dev/null || true
 rm -rf "$ROOTFS_DIR/tmp/"* 2>/dev/null || true
 
 cd "$ROOTFS_DIR"
-tar --xattrs -cJf "$OUTPUT_FILE" .
+tar --xattrs -cf - . | zstd -19 -T0 -o "$OUTPUT_FILE"
 
 SIZE=$(stat -c%s "$OUTPUT_FILE")
 echo

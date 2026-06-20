@@ -602,6 +602,24 @@ public final class SettingsActivity extends Activity {
                 }
                 output.append("Found wine: ").append(wineBin).append('\n');
                 wineBin.setExecutable(true, false);
+
+                // Unpack prefixPack.txz to Wine prefix (pre-built Windows C: drive)
+                File prefixPack = new File(slotDir, "prefixPack.txz");
+                if (prefixPack.exists()) {
+                    io.waylandie.display.runtime.environment.ImageFsManager imgFs =
+                            new io.waylandie.display.runtime.environment.ImageFsManager(this);
+                    File winePrefix = new File(imgFs.getRootDir(), "home/xuser/.wine");
+                    winePrefix.mkdirs();
+                    output.append("Unpacking prefixPack.txz to Wine prefix…\n");
+                    try {
+                        io.waylandie.display.shared.io.TarCompressorUtils.extractFileWithType(
+                                prefixPack, winePrefix,
+                                io.waylandie.display.shared.io.TarCompressorUtils.Type.XZ, null);
+                        output.append("  Prefix pack unpacked to: ").append(winePrefix).append('\n');
+                    } catch (Exception e) {
+                        output.append("  WARNING: prefix pack unpack failed: ").append(e.getMessage()).append('\n');
+                    }
+                }
                 break;
             }
             case "dxvk": {

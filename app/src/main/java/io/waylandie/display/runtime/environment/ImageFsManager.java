@@ -43,7 +43,7 @@ public final class ImageFsManager {
     // Bumping from 1 → 2 forces re-extraction on existing installs so they
     // get the new packages without manually clearing app data.
     public static final int LATEST_VERSION = 2;
-    private static final String IMAGEFS_ARCHIVE = "imagefs/imagefs.tar.xz";
+    private static final String IMAGEFS_ARCHIVE = "imagefs/imagefs.tar.zst";
     private static final long IMAGEFS_EXTRACTED_BYTES = 500_000_000L;
 
     private final Context context;
@@ -230,7 +230,7 @@ public final class ImageFsManager {
                 };
 
         boolean ok = TarCompressorUtils.extractSync(
-                TarCompressorUtils.Type.XZ,
+                TarCompressorUtils.Type.ZSTD,
                 context,
                 IMAGEFS_ARCHIVE,
                 rootDir,
