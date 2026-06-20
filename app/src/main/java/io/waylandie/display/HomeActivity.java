@@ -20,6 +20,7 @@ import android.provider.Settings;
 import android.util.Log;
 import android.view.InputDevice;
 import android.view.View;
+import android.widget.ScrollView;
 import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.LinearLayout;
@@ -75,6 +76,7 @@ public final class HomeActivity extends Activity {
     private Button btnSaveLogs;
     private Button btnAbout;
     private Button btnTaskManager;
+    private Button btnDiagnostics;
 
     private final Handler main = new Handler(Looper.getMainLooper());
     private PowerManager.WakeLock wakeLock;
@@ -143,6 +145,7 @@ public final class HomeActivity extends Activity {
         btnSaveLogs = findViewById(R.id.btnSaveLogs);
         btnAbout = findViewById(R.id.btnAbout);
         btnTaskManager = findViewById(R.id.btnTaskManager);
+        btnDiagnostics = findViewById(R.id.btnDiagnostics);
     }
 
     private void wireListeners() {
@@ -156,6 +159,7 @@ public final class HomeActivity extends Activity {
         btnSaveLogs.setOnClickListener(v -> saveLogs());
         btnAbout.setOnClickListener(v -> showAbout());
         btnTaskManager.setOnClickListener(v -> showTaskManager());
+        btnDiagnostics.setOnClickListener(v -> runDiagnostics());
     }
 
     @Override
@@ -435,6 +439,310 @@ public final class HomeActivity extends Activity {
 
             body.addView(row);
         }
+    }
+
+    // --- Diagnostics (pre-flight check) ---
+    private void runDiagnostics() {
+        log("Running pre-flight diagnostics…");
+        io.waylandie.display.shared.util.LogRingBuffer.append("[Diag] Running pre-flight diagnostics…");
+
+        new Thread(() -> {
+            try {
+            StringBuilder results = new StringBuilder();
+            int passed = 0, failed = 0, warned = 0;
+
+            io.waylandie.display.runtime.environment.ImageFsManager imageFs =
+                    new io.waylandie.display.runtime.environment.ImageFsManager(this);
+            File rootDir = imageFs.getRootDir();
+            String nativeLibDir = getApplicationInfo().nativeLibraryDir;
+            File filesDir = getFilesDir();
+
+            results.append("=== WayLandIE Pre-Flight Diagnostics ===\n\n");
+
+            // === 1. ROOTFS ===
+            results.append("--- ROOTFS ---\n");
+            if (imageFs.isValid()) {
+                results.append("✓ Rootfs valid (v" + imageFs.getVersion() + ")\n");
+                results.append("  Path: " + rootDir.getAbsolutePath() + "\n");
+                results.append("  Size: " + (rootDir.length() / 1024 / 1024) + " MB\n");
+                passed++;
+            } else {
+                results.append("✗ Rootfs INVALID\n");
+                results.append(imageFs.describeValidity() + "\n");
+                failed++;
+            }
+
+            // === 2. GLIBC LINKER (libld_glibc.so) ===
+            results.append("\n--- GLIBC LINKER (native launch) ---\n");
+            File linker = new File(nativeLibDir, "libld_glibc.so");
+            if (linker.exists()) {
+                results.append("✓ libld_glibc.so found: " + linker + "\n");
+                results.append("  Size: " + linker.length() + " bytes\n");
+                if (linker.canExecute()) {
+                    results.append("✓ Executable: YES\n");
+                    passed++;
+                } else {
+                    results.append("✗ Executable: NO\n");
+                    failed++;
+                }
+            } else {
+                results.append("⚠ libld_glibc.so NOT FOUND — will fall back to proot\n");
+                warned++;
+            }
+
+            // === 3. BRIDGE TRANSLATOR ===
+            results.append("\n--- BRIDGE TRANSLATOR ---\n");
+            File bridgeBin = new File(rootDir, "usr/local/bin/waylandie-wayland-bridge");
+            if (bridgeBin.exists()) {
+                results.append("✓ Bridge binary found\n");
+                results.append("  Size: " + bridgeBin.length() + " bytes\n");
+                passed++;
+            } else {
+                results.append("✗ Bridge binary NOT FOUND at " + bridgeBin + "\n");
+                results.append("  Wine will have no Wayland display to render to.\n");
+                results.append("  Rebuild rootfs with libc6-dev + wayland-scanner.\n");
+                failed++;
+            }
+
+            // === 4. PROTON ===
+            results.append("\n--- PROTON ---\n");
+            File protonDir = new File(filesDir, "contents/proton/active");
+            if (protonDir.exists()) {
+                File wineBin = new File(protonDir, "files/bin/wine");
+                if (!wineBin.exists()) wineBin = new File(protonDir, "dist/bin/wine");
+                if (!wineBin.exists()) wineBin = new File(protonDir, "bin/wine");
+                if (wineBin.exists()) {
+                    results.append("✓ Wine binary found: " + wineBin.getName() + "\n");
+                    results.append("  Size: " + wineBin.length() + " bytes\n");
+                    // Check ELF architecture
+                    try (java.io.RandomAccessFile raf = new java.io.RandomAccessFile(wineBin, "r")) {
+                        byte[] magic = new byte[20];
+                        raf.readFully(magic);
+                        if (magic[0] == 0x7f && magic[1] == 'E' && magic[2] == 'L' && magic[3] == 'F') {
+                            int eMachine = (magic[19] & 0xFF) << 8 | (magic[18] & 0xFF);
+                            if (eMachine == 183) {
+                                results.append("  Architecture: ARM64 (arm64ec) — native launch\n");
+                            } else if (eMachine == 62) {
+                                results.append("  Architecture: x86_64 — needs box64\n");
+                            } else {
+                                results.append("  Architecture: unknown (e_machine=" + eMachine + ")\n");
+                            }
+                        }
+                    }
+                    passed++;
+                } else {
+                    results.append("✗ Wine binary NOT FOUND in proton/active\n");
+                    failed++;
+                }
+            } else {
+                results.append("✗ Proton NOT INSTALLED\n");
+                failed++;
+            }
+
+            // === 5. DXVK ===
+            results.append("\n--- DXVK ---\n");
+            File dxvkActive = new File(filesDir, "contents/dxvk/active");
+            if (dxvkActive.exists()) {
+                File dxvkSystem32 = new File(dxvkActive, "system32");
+                File dxvkSyswow64 = new File(dxvkActive, "syswow64");
+                int dllCount = 0;
+                if (dxvkSystem32.isDirectory()) {
+                    File[] dlls = dxvkSystem32.listFiles((d, n) -> n.endsWith(".dll"));
+                    if (dlls != null) dllCount += dlls.length;
+                }
+                if (dxvkSyswow64.isDirectory()) {
+                    File[] dlls = dxvkSyswow64.listFiles((d, n) -> n.endsWith(".dll"));
+                    if (dlls != null) dllCount += dlls.length;
+                }
+                results.append("✓ DXVK installed (" + dllCount + " DLLs in slot)\n");
+
+                // Check if DLLs were copied to Wine prefix
+                File wineSystem32 = new File(rootDir, "home/xuser/.wine/drive_c/windows/system32");
+                File d3d11 = new File(wineSystem32, "d3d11.dll");
+                if (d3d11.exists()) {
+                    results.append("✓ d3d11.dll in Wine prefix system32/\n");
+                    passed++;
+                } else {
+                    results.append("✗ d3d11.dll NOT in Wine prefix — DXVK won't work\n");
+                    results.append("  Reinstall DXVK to copy DLLs to prefix.\n");
+                    failed++;
+                }
+            } else {
+                results.append("⚠ DXVK not installed\n");
+                warned++;
+            }
+
+            // === 6. TURNIP (Vulkan driver) ===
+            results.append("\n--- TURNIP (Vulkan driver) ---\n");
+            File turnipActive = new File(filesDir, "contents/turnip/active");
+            if (turnipActive.exists()) {
+                results.append("✓ Turnip installed\n");
+                // Check ICD JSON
+                File icdJson = new File(rootDir, "usr/local/etc/vulkan/icd.d/freedreno_icd.json");
+                if (icdJson.exists()) {
+                    String json = new String(java.nio.file.Files.readAllBytes(icdJson.toPath()));
+                    if (json.contains("/usr/local/lib/libvulkan_freedreno.so")) {
+                        results.append("✓ ICD JSON points to /usr/local/lib/ (correct for native)\n");
+                        passed++;
+                    } else if (json.contains("/opt/turnip/")) {
+                        results.append("✗ ICD JSON points to /opt/turnip/ (proot path — WRONG for native)\n");
+                        results.append("  Reinstall Turnip to fix ICD JSON path.\n");
+                        failed++;
+                    } else {
+                        results.append("⚠ ICD JSON has unexpected path: " + json + "\n");
+                        warned++;
+                    }
+                } else {
+                    results.append("✗ ICD JSON NOT FOUND at " + icdJson + "\n");
+                    failed++;
+                }
+                // Check .so was copied to rootfs
+                File soInRootfs = new File(rootDir, "usr/local/lib/libvulkan_freedreno.so");
+                if (soInRootfs.exists()) {
+                    results.append("✓ libvulkan_freedreno.so in rootfs/usr/local/lib/\n");
+                    passed++;
+                } else {
+                    results.append("✗ libvulkan_freedreno.so NOT in rootfs/usr/local/lib/\n");
+                    failed++;
+                }
+            } else {
+                results.append("⚠ Turnip not installed\n");
+                warned++;
+            }
+
+            // === 7. FEX ===
+            results.append("\n--- FEX ---\n");
+            File fexActive = new File(filesDir, "contents/fex/active");
+            if (fexActive.exists()) {
+                results.append("✓ FEX installed\n");
+                // Check FEXCore DLLs in Wine prefix
+                File fexSystem32 = new File(fexActive, "system32");
+                File libArm64ecFex = new File(fexSystem32, "libarm64ecfex.dll");
+                if (libArm64ecFex.exists()) {
+                    results.append("✓ libarm64ecfex.dll found in FEX slot\n");
+                    // Check if copied to Wine prefix
+                    File wineSystem32 = new File(rootDir, "home/xuser/.wine/drive_c/windows/system32");
+                    File dllInPrefix = new File(wineSystem32, "libarm64ecfex.dll");
+                    if (dllInPrefix.exists()) {
+                        results.append("✓ libarm64ecfex.dll in Wine prefix\n");
+                        passed++;
+                    } else {
+                        results.append("✗ libarm64ecfex.dll NOT in Wine prefix\n");
+                        failed++;
+                    }
+                } else {
+                    results.append("⚠ libarm64ecfex.dll not found in FEX slot\n");
+                    warned++;
+                }
+            } else {
+                results.append("⚠ FEX not installed\n");
+                warned++;
+            }
+
+            // === 8. KEY LIBRARIES PATHS ===
+            results.append("\n--- KEY LIBRARIES (Debian multiarch) ---\n");
+            String[] keyLibs = {
+                "usr/lib/aarch64-linux-gnu/libwayland-server.so.0",
+                "usr/lib/aarch64-linux-gnu/libX11.so.6",
+                "usr/lib/aarch64-linux-gnu/libfreetype.so.6",
+                "usr/lib/aarch64-linux-gnu/libvulkan.so.1",
+                "usr/lib/aarch64-linux-gnu/libGL.so.1",
+                "lib/ld-linux-aarch64.so.1"
+            };
+            for (String lib : keyLibs) {
+                File libFile = new File(rootDir, lib);
+                if (libFile.exists()) {
+                    results.append("✓ " + lib + " (" + libFile.length() + " bytes)\n");
+                    passed++;
+                } else {
+                    results.append("✗ " + lib + " MISSING\n");
+                    failed++;
+                }
+            }
+
+            // === 9. SELINUX CHECK ===
+            results.append("\n--- SELINUX CHECK ---\n");
+            // Try to execve the linker — if SELinux blocks it, we'll get permission denied
+            if (linker.exists()) {
+                try {
+                    Process testP = new ProcessBuilder(linker.getAbsolutePath(), "--version").start();
+                    int exitCode = testP.waitFor();
+                    java.io.BufferedReader r = new java.io.BufferedReader(
+                            new java.io.InputStreamReader(testP.getInputStream()));
+                    String firstLine = r.readLine();
+                    if (exitCode == 0 || firstLine != null) {
+                        results.append("✓ SELinux allows execve of libld_glibc.so\n");
+                        if (firstLine != null) results.append("  Version: " + firstLine + "\n");
+                        passed++;
+                    } else {
+                        results.append("✗ libld_glibc.so failed to execute (exit=" + exitCode + ")\n");
+                        failed++;
+                    }
+                } catch (Exception e) {
+                    results.append("✗ SELinux BLOCKED execve: " + e.getMessage() + "\n");
+                    results.append("  Native launch will fail — proot fallback required.\n");
+                    failed++;
+                }
+            }
+
+            // === 10. PROOT FALLBACK ===
+            results.append("\n--- PROOT FALLBACK ---\n");
+            File prootBin = new File(nativeLibDir, "libproot.so");
+            if (prootBin.exists()) {
+                results.append("✓ libproot.so available as fallback\n");
+                passed++;
+            } else {
+                results.append("✗ libproot.so NOT FOUND — no fallback if native fails\n");
+                failed++;
+            }
+
+            // === SUMMARY ===
+            results.append("\n=== SUMMARY ===\n");
+            results.append("Passed: " + passed + "\n");
+            results.append("Failed: " + failed + "\n");
+            results.append("Warnings: " + warned + "\n");
+            if (failed == 0) {
+                results.append("\n✓ ALL CRITICAL CHECKS PASSED — ready to launch\n");
+            } else {
+                results.append("\n✗ " + failed + " CRITICAL ISSUES — fix before launching\n");
+            }
+
+            final String report = results.toString();
+            for (String line : report.split("\n")) {
+                android.util.Log.i("WayLandIE/Diag", line);
+                io.waylandie.display.shared.util.LogRingBuffer.append("[Diag] " + line);
+            }
+
+            runOnUiThread(() -> {
+                // Show in a scrollable dialog
+                TextView tv = new TextView(this);
+                tv.setTypeface(android.graphics.Typeface.MONOSPACE);
+                tv.setTextSize(10);
+                tv.setText(report);
+                int pad = (int) (getResources().getDisplayMetrics().density * 16);
+                tv.setPadding(pad, pad, pad, pad);
+                ScrollView scroll = new ScrollView(this);
+                scroll.addView(tv);
+                new AlertDialog.Builder(this)
+                        .setTitle("Pre-Flight Diagnostics")
+                        .setView(scroll)
+                        .setPositiveButton("OK", null)
+                        .setNegativeButton("Copy", (d, w) -> {
+                            android.content.ClipboardManager clip =
+                                    (android.content.ClipboardManager)
+                                            getSystemService(android.content.Context.CLIPBOARD_SERVICE);
+                            clip.setPrimaryClip(android.content.ClipData.newPlainText("diag", report));
+                            toast("Diagnostics copied to clipboard");
+                        })
+                        .show();
+                log("Diagnostics complete: " + report.substring(report.indexOf("=== SUMMARY ===")));
+            });
+            } catch (Exception e) {
+                android.util.Log.e("WayLandIE/Diag", "Diagnostics failed", e);
+                io.waylandie.display.shared.util.LogRingBuffer.append("[Diag] ERROR: " + e.getMessage());
+                runOnUiThread(() -> toast("Diagnostics error: " + e.getMessage()));
+            }
+        }, "wl-diagnostics").start();
     }
 
     // --- About ---

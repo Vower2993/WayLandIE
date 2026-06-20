@@ -192,6 +192,10 @@
                 android:layout_width="match_parent" android:layout_height="wrap_content"
                 android:text="Task Manager (running processes)" />
 
+            <Button android:id="@+id/btnDiagnostics" style="@style/PrimaryButton"
+                android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:text="Run Diagnostics (pre-flight check)" />
+
             <Button android:id="@+id/btnSaveLogs" style="@style/PrimaryButton"
                 android:layout_width="match_parent" android:layout_height="wrap_content"
                 android:text="Save Logs (for debugging)"
