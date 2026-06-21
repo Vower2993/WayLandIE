@@ -1931,7 +1931,7 @@ static const struct xdg_wm_base_interface xdg_wm_base_impl = {
 
 static void bind_xdg_wm_base(struct wl_client *client, void *data, uint32_t version, uint32_t id) {
     (void)data;
-    uint32_t bind_version = version > 6 ? 6 : version;
+    uint32_t bind_version = version > 5 ? 5 : version;
     struct wl_resource *resource = wl_resource_create(client, &xdg_wm_base_interface, bind_version, id);
     if (resource == NULL) {
         wl_client_post_no_memory(client);
@@ -3991,7 +3991,7 @@ int main(int argc, char **argv) {
             || wl_global_create(state.display, &wl_seat_interface, 8, &state, bind_seat) == NULL
             || wl_global_create(state.display, &wl_shm_interface, 1, NULL, bind_shm) == NULL
              || wl_global_create(state.display, &wl_output_interface, 4, &state, bind_output) == NULL
-             || wl_global_create(state.display, &xdg_wm_base_interface, 6, NULL, bind_xdg_wm_base) == NULL
+             || wl_global_create(state.display, &xdg_wm_base_interface, 5, NULL, bind_xdg_wm_base) == NULL
             || wl_global_create(state.display, &wp_presentation_interface, 2, NULL, bind_presentation) == NULL
             || wl_global_create(state.display, &wp_viewporter_interface, 1, NULL, bind_viewporter) == NULL
             || wl_global_create(state.display, &zwp_relative_pointer_manager_v1_interface, 1, NULL, bind_relative_pointer_manager) == NULL
