@@ -163,7 +163,12 @@ public final class MainActivity extends Activity
     private final ArrayDeque<AhbInFlightFrame> inFlightAhbFrames = new ArrayDeque<>();
     private final Object ahbInFlightLock = new Object();
     private final Object vulkanRenderLock = new Object();
-    private final Object bridgeLock = new Object();
+    // CRITICAL: bridgeLock + bridgeLocalServer must be STATIC because the
+    // abstract socket 'waylandie.display.bridge.v1' is a kernel-global resource.
+    // If these were instance fields, a new MainActivity instance would try to
+    // create a second BridgeLocalServer and fail with 'Address already in use'.
+    // Making them static ensures all instances share the same server.
+    private static final Object bridgeLock = new Object();
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final Runnable hideBridgeCursorRunnable = () -> setBridgeCursorVisible(false);
 
@@ -204,7 +209,7 @@ public final class MainActivity extends Activity
     private boolean launchExtrasApplied;
     private volatile boolean activityResumed;
     private BridgeControlServer bridgeControlServer;
-    private BridgeLocalServer bridgeLocalServer;
+    private static BridgeLocalServer bridgeLocalServer;
     private OnBackInvokedCallback bridgeBackCallback;
     private volatile String producerStatusText = "producer: waiting";
     private volatile String lastVulkanProducerFrameStatus;
