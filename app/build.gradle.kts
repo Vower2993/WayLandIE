@@ -8,8 +8,27 @@ android {
 
     defaultConfig {
         applicationId = "io.waylandie.display"
-        minSdk = 33
-        targetSdk = 34
+        // CRITICAL: targetSdk MUST be 28 (Android 9).
+        // Android 10+ (API 29+) enforces W^X (writable XOR executable) on
+        // app data directories for apps with targetSdk >= 29. This blocks
+        // execve() of binaries in getFilesDir() — which is where Wine lives.
+        //
+        // The native launcher (libwine_launcher.so) is in nativeLibraryDir
+        // (where exec is allowed), but it can't exec the wine binary from
+        // getFilesDir() because W^X checks the TARGET of execve, not the
+        // caller. PRoot would bypass this via ptrace but has 2-5x overhead.
+        //
+        // Winlator and Termux both use targetSdk=28 for this exact reason.
+        // With targetSdk=28, W^X is bypassed even on Android 14+ devices.
+        //
+        // Side effects (all acceptable):
+        //   - foregroundServiceType manifest attr ignored (services still run)
+        //   - POST_NOTIFICATIONS not requested (notifications always shown)
+        //   - Scoped storage not enforced (we have MANAGE_EXTERNAL_STORAGE)
+        //   - OnBackInvokedCallback no-ops (already guarded with SDK_INT)
+        // All API 33+ features are guarded with Build.VERSION.SDK_INT checks.
+        minSdk = 26
+        targetSdk = 28
         versionCode = 1
         versionName = "0.2.0-no-root"
 
