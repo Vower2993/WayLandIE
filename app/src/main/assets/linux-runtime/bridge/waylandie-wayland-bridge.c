@@ -19,10 +19,109 @@
 #include <unistd.h>
 #include <wayland-server-core.h>
 #include <wayland-server-protocol.h>
+/* ----------------------------------------------------------------- */
+/* X11 / XTest input injection is OPTIONAL.                          */
+/*                                                                  */
+/* When WAYLANDIE_NO_XTEST is defined (e.g. bionic builds that have */
+/* no X11 libraries), the bridge compiles WITHOUT X11. All xtest_*  */
+/* functions become no-op stubs and the struct fields become opaque */
+/* pointers (never dereferenced). The Wayland compositor + dmabuf   */
+/* pipeline is unchanged.                                           */
+/* ----------------------------------------------------------------- */
+#ifndef WAYLANDIE_NO_XTEST
 #include <X11/Xlib.h>
 #include <X11/Xatom.h>
 #include <X11/keysym.h>
 #include <X11/extensions/XTest.h>
+#else
+/* Stub X11 types — never dereferenced, only stored/compared. */
+typedef struct _XDisplay Display;
+typedef unsigned long Window;
+typedef unsigned long Atom;
+typedef unsigned long KeySym;
+typedef int Bool;
+typedef unsigned long XID;
+typedef struct {
+    int type;
+    unsigned long serial;
+    int send_event;
+    int pad[6];
+} XEvent;
+/* Stub X11 constants. */
+#define None 0L
+#define NoSymbol 0L
+#define Success 0
+#define False 0
+#define True 1
+#define CurrentTime 0L
+#define PropertyChangeMask 0L
+#define AnyPropertyType 0L
+#define SelectionNotify 0
+#define XA_STRING 1L
+/* Stub X11 keysyms — values irrelevant; xtest_key_sym() is a no-op stub. */
+#define XK_BackSpace 0xFF08
+#define XK_Tab 0xFF09
+#define XK_Return 0xFF0D
+#define XK_Escape 0xFF1B
+#define XK_Delete 0xFFFF
+#define XK_Home 0xFF50
+#define XK_Left 0xFF51
+#define XK_Up 0xFF52
+#define XK_Right 0xFF53
+#define XK_Down 0xFF54
+#define XK_Shift_L 0xFFE1
+#define XK_Shift_R 0xFFE2
+#define XK_Control_L 0xFFE3
+#define XK_Control_R 0xFFE4
+#define XK_space 0x020
+#define XK_0 0x030
+#define XK_1 0x031
+#define XK_2 0x032
+#define XK_3 0x033
+#define XK_4 0x034
+#define XK_5 0x035
+#define XK_6 0x036
+#define XK_7 0x037
+#define XK_8 0x038
+#define XK_9 0x039
+#define XK_a 0x061
+#define XK_b 0x062
+#define XK_c 0x063
+#define XK_d 0x064
+#define XK_e 0x065
+#define XK_f 0x066
+#define XK_g 0x067
+#define XK_h 0x068
+#define XK_i 0x069
+#define XK_j 0x06a
+#define XK_k 0x06b
+#define XK_l 0x06c
+#define XK_m 0x06d
+#define XK_n 0x06e
+#define XK_o 0x06f
+#define XK_p 0x070
+#define XK_q 0x071
+#define XK_r 0x072
+#define XK_s 0x073
+#define XK_t 0x074
+#define XK_u 0x075
+#define XK_v 0x076
+#define XK_w 0x077
+#define XK_x 0x078
+#define XK_y 0x079
+#define XK_z 0x07a
+#define XK_minus 0x02d
+#define XK_equal 0x03d
+#define XK_bracketleft 0x05b
+#define XK_bracketright 0x05d
+#define XK_backslash 0x05c
+#define XK_semicolon 0x03b
+#define XK_apostrophe 0x027
+#define XK_comma 0x02c
+#define XK_period 0x02e
+#define XK_slash 0x02f
+#define XK_grave 0x060
+#endif /* WAYLANDIE_NO_XTEST */
 #include "xdg-shell-server-protocol.h"
 #include "linux-dmabuf-unstable-v1-server-protocol.h"
 #include "presentation-time-server-protocol.h"
@@ -207,11 +306,17 @@ static int input_resource_count(struct wl_list *resources) {
 
 static void maybe_send_pointer_frame(struct wl_resource *resource);
 
+#ifndef WAYLANDIE_NO_XTEST
 static int xtest_input_enabled(void) {
     const char *enabled = getenv("WAYLANDIE_STEAM_XTEST_INPUT");
     return enabled != NULL && strcmp(enabled, "1") == 0;
 }
+#else
+static int xtest_input_enabled(void) { return 0; }
+#endif
 
+
+#ifndef WAYLANDIE_NO_XTEST
 static int xtest_ensure_window_and_atoms(struct server_state *state) {
     if (state->xtest_display == NULL) {
         return 0;
@@ -245,7 +350,12 @@ static int xtest_ensure_window_and_atoms(struct server_state *state) {
     XFlush(state->xtest_display);
     return 1;
 }
+#else
+static int xtest_ensure_window_and_atoms(struct server_state *state) { return 0; }
+#endif
 
+
+#ifndef WAYLANDIE_NO_XTEST
 static int xtest_ensure_display(struct server_state *state) {
     if (!state->xtest_enabled) {
         return 0;
@@ -289,6 +399,10 @@ static int xtest_ensure_display(struct server_state *state) {
             minor);
     return 1;
 }
+#else
+static int xtest_ensure_display(struct server_state *state) { return 0; }
+#endif
+
 
 static int xtest_clamp_coord(double value, int limit) {
     if (limit <= 0) {
@@ -303,6 +417,7 @@ static int xtest_clamp_coord(double value, int limit) {
     return (int)(value + 0.5);
 }
 
+#ifndef WAYLANDIE_NO_XTEST
 static void xtest_pointer_move(struct server_state *state, double x, double y) {
     if (!xtest_ensure_display(state)) {
         return;
@@ -313,7 +428,12 @@ static void xtest_pointer_move(struct server_state *state, double x, double y) {
     XFlush(state->xtest_display);
     input_debug_log("xtest-motion x=%d y=%d", xi, yi);
 }
+#else
+static void xtest_pointer_move(struct server_state *state, double x, double y) {  }
+#endif
 
+
+#ifndef WAYLANDIE_NO_XTEST
 static void xtest_pointer_button(struct server_state *state, const char *button_state) {
     if (!xtest_ensure_display(state)) {
         return;
@@ -323,7 +443,12 @@ static void xtest_pointer_button(struct server_state *state, const char *button_
     XFlush(state->xtest_display);
     input_debug_log("xtest-button state=%s", button_state);
 }
+#else
+static void xtest_pointer_button(struct server_state *state, const char *button_state) {  }
+#endif
 
+
+#ifndef WAYLANDIE_NO_XTEST
 static void xtest_key_sym(struct server_state *state, KeySym keysym, int press) {
     if (!xtest_ensure_display(state) || keysym == NoSymbol) {
         return;
@@ -335,11 +460,20 @@ static void xtest_key_sym(struct server_state *state, KeySym keysym, int press) 
     }
     XTestFakeKeyEvent(state->xtest_display, keycode, press ? True : False, CurrentTime);
 }
+#else
+static void xtest_key_sym(struct server_state *state, KeySym keysym, int press) {  }
+#endif
 
+
+#ifndef WAYLANDIE_NO_XTEST
 static void xtest_tap_key_sym(struct server_state *state, KeySym keysym) {
     xtest_key_sym(state, keysym, 1);
     xtest_key_sym(state, keysym, 0);
 }
+#else
+static void xtest_tap_key_sym(struct server_state *state, KeySym keysym) {  }
+#endif
+
 
 static int ascii_to_keysym(unsigned char ch, KeySym *keysym, int *shift) {
     *shift = 0;
@@ -396,6 +530,7 @@ static int ascii_to_keysym(unsigned char ch, KeySym *keysym, int *shift) {
     }
 }
 
+#ifndef WAYLANDIE_NO_XTEST
 static void xtest_type_ascii(struct server_state *state, unsigned char ch) {
     KeySym keysym = NoSymbol;
     int shift = 0;
@@ -411,6 +546,10 @@ static void xtest_type_ascii(struct server_state *state, unsigned char ch) {
         xtest_key_sym(state, XK_Shift_L, 0);
     }
 }
+#else
+static void xtest_type_ascii(struct server_state *state, unsigned char ch) {  }
+#endif
+
 
 static int hex_value(char c) {
     if (c >= '0' && c <= '9') {
@@ -425,6 +564,7 @@ static int hex_value(char c) {
     return -1;
 }
 
+#ifndef WAYLANDIE_NO_XTEST
 static void xtest_type_text_hex(struct server_state *state, const char *hex) {
     if (hex == NULL || !xtest_ensure_display(state)) {
         return;
@@ -445,6 +585,10 @@ static void xtest_type_text_hex(struct server_state *state, const char *hex) {
     XFlush(state->xtest_display);
     input_debug_log("xtest-text bytes=%d", count);
 }
+#else
+static void xtest_type_text_hex(struct server_state *state, const char *hex) {  }
+#endif
+
 
 static KeySym android_keycode_to_keysym(int keycode) {
     switch (keycode) {
@@ -462,6 +606,7 @@ static KeySym android_keycode_to_keysym(int keycode) {
     }
 }
 
+#ifndef WAYLANDIE_NO_XTEST
 static void xtest_android_key(struct server_state *state, int keycode, const char *action) {
     if (action == NULL || !xtest_ensure_display(state)) {
         return;
@@ -474,7 +619,12 @@ static void xtest_android_key(struct server_state *state, int keycode, const cha
     XFlush(state->xtest_display);
     input_debug_log("xtest-key keycode=%d action=%s", keycode, action);
 }
+#else
+static void xtest_android_key(struct server_state *state, int keycode, const char *action) {  }
+#endif
 
+
+#ifndef WAYLANDIE_NO_XTEST
 static void xtest_copy_shortcut(struct server_state *state) {
     if (!xtest_ensure_display(state)) {
         return;
@@ -486,6 +636,10 @@ static void xtest_copy_shortcut(struct server_state *state) {
     XFlush(state->xtest_display);
     input_debug_log("xtest-copy-shortcut");
 }
+#else
+static void xtest_copy_shortcut(struct server_state *state) {  }
+#endif
+
 
 static double now_ms(void) {
     struct timespec ts;
@@ -2578,6 +2732,7 @@ static int send_clipboard_text(
     return ok;
 }
 
+#ifndef WAYLANDIE_NO_XTEST
 static char *xtest_read_selection_target(
         struct server_state *state,
         Atom selection,
@@ -2673,7 +2828,18 @@ static char *xtest_read_selection_target(
     input_debug_log("clipboard selection=%s timeout", selection_name);
     return NULL;
 }
+#else
+static char * xtest_read_selection_target(
+        struct server_state *state,
+        Atom selection,
+        Atom target,
+        const char *selection_name,
+        size_t max_bytes,
+        size_t *out_len) { return NULL; }
+#endif
 
+
+#ifndef WAYLANDIE_NO_XTEST
 static char *xtest_read_selection_text(
         struct server_state *state,
         Atom selection,
@@ -2704,7 +2870,17 @@ static char *xtest_read_selection_text(
     }
     return NULL;
 }
+#else
+static char * xtest_read_selection_text(
+        struct server_state *state,
+        Atom selection,
+        const char *selection_name,
+        size_t max_bytes,
+        size_t *out_len) { return NULL; }
+#endif
 
+
+#ifndef WAYLANDIE_NO_XTEST
 static char *xtest_read_clipboard_auto(
         struct server_state *state,
         const char *requested_selection,
@@ -2788,6 +2964,16 @@ static char *xtest_read_clipboard_auto(
             max_bytes,
             out_len);
 }
+#else
+static char * xtest_read_clipboard_auto(
+        struct server_state *state,
+        const char *requested_selection,
+        int prefer_clipboard,
+        char *used_selection,
+        size_t used_selection_size,
+        size_t *out_len) { return NULL; }
+#endif
+
 
 static void handle_clipboard_request(struct server_state *state, const char *line) {
     char selection[32] = "auto";
@@ -3887,6 +4073,7 @@ int main(int argc, char **argv) {
         close(state.bridge_sock);
         state.bridge_sock = -1;
     }
+#ifndef WAYLANDIE_NO_XTEST
     if (state.xtest_display != NULL) {
         if (state.xtest_window != None) {
             XDestroyWindow(state.xtest_display, state.xtest_window);
@@ -3895,6 +4082,7 @@ int main(int argc, char **argv) {
         XCloseDisplay(state.xtest_display);
         state.xtest_display = NULL;
     }
+#endif
     double elapsed_ms = now_ms() - start_ms;
     double avg_present = state.commit_count > 0 ? state.total_present_ms / (double)state.commit_count : 0.0;
     double avg_app_wait = state.app_wait_samples > 0 ? state.total_app_wait_us / (double)state.app_wait_samples : 0.0;

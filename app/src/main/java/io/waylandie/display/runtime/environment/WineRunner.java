@@ -191,17 +191,45 @@ public final class WineRunner {
                 + new File(protonDir, "lib").getAbsolutePath() + ":"
                 + new File(protonDir, "files/lib").getAbsolutePath();
 
-        // Start bridge translator FIRST (in background, via glibc linker)
+        // Start bridge translator FIRST (in background).
+        //
+        // Two bridge variants exist:
+        //   1. Bionic bridge (PREFERRED): libwaylandie_bridge.so in nativeLibDir.
+        //      Compiled with NDK against bionic libc — no glibc, no SIGSYS.
+        //      Launched DIRECTLY via ProcessBuilder (no glibc linker needed).
+        //      This is the long-term fix for the Test F finding (libwayland-server
+        //      glibc constructor triggers SIGSYS).
+        //   2. Glibc bridge (FALLBACK): rootfs/usr/local/bin/waylandie-wayland-bridge.
+        //      Compiled inside the Focal rootfs against glibc libwayland-server.
+        //      Launched via libld_glibc.so --library-path ... (the original path).
+        //      Used when the bionic bridge isn't in the APK (e.g., older build
+        //      or bionic-libs/ was missing during the CMake step).
+        File bionicBridge = new File(nativeLibDir, "libwaylandie_bridge.so");
         File bridgeBin = new File(rootDir, "usr/local/bin/waylandie-wayland-bridge");
-        if (bridgeBin.exists()) {
+        boolean useBionicBridge = bionicBridge.exists();
+        if (useBionicBridge) {
+            bionicBridge.setExecutable(true, false);
+            Log.i(TAG, "Starting BIONIC bridge translator (direct launch, no glibc)…");
+        } else if (bridgeBin.exists()) {
             bridgeBin.setExecutable(true, false);
-            Log.i(TAG, "Starting bridge translator via native linker (background)…");
+            Log.i(TAG, "Bionic bridge not found — starting GLIBC bridge translator via native linker…");
+        } else {
+            Log.w(TAG, "Bridge translator not found (neither bionic " + bionicBridge + " nor glibc " + bridgeBin + ")");
+        }
+
+        if (useBionicBridge || bridgeBin.exists()) {
             try {
                 List<String> bridgeCmd = new ArrayList<>();
-                bridgeCmd.add(linker.getAbsolutePath());
-                bridgeCmd.add("--library-path");
-                bridgeCmd.add(libPath);
-                bridgeCmd.add(bridgeBin.getAbsolutePath());
+                if (useBionicBridge) {
+                    // Bionic bridge: direct launch (no linker, no --library-path)
+                    bridgeCmd.add(bionicBridge.getAbsolutePath());
+                } else {
+                    // Glibc bridge: launch via libld_glibc.so
+                    bridgeCmd.add(linker.getAbsolutePath());
+                    bridgeCmd.add("--library-path");
+                    bridgeCmd.add(libPath);
+                    bridgeCmd.add(bridgeBin.getAbsolutePath());
+                }
                 // Bridge requires 8 args (argc=9): bridge_socket, target_commits,
                 // socket_file, timeout_ms, clear_ahb, accept_client, output_width, output_height.
                 // Without all 8, the bridge prints a usage message to stderr and exits(2).
@@ -220,9 +248,14 @@ public final class WineRunner {
                 pbBridge.redirectErrorStream(true);
                 Map<String, String> bridgeEnv = pbBridge.environment();
                 bridgeEnv.clear();
-                setupEnvironment(bridgeEnv, rootDir, protonDir, isArm64ec, fexCoreInstalled);
+                // For bionic bridge, we still set up the environment variables
+                // (WAYLAND_DISPLAY, XDG_RUNTIME_DIR, etc.) but the bionic bridge
+                // doesn't need LD_LIBRARY_PATH or the LD_PRELOAD shim — those
+                // are glibc-specific. setupEnvironment() handles both paths.
+                setupEnvironment(bridgeEnv, rootDir, protonDir, isArm64ec, fexCoreInstalled, useBionicBridge);
                 Process bridgeProcess = pbBridge.start();
-                Log.i(TAG, "Bridge translator started (pid=" + getPid(bridgeProcess) + ")");
+                Log.i(TAG, "Bridge translator started (pid=" + getPid(bridgeProcess)
+                        + ", variant=" + (useBionicBridge ? "bionic" : "glibc") + ")");
 
                 // Capture bridge output — if the bridge crashes we need to see why
                 new Thread(() -> {
@@ -257,8 +290,6 @@ public final class WineRunner {
             } catch (IOException e) {
                 Log.w(TAG, "Bridge failed to start: " + e.getMessage());
             }
-        } else {
-            Log.w(TAG, "Bridge translator not found at " + bridgeBin);
         }
 
         // Build Wine command: linker --library-path libs wine exePath [args]
@@ -416,6 +447,24 @@ public final class WineRunner {
      */
     private void setupEnvironment(Map<String, String> env, File rootDir,
             File protonDir, boolean isArm64ec, boolean fexCoreInstalled) {
+        setupEnvironment(env, rootDir, protonDir, isArm64ec, fexCoreInstalled, false);
+    }
+
+    /**
+     * Sets up the process environment for native execution.
+     *
+     * @param useBionicBridge true if the bridge being launched is the bionic
+     *     variant (compiled with NDK against bionic libc). When true, the
+     *     glibc-specific environment variables (GLIBC_TUNABLES, LD_PRELOAD
+     *     shim, LD_LIBRARY_PATH pointing at glibc rootfs libs, /system/lib64)
+     *     are SKIPPED for the bridge process — they don't apply to a bionic
+     *     binary and would be actively harmful (LD_PRELOAD of a glibc shim
+     *     into a bionic binary would crash). Wine still gets the full glibc
+     *     environment via the 5-arg overload above.
+     */
+    private void setupEnvironment(Map<String, String> env, File rootDir,
+            File protonDir, boolean isArm64ec, boolean fexCoreInstalled,
+            boolean useBionicBridge) {
 
         File homeDir = new File(rootDir, "home/xuser");
         if (!homeDir.exists()) homeDir.mkdirs();
@@ -430,13 +479,19 @@ public final class WineRunner {
                 + new File(protonDir, "files/bin").getAbsolutePath() + ":"
                 + new File(rootDir, "usr/bin").getAbsolutePath() + ":"
                 + new File(rootDir, "usr/local/bin").getAbsolutePath());
-        // LD_LIBRARY_PATH — include both flat (lib/) and standard (files/lib) Proton layouts
-        env.put("LD_LIBRARY_PATH",
-                new File(rootDir, "usr/lib").getAbsolutePath() + ":"
-                + new File(rootDir, "usr/lib/aarch64-linux-gnu").getAbsolutePath() + ":"
-                + new File(rootDir, "usr/local/lib").getAbsolutePath() + ":"
-                + new File(protonDir, "lib").getAbsolutePath() + ":"
-                + new File(protonDir, "files/lib").getAbsolutePath());
+        // LD_LIBRARY_PATH — only relevant for glibc binaries (Wine + glibc bridge).
+        // The bionic bridge links against bionic libs in /system/lib64 (auto-found
+        // by linker64) and doesn't need LD_LIBRARY_PATH at all. Setting it to point
+        // at glibc rootfs libs would be actively harmful (linker64 might pick up
+        // glibc .so files and crash trying to load them).
+        if (!useBionicBridge) {
+            env.put("LD_LIBRARY_PATH",
+                    new File(rootDir, "usr/lib").getAbsolutePath() + ":"
+                    + new File(rootDir, "usr/lib/aarch64-linux-gnu").getAbsolutePath() + ":"
+                    + new File(rootDir, "usr/local/lib").getAbsolutePath() + ":"
+                    + new File(protonDir, "lib").getAbsolutePath() + ":"
+                    + new File(protonDir, "files/lib").getAbsolutePath());
+        }
         env.put("LANG", "en_US.UTF-8");
         env.put("TERM", "xterm-256color");
         env.put("TMPDIR", tmpDir.getAbsolutePath());
@@ -449,19 +504,30 @@ public final class WineRunner {
         // This kills the bridge (and Wine) before any output is produced.
         // Setting GLIBC_TUNABLES=glibc.pthread.rseq=0 tells glibc to skip rseq
         // registration, avoiding the blocked syscall entirely.
-        env.put("GLIBC_TUNABLES", "glibc.pthread.rseq=0");
+        //
+        // GLIBC_TUNABLES is glibc-only — bionic ignores it. Skip for the bionic
+        // bridge to keep the env clean (no harm in setting it, but cleaner).
+        if (!useBionicBridge) {
+            env.put("GLIBC_TUNABLES", "glibc.pthread.rseq=0");
+        }
 
         // CRITICAL: LD_PRELOAD syscall shim — intercepts syscalls blocked by
         // Android's seccomp filter (rseq, clone3, openat2, io_uring, etc.).
         // Test F showed libwayland-server 1.22 and libvulkan trigger SIGSYS
         // (exit 159). The shim returns ENOSYS so libraries fall back to
         // older methods. Compiled in build-imagefs.sh → /usr/local/lib/
-        File shimFile = new File(rootDir, "usr/local/lib/libwaylandie_shim.so");
-        if (shimFile.exists()) {
-            env.put("LD_PRELOAD", shimFile.getAbsolutePath());
-            Log.i(TAG, "LD_PRELOAD syscall shim: " + shimFile.getAbsolutePath());
-        } else {
-            Log.w(TAG, "libwaylandie_shim.so NOT FOUND — bridge/Wine may crash with SIGSYS");
+        //
+        // SKIP for bionic bridge: the shim is a glibc .so — LD_PRELOADing it
+        // into a bionic binary would crash (incompatible ABIs). The bionic
+        // bridge doesn't need the shim because it doesn't link against glibc.
+        if (!useBionicBridge) {
+            File shimFile = new File(rootDir, "usr/local/lib/libwaylandie_shim.so");
+            if (shimFile.exists()) {
+                env.put("LD_PRELOAD", shimFile.getAbsolutePath());
+                Log.i(TAG, "LD_PRELOAD syscall shim: " + shimFile.getAbsolutePath());
+            } else {
+                Log.w(TAG, "libwaylandie_shim.so NOT FOUND — bridge/Wine may crash with SIGSYS");
+            }
         }
 
         // Wine prefix — created during Proton install (prefixPack.txz unpacked there)
@@ -477,8 +543,11 @@ public final class WineRunner {
         env.put("GST_PLUGIN_PATH", new File(rootDir, "usr/lib/gstreamer-1.0").getAbsolutePath());
         env.put("XDG_DATA_DIRS", new File(rootDir, "usr/share").getAbsolutePath());
         env.put("XDG_CONFIG_DIRS", new File(rootDir, "usr/etc/xdg").getAbsolutePath());
-        // Add /system/lib64 to LD_LIBRARY_PATH — some glibc libs link against Android system libs
-        env.put("LD_LIBRARY_PATH", env.get("LD_LIBRARY_PATH") + ":/system/lib64");
+        // Add /system/lib64 to LD_LIBRARY_PATH — some glibc libs link against Android system libs.
+        // SKIP for bionic bridge (no LD_LIBRARY_PATH at all — see above).
+        if (!useBionicBridge) {
+            env.put("LD_LIBRARY_PATH", env.get("LD_LIBRARY_PATH") + ":/system/lib64");
+        }
         // Winlator-inspired env vars — Wine needs these for proper operation
         env.put("WINE_DISABLE_FULLSCREEN_HACK", "1");
         env.put("WINE_X11FORCEGLX", "1");

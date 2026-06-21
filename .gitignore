@@ -11,6 +11,10 @@ captures/
 app/.cxx/
 app/build/
 
+# Bionic bridge deps — built by tools/build-bionic-bridge.sh, cached by CI.
+# Don't commit (1MB of static .a files that rebuild in ~5 min).
+app/src/main/cpp/bionic-libs/
+
 # Keystore (don't accidentally commit a release keystore)
 !app/keystore/debug.keystore
 *.jks

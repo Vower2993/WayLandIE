@@ -214,6 +214,51 @@ jobs:
         with:
           packages: 'tools platform-tools platforms;android-34 build-tools;34.0.0 ndk;26.1.10909125 cmake;3.22.1'
 
+      # -----------------------------------------------------------------
+      # Bionic bridge dependencies — libffi + libwayland-server (static,
+      # bionic-compiled). The bridge itself is compiled by Gradle's
+      # externalNativeBuildDebug task; this step just produces the static
+      # libs that the CMakeLists.txt waylandie_bridge target links against.
+      #
+      # Cache key: hash of build-bionic-bridge.sh. If the script changes,
+      # the cache misses and the libs rebuild (~5 minutes). Otherwise the
+      # cache hits and the step is a no-op.
+      # -----------------------------------------------------------------
+      - name: Cache bionic bridge deps
+        id: cache-bionic-bridge
+        uses: actions/cache@v4
+        with:
+          path: app/src/main/cpp/bionic-libs
+          key: bionic-libs-${{ hashFiles('tools/build-bionic-bridge.sh', 'tools/android-aarch64-cross.txt', 'tools/build-machine-native.txt') }}-v1
+
+      - name: Install meson + ninja + wayland-scanner deps
+        if: steps.cache-bionic-bridge.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get install -y python3-pip libffi-dev libexpat1-dev libxml2-dev
+          pip3 install --user meson ninja
+
+      - name: Build bionic bridge deps (libffi + libwayland-server)
+        if: steps.cache-bionic-bridge.outputs.cache-hit != 'true'
+        run: |
+          echo "=== Building bionic bridge dependencies (libffi + libwayland-server) ==="
+          # meson + ninja installed to ~/.local/bin by pip --user
+          export PATH="$HOME/.local/bin:$PATH"
+          # Output goes to app/src/main/cpp/bionic-libs/ so the
+          # CMakeLists.txt waylandie_bridge target can find it.
+          OUTPUT_DIR="$(pwd)/app/src/main/cpp/bionic-libs" \
+            bash tools/build-bionic-bridge.sh
+          echo
+          echo "=== Verify bionic libs ==="
+          ls -la app/src/main/cpp/bionic-libs/lib/
+          ls app/src/main/cpp/bionic-libs/include/ | head
+
+      - name: Verify bionic bridge deps (cache hit)
+        if: steps.cache-bionic-bridge.outputs.cache-hit == 'true'
+        run: |
+          echo "✓ bionic-libs restored from cache"
+          ls -la app/src/main/cpp/bionic-libs/lib/libwayland-server.a
+          ls -la app/src/main/cpp/bionic-libs/lib/libffi.a
+
       - name: Restore JDK 17 as default JAVA_HOME
         run: |
           echo "JAVA_HOME=$JAVA_HOME_17_X64" >> $GITHUB_ENV

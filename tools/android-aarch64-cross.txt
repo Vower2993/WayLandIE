@@ -1,0 +1,39 @@
+# ---------------------------------------------------------------------------
+# Meson cross-file for building native libraries with the Android NDK r26d
+# (NDK 26.1.10909125) targeting arm64-v8a (aarch64-linux-android33).
+#
+# Used by tools/build-bionic-bridge.sh to build libwayland-server (and its
+# libffi dependency) as bionic static libraries that the WaylandIE bridge
+# can link against without pulling in any glibc code.
+#
+# Usage:
+#   meson setup build \
+#     --prefix=/tmp/bionic-libs \
+#     --cross-file tools/android-aarch64-cross.txt \
+#     ...
+#
+# NOTE: The NDK path below uses an absolute path. If the NDK is installed
+# elsewhere, edit NDK_ROOT or override via the NDK_ROOT environment variable.
+# ---------------------------------------------------------------------------
+
+[binaries]
+c         = '@NDK_ROOT@/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android33-clang'
+cpp       = '@NDK_ROOT@/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android33-clang++'
+ar        = '@NDK_ROOT@/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar'
+strip     = '@NDK_ROOT@/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip'
+nm        = '@NDK_ROOT@/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm'
+ranlib    = '@NDK_ROOT@/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ranlib'
+ld        = '@NDK_ROOT@/toolchains/llvm/prebuilt/linux-x86_64/bin/ld'
+pkgconfig = '/usr/bin/pkg-config'
+
+[host_machine]
+system    = 'android'
+cpu_family = 'aarch64'
+cpu       = 'aarch64'
+endian    = 'little'
+
+[properties]
+# NDK r26 sysroot (contains bionic libc, libm, libdl, liblog, etc.)
+sys_root  = '@NDK_ROOT@/toolchains/llvm/prebuilt/linux-x86_64/sysroot'
+# Skip runtime dependency checks — Android doesn't have a typical pkg-config setup
+needs_exe_wrapper = false

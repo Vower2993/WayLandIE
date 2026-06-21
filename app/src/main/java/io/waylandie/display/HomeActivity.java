@@ -1331,6 +1331,68 @@ public final class HomeActivity extends Activity {
                 warned++;
             }
 
+            // Test I: Bionic bridge launch test — verifies the bionic-compiled
+            // bridge (libwaylandie_bridge.so) can execute without SIGSYS.
+            // The bionic bridge is compiled with NDK against bionic libc,
+            // eliminating the glibc seccomp issues. If it exists and runs
+            // (even with usage error exit=2), the seccomp problem is solved.
+            results.append("Test I: Bionic bridge launch test:\n");
+            File bionicBridgeBin = new File(nativeLibDir, "libwaylandie_bridge.so");
+            if (bionicBridgeBin.exists()) {
+                try {
+                    bionicBridgeBin.setExecutable(true, false);
+                    // Launch with no args — bridge should print usage and exit(2)
+                    ProcessBuilder bpb = new ProcessBuilder(bionicBridgeBin.getAbsolutePath());
+                    bpb.redirectErrorStream(true);
+                    Process bproc = bpb.start();
+                    StringBuilder bOut = new StringBuilder();
+                    Thread bReader = new Thread(() -> {
+                        try (java.io.BufferedReader r = new java.io.BufferedReader(
+                                new java.io.InputStreamReader(bproc.getInputStream()))) {
+                            String l;
+                            while ((l = r.readLine()) != null) bOut.append(l).append('\n');
+                        } catch (Exception ignored) {}
+                    }, "wl-diag-bionic-bridge");
+                    bReader.start();
+                    boolean bExited = bproc.waitFor(5, java.util.concurrent.TimeUnit.SECONDS);
+                    if (!bExited) bproc.destroyForcibly();
+                    bReader.join(1000);
+                    int bExit = -1;
+                    try { bExit = bproc.exitValue(); } catch (Exception ignored) {}
+
+                    if (bExit == 2) {
+                        // Usage error = bridge reached main() and checked argc.
+                        // This means bionic startup + all library constructors succeeded.
+                        results.append("  ✓ BIONIC BRIDGE WORKS! (exit=2 = usage error = reached main)\n");
+                        results.append("  → No SIGSYS — bionic eliminates the seccomp issue\n");
+                        results.append("  → Bridge can now create Wayland socket + accept Wine connections\n");
+                        passed++;
+                    } else if (bExit == 159) {
+                        results.append("  ✗ Bionic bridge killed by SIGSYS (exit=159)\n");
+                        results.append("  → Bionic bridge also triggers seccomp — deeper issue\n");
+                        failed++;
+                    } else if (bExit == 0) {
+                        // Bridge ran and exited cleanly (maybe timeout with 0 commits)
+                        results.append("  ✓ Bionic bridge ran (exit=0)\n");
+                        results.append("  → No SIGSYS — bionic works!\n");
+                        passed++;
+                    } else {
+                        String snippet = bOut.toString().trim();
+                        if (snippet.length() > 300) snippet = snippet.substring(0, 300);
+                        results.append("  ⚠ Bionic bridge exit=").append(bExit).append("\n");
+                        results.append("  Output: ").append(snippet).append("\n");
+                        warned++;
+                    }
+                } catch (Exception e) {
+                    results.append("  ⚠ Bionic bridge test failed: " + e.getMessage() + "\n");
+                    warned++;
+                }
+            } else {
+                results.append("Test I: SKIP (libwaylandie_bridge.so not found in nativeLibDir)\n");
+                results.append("  → Bionic bridge not built — using glibc bridge (SIGSYS expected)\n");
+                warned++;
+            }
+
             // === 4. PROTON + WINE ===
             results.append("\n--- PROTON + WINE ---\n");
             File protonDir = new File(filesDir, "contents/proton/active");

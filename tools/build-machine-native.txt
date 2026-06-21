@@ -1,0 +1,24 @@
+# ---------------------------------------------------------------------------
+# Meson native-file for the BUILD machine (x86_64 host).
+#
+# In a cross-compile, meson uses the cross-file for the target (host_machine)
+# and the native-file for the build machine. wayland's meson.build uses
+# `dependency('wayland-scanner', native: true)` which meson resolves against
+# the BUILD machine — but meson's pkg-config call for the native machine
+# does NOT inherit the shell's PKG_CONFIG_PATH. We have to set it inside
+# the native file via [built-in options].
+#
+# This file is referenced via --native-file in tools/build-bionic-bridge.sh.
+# The HOST_PKGCONFIG_DIR placeholder is sed-replaced at build time to point
+# at the actual pkgconfig dir containing wayland-scanner.pc.
+# ---------------------------------------------------------------------------
+
+[binaries]
+wayland-scanner = '/tmp/host-wl/bin/wayland-scanner'
+
+[built-in options]
+# Tell meson's pkg-config (for the build machine) where to find
+# wayland-scanner.pc. The placeholder HOST_PKGCONFIG_DIR is replaced
+# by tools/build-bionic-bridge.sh before meson runs.
+pkg_config_path = 'HOST_PKGCONFIG_DIR'
+
