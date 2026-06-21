@@ -292,12 +292,37 @@ public final class WineRunner {
             }
         }
 
-        // Build Wine command: linker --library-path libs wine exePath [args]
+        // Build Wine command.
+        //
+        // BIONIC Wine (e.g. Armec Proton): launch DIRECTLY via ProcessBuilder.
+        //   - Wine's ELF interpreter is /system/bin/linker64 (Android's bionic linker)
+        //   - linker64 honors LD_LIBRARY_PATH for finding libwine.so etc.
+        //   - Using libld_glibc.so here would fail with exit 127 — the glibc
+        //     linker can't load bionic binaries.
+        //
+        // GLIBC Wine (legacy, compiled for Ubuntu rootfs): launch via the
+        // libld_glibc.so linker trick:
+        //   libld_glibc.so --library-path <rootfs-libs> wine exePath
+        //   - Wine's ELF interpreter is /lib/ld-linux-aarch64.so.1 (glibc)
+        //   - We can't exec it directly because Android SELinux blocks execve
+        //     of binaries with glibc interpreter from app data dirs
+        //   - So we launch the glibc linker (packaged as libld_glibc.so in
+        //     nativeLibraryDir, where SELinux allows execve) and pass it
+        //     --library-path + the wine binary path
+        boolean bionicWine = isBionicWine(wineBin);
+        Log.i(TAG, "Wine variant: " + (bionicWine ? "BIONIC (direct launch)" : "GLIBC (via libld_glibc.so)"));
+
         List<String> cmd = new ArrayList<>();
-        cmd.add(linker.getAbsolutePath());
-        cmd.add("--library-path");
-        cmd.add(libPath);
-        cmd.add(wineBin.getAbsolutePath());
+        if (bionicWine) {
+            // Bionic Wine: direct launch (no linker, no --library-path)
+            cmd.add(wineBin.getAbsolutePath());
+        } else {
+            // Glibc Wine: launch via libld_glibc.so
+            cmd.add(linker.getAbsolutePath());
+            cmd.add("--library-path");
+            cmd.add(libPath);
+            cmd.add(wineBin.getAbsolutePath());
+        }
         cmd.add(exePath);
         if (extraArgs != null) {
             for (String arg : extraArgs) cmd.add(arg);
@@ -311,7 +336,11 @@ public final class WineRunner {
 
         Map<String, String> env = pb.environment();
         env.clear();
-        setupEnvironment(env, rootDir, protonDir, isArm64ec, fexCoreInstalled);
+        // For bionic Wine, skip the glibc-specific env vars (LD_PRELOAD shim,
+        // GLIBC_TUNABLES) — they're glibc-only and would crash a bionic binary.
+        // Reuse the useBionicBridge flag in setupEnvironment — it controls
+        // exactly the same env vars.
+        setupEnvironment(env, rootDir, protonDir, isArm64ec, fexCoreInstalled, bionicWine);
 
         // Override WAYLAND_DISPLAY with the actual socket name the bridge
         // created (e.g. "wayland-0") — setupEnvironment() sets it to the
@@ -664,4 +693,62 @@ public final class WineRunner {
             return false;
         }
     }
+    /**
+     * Detects whether a Wine binary is bionic-compiled (built with Android NDK,
+     * ELF interpreter = /system/bin/linker64) vs glibc-compiled (interpreter
+     * = /lib/ld-linux-aarch64.so.1).
+     *
+     * <p>Bionic Wine must be launched DIRECTLY via ProcessBuilder — no
+     * libld_glibc.so linker trick. The glibc linker can't load bionic binaries
+     * (different ABI, different linker protocol) and exits with code 127.
+     *
+     * <p>Detection: read PT_INTERP from the ELF program headers. On arm64,
+     * the program headers start at offset e_phoff (0x20 + 0x10 = 0x30 for
+     * 64-bit ELF header). Each program header is 56 bytes. PT_INTERP = 3.
+     */
+    private static boolean isBionicWine(File wineBin) {
+        try (java.io.RandomAccessFile raf = new java.io.RandomAccessFile(wineBin, "r")) {
+            if (raf.length() < 64) return false;
+            // ELF header: e_phoff at offset 0x20 (8 bytes, little-endian)
+            raf.seek(0x20);
+            long ePhoff = raf.readLong();  // already little-endian on arm64
+            // e_phentsize at 0x36 (2 bytes), e_phnum at 0x38 (2 bytes)
+            raf.seek(0x36);
+            int ePhentsize = raf.readUnsignedShort();  // little-endian
+            raf.seek(0x38);
+            int ePhnum = raf.readUnsignedShort();  // little-endian
+
+            // Read program headers, look for PT_INTERP (type = 3)
+            for (int i = 0; i < ePhnum; i++) {
+                long phdrOffset = ePhoff + (i * ePhentsize);
+                raf.seek(phdrOffset);
+                int pType = raf.readInt();  // little-endian on arm64
+                if (pType == 3) {  // PT_INTERP
+                    // p_offset at phdrOffset + 8 (8 bytes)
+                    raf.seek(phdrOffset + 8);
+                    long pOffset = raf.readLong();
+                    // p_filesz at phdrOffset + 32 (8 bytes)
+                    raf.seek(phdrOffset + 32);
+                    long pFilesz = raf.readLong();
+                    // Read the interpreter string
+                    raf.seek(pOffset);
+                    byte[] interp = new byte[(int) pFilesz];
+                    raf.readFully(interp);
+                    String interpStr = new String(interp, "UTF-8").trim();
+                    Log.i(TAG, "Wine ELF interpreter: " + interpStr);
+                    // Bionic linker is /system/bin/linker64
+                    // Glibc linker is /lib/ld-linux-aarch64.so.1
+                    return interpStr.contains("linker64") || interpStr.contains("/system/bin/");
+                }
+            }
+            Log.w(TAG, "Wine ELF: no PT_INTERP found (statically linked?)");
+            // Statically linked binaries don't need a linker — launch directly
+            return true;
+        } catch (Exception e) {
+            Log.w(TAG, "isBionicWine check failed: " + e.getMessage());
+            return false;  // assume glibc on error (safer default for our setup)
+        }
+    }
+
+
 }
