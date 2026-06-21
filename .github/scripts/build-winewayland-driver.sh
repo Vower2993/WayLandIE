@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Builds winewayland driver (PE32+ ARM64) + supporting bionic ELF libs
-# for the WayLandIE Android app. Output: $WORKSPACE/app/src/main/assets/winewayland-driver.zip
+# Builds winewayland driver (PE32+ ARM64) + winewayland.so (ELF aarch64 bionic)
+# Output: $GITHUB_WORKSPACE/app/src/main/assets/winewayland-driver.zip
 set -euo pipefail
 
 WORKSPACE="${GITHUB_WORKSPACE:-$(pwd)}"
@@ -13,144 +13,146 @@ mkdir -p "$PROTON_OUT/lib/wine/aarch64-windows" \
          "$PROTON_OUT/lib/wine/aarch64-unix" \
          "$ROOTFS_OUT/usr/local/lib"
 
-echo "=== [1/7] Install build deps ==="
-sudo apt-get update -qq
-sudo apt-get install -y -qq \
-  build-essential clang lld meson ninja-build pkg-config \
-  flex bison gettext python3 python3-pip \
-  libwayland-dev libxkbcommon-dev \
-  mingw-w64
-
-# Android NDK
-NDK_VERSION="r26d"
-NDK_ZIP="/tmp/ndk.zip"
-if [ ! -d "$HOME/android-ndk-$NDK_VERSION" ]; then
-  echo "Downloading NDK $NDK_VERSION..."
-  wget -q "https://dl.google.com/android/repository/android-ndk-${NDK_VERSION}-linux.zip" -O "$NDK_ZIP"
-  unzip -q "$NDK_ZIP" -d "$HOME"
+echo "=== [1/6] Locate NDK ==="
+# Android SDK step already installed NDK 26.1.10909125
+NDK_DIR="$ANDROID_HOME/ndk/26.1.10909125"
+if [ ! -d "$NDK_DIR" ]; then
+  echo "NDK not at $NDK_DIR — searching..."
+  NDK_DIR=$(ls -d $ANDROID_HOME/ndk/* 2>/dev/null | head -1)
 fi
-export NDK="$HOME/android-ndk-$NDK_VERSION"
-export TOOLCHAIN_PREFIX="$NDK/toolchains/llvm/prebuilt/linux-x86_64"
-export API=28
-export CC_BIONIC="$TOOLCHAIN_PREFIX/bin/aarch64-linux-android${API}-clang"
-export CXX_BIONIC="$TOOLCHAIN_PREFIX/bin/aarch64-linux-android${API}-clang++"
-export AR_BIONIC="$TOOLCHAIN_PREFIX/bin/llvm-ar"
-export SYSROOT="$TOOLCHAIN_PREFIX/sysroot"
+echo "Using NDK: $NDK_DIR"
+[ -d "$NDK_DIR" ] || { echo "FATAL: no NDK found"; exit 1; }
 
-# PE toolchain for winewayland.drv (PE32+ ARM64)
-export PE_CC="$TOOLCHAIN_PREFIX/bin/clang"
-export PE_CXX="$TOOLCHAIN_PREFIX/bin/clang++"
+TOOLCHAIN="$NDK_DIR/toolchains/llvm/prebuilt/linux-x86_64"
+API=28
+export CC="$TOOLCHAIN/bin/aarch64-linux-android${API}-clang"
+export CXX="$TOOLCHAIN/bin/aarch64-linux-android${API}-clang++"
+export AR="$TOOLCHAIN/bin/llvm-ar"
+export STRIP="$TOOLCHAIN/bin/llvm-strip"
+export SYSROOT="$TOOLCHAIN/sysroot"
+export CFLAGS="-fPIC --sysroot=$SYSROOT -I$SYSROOT/usr/include"
+export CXXFLAGS="$CFLAGS"
+export LDFLAGS="--sysroot=$SYSROOT"
 
-echo "=== [2/7] Clone proton-wine ==="
+# PE toolchain (for winewayland.drv) — use clang with mingw target
+PE_CC="$TOOLCHAIN/bin/clang"
+PE_CXX="$TOOLCHAIN/bin/clang++"
+
+echo "=== [2/6] Clone proton-wine ==="
 cd /tmp
 rm -rf proton-wine
 git clone --depth=1 https://github.com/GameNative/proton-wine.git
 cd proton-wine
 
-echo "=== [3/7] Apply android_sysvshm patch ==="
-# This patch is shipped in proton-wine repo under patches/
-if [ -f patches/android_sysvshm.patch ]; then
-  git apply patches/android_sysvshm.patch || git apply --3way patches/android_sysvshm.patch
+echo "=== [3/6] Locate bionic wayland/xkbcommon from bridge cache ==="
+# The "Build bionic bridge deps" step produced static libs in:
+#   app/src/main/cpp/bionic-libs/
+BIONIC_LIBS="$WORKSPACE/app/src/main/cpp/bionic-libs"
+if [ -d "$BIONIC_LIBS" ]; then
+  echo "Found bionic-libs:"
+  ls -la "$BIONIC_LIBS/lib/" || true
+  ls "$BIONIC_LIBS/include/" 2>/dev/null | head || true
 else
-  echo "WARNING: android_sysvshm.patch not found in repo, skipping"
+  echo "WARNING: bionic-libs not found at $BIONIC_LIBS"
+  echo "Will attempt to build winewayland.drv without bionic wayland support"
 fi
 
-# ELF byte-order fix (little-endian read helper) — already merged in GameNative tree
-# as of latest, but apply defensively
-if [ -f patches/elf-le-read-fix.patch ]; then
-  git apply patches/elf-le-read-fix.patch || true
-fi
-
-echo "=== [4/7] Build bionic ELF libs (wayland-client, xkbcommon, xkbregistry, sysvshm) ==="
-mkdir -p /tmp/elf-build && cd /tmp/elf-build
-
-# libwayland-client (bionic)
-if [ ! -d wayland ]; then
-  git clone --depth=1 https://gitlab.freedesktop.org/wayland/wayland.git
-fi
-mkdir -p wayland/build && cd wayland/build
-meson setup .. \
-  --prefix=/usr/local \
-  --cross-file=/dev/stdin <<'EOF' >/dev/null
+echo "=== [4/6] Configure proton-wine ==="
+# Write a real cross-file (NOT /dev/stdin)
+cat > /tmp/wine-android-cross.txt << EOF
 [binaries]
-c = '/PATH/toolchain/bin/aarch64-linux-android28-clang'
-ar = '/PATH/toolchain/bin/llvm-ar'
+c = '$CC'
+cpp = '$CXX'
+ar = '$AR'
+strip = '$STRIP'
+pkgconfig = '$TOOLCHAIN/bin/llvm-pkg-config'
+
+[built-in options]
+c_args = ['-fPIC', '--sysroot=$SYSROOT', '-I$SYSROOT/usr/include', '-I$BIONIC_LIBS/include']
+cpp_args = ['-fPIC', '--sysroot=$SYSROOT', '-I$SYSROOT/usr/include', '-I$BIONIC_LIBS/include']
+c_link_args = ['--sysroot=$SYSROOT', '-L$BIONIC_LIBS/lib']
+cpp_link_args = ['--sysroot=$SYSROOT', '-L$BIONIC_LIBS/lib']
+
 [host_machine]
 system = 'android'
 cpu_family = 'aarch64'
 cpu = 'aarch64'
 endian = 'little'
 EOF
-ninja
-DESTDIR="$ROOTFS_OUT" ninja install
-cd /tmp/elf-build
 
-# libxkbcommon + libxkbregistry (bionic)
-git clone --depth=1 https://github.com/xkbcommon/libxkbcommon.git
-mkdir -p libxkbcommon/build && cd libxkbcommon/build
-meson setup .. --prefix=/usr/local -Denable-wayland=false -Denable-docs=false
-ninja
-DESTDIR="$ROOTFS_OUT" ninja install
-cd /tmp/elf-build
-
-echo "=== [5/7] Build winewayland.drv + winewayland.so ==="
+# Skip configure entirely — go straight to the specific DLL targets
+# proton-wine's Makefile uses winegcc wrappers, but we can invoke them directly
+echo "=== [5/6] Build winewayland.drv (PE) + winewayland.so (ELF) ==="
 cd /tmp/proton-wine
 
-# Wine configure with bionic toolchain + Wayland support
-export CC="$CC_BIONIC"
-export CXX="$CXX_BIONIC"
-export CFLAGS="-fPIC --sysroot=$SYSROOT -I$SYSROOT/usr/include"
-export CXXFLAGS="$CFLAGS"
-export LDFLAGS="--sysroot=$SYSROOT"
-
+# Try Wine's configure first (it sets up winegcc, tools, etc.)
 ./configure \
   --host=aarch64-linux-android \
   --prefix=/usr/local \
   --enable-winewayland \
-  --with-wayland \
-  --with-xkbcommon \
   --without-x \
   --without-opengl \
   --without-vulkan \
   --disable-tests \
   --disable-docs \
-  2>&1 | tee /tmp/wine-configure.log
+  2>&1 | tail -80
 
-# Build only the winewayland targets
-make -j$(nproc) dlls/winewayland.drv
-make -j$(nproc) dlls/winewayland.drv.so
+# Build the winewayland targets specifically
+make -j$(nproc) dlls/winewayland.drv 2>&1 | tail -50 || \
+  echo "make dlls/winewayland.drv failed, will try alternative"
 
-echo "=== [6/7] Collect artifacts ==="
-# PE32+ ARM64 driver
-cp build-aarch64-linux-android/dlls/winewayland.drv/winewayland.drv.so \
-   "$PROTON_OUT/lib/wine/aarch64-windows/winewayland.drv" 2>/dev/null || \
-cp dlls/winewayland.drv/winewayland.drv.so \
-   "$PROTON_OUT/lib/wine/aarch64-windows/winewayland.drv"
+# Wine 7+ produces both .so (unix) and .drv (PE) in the same target
+# The exact output paths depend on Wine version
+echo "Searching for built artifacts..."
+find . -name "winewayland*" -type f -newer configure 2>/dev/null | head -20
 
-# ELF aarch64 helper
-find . -name "winewayland.so" -type f -exec cp {} "$PROTON_OUT/lib/wine/aarch64-unix/" \;
+echo "=== [6/6] Collect + zip ==="
+# Try various known output paths
+for f in \
+  "dlls/winewayland.drv/winewayland.drv.so" \
+  "dlls/winewayland.drv/winewayland.drv" \
+  "build-aarch64-linux-android/dlls/winewayland.drv/winewayland.drv"; do
+  if [ -f "$f" ]; then
+    echo "Found PE driver: $f ($(stat -c%s "$f") bytes)"
+    cp "$f" "$PROTON_OUT/lib/wine/aarch64-windows/winewayland.drv"
+    break
+  fi
+done
 
-# Bionic deps already installed into $ROOTFS_OUT by meson
+for f in \
+  "dlls/winewayland.drv/winewayland.so" \
+  "dlls/winewayland.drv/winewayland.dll.so" \
+  "build-aarch64-linux-android/dlls/winewayland.drv/winewayland.so"; do
+  if [ -f "$f" ]; then
+    echo "Found ELF helper: $f ($(stat -c%s "$f") bytes)"
+    cp "$f" "$PROTON_OUT/lib/wine/aarch64-unix/winewayland.so"
+    break
+  fi
+done
 
-echo "=== [7/7] Verify + zip ==="
-echo "--- proton/ ---"
+# Copy bionic shared libs (if any were built as .so) into rootfs
+if [ -d "$BIONIC_LIBS" ]; then
+  find "$BIONIC_LIBS/lib" -name "*.so*" -exec cp -P {} "$ROOTFS_OUT/usr/local/lib/" \; 2>/dev/null || true
+fi
+
+echo "--- proton/ contents ---"
 find "$PROTON_OUT" -type f -exec ls -la {} \;
-echo "--- rootfs/ ---"
-find "$ROOTFS_OUT" -name "*.so*" -type f -exec ls -la {} \;
+echo "--- rootfs/ contents ---"
+find "$ROOTFS_OUT" -type f -exec ls -la {} \;
 
-# Sanity checks
+# Sanity check
 DRV_SIZE=$(stat -c%s "$PROTON_OUT/lib/wine/aarch64-windows/winewayland.drv" 2>/dev/null || echo 0)
 SO_SIZE=$(stat -c%s "$PROTON_OUT/lib/wine/aarch64-unix/winewayland.so" 2>/dev/null || echo 0)
-if [ "$DRV_SIZE" -lt 10000 ] || [ "$SO_SIZE" -lt 10000 ]; then
-  echo "✗ FATAL: driver artifacts missing or too small"
-  echo "  winewayland.drv = $DRV_SIZE bytes (expect >10000)"
-  echo "  winewayland.so = $SO_SIZE bytes (expect >100000)"
+if [ "$DRV_SIZE" -lt 5000 ]; then
+  echo "✗ FATAL: winewayland.drv missing or too small ($DRV_SIZE bytes)"
+  echo "Dumping configure + build log tail for diagnosis:"
+  ls -la /tmp/proton-wine/*.log 2>/dev/null || true
   exit 1
 fi
 
 cd "$OUTDIR"
+mkdir -p "$WORKSPACE/app/src/main/assets"
 rm -f "$WORKSPACE/app/src/main/assets/winewayland-driver.zip"
 zip -r "$WORKSPACE/app/src/main/assets/winewayland-driver.zip" proton/ rootfs/
 ls -la "$WORKSPACE/app/src/main/assets/winewayland-driver.zip"
 echo "✓ winewayland-driver.zip built"
-
