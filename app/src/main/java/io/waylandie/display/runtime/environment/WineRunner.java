@@ -524,6 +524,83 @@ public final class WineRunner {
             Log.i(TAG, "FEXCore arm64ec: HODLL=libarm64ecfex.dll");
         }
 
+        // CRITICAL: Fix library loading for bionic Wine.
+        //
+        // Bionic Wine (linker64) CANNOT load glibc-compiled .so files from the
+        // rootfs. When Wine calls dlopen("libvulkan.so.1"), linker64 finds the
+        // glibc version in rootfs/usr/lib/aarch64-linux-gnu/ but can't load it
+        // (wrong ABI — glibc ELF depends on libc.so.6 which bionic doesn't have).
+        // It then searches /system/lib64/ but Android has libvulkan.so (no .1
+        // suffix), so dlopen("libvulkan.so.1") fails.
+        //
+        // Fix: replace the glibc libvulkan.so.1 with a symlink to Android's
+        // system libvulkan.so. Bionic linker64 CAN load /system/lib64/libvulkan.so
+        // (it's bionic-compiled). The system Vulkan loader then finds the GPU
+        // driver automatically (Adreno or Turnip via adrenotools).
+        try {
+            File vulkanGlibc = new File(rootDir, "usr/lib/aarch64-linux-gnu/libvulkan.so.1");
+            File androidVulkan = new File("/system/lib64/libvulkan.so");
+            if (vulkanGlibc.exists() && androidVulkan.exists()) {
+                // Remove glibc version and replace with symlink to Android's bionic version
+                vulkanGlibc.delete();
+                java.nio.file.Files.createSymbolicLink(
+                        vulkanGlibc.toPath(),
+                        androidVulkan.toPath());
+                Log.i(TAG, "Replaced glibc libvulkan.so.1 with symlink to "
+                        + androidVulkan.getAbsolutePath());
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "Failed to symlink libvulkan.so.1: " + e.getMessage());
+        }
+
+        // Also fix libvulkan.so (unversioned) — same issue
+        try {
+            File vulkanSo = new File(rootDir, "usr/lib/aarch64-linux-gnu/libvulkan.so");
+            File androidVulkan = new File("/system/lib64/libvulkan.so");
+            if (vulkanSo.exists() && androidVulkan.exists()) {
+                vulkanSo.delete();
+                java.nio.file.Files.createSymbolicLink(
+                        vulkanSo.toPath(),
+                        androidVulkan.toPath());
+                Log.i(TAG, "Replaced glibc libvulkan.so with symlink to Android system");
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "Failed to symlink libvulkan.so: " + e.getMessage());
+        }
+
+        // Log what display drivers are available in the Wine prefix.
+        // Wine needs winewayland.drv (for Wayland) or winex11.drv (for X11).
+        // Without a display driver, Wine can't create windows → nodrv_CreateWindow.
+        try {
+            File system32 = new File(
+                    new File(rootDir, "home/xuser/.wine"),
+                    "drive_c/windows/system32");
+            if (system32.isDirectory()) {
+                File[] drvFiles = system32.listFiles(
+                        (dir, name) -> name.endsWith(".drv"));
+                if (drvFiles != null) {
+                    for (File drv : drvFiles) {
+                        Log.i(TAG, "Wine display driver available: " + drv.getName()
+                                + " (" + drv.length() + " bytes)");
+                        io.waylandie.display.shared.util.LogRingBuffer.append(
+                                "[trace] Wine .drv: " + drv.getName()
+                                + " (" + drv.length() + " bytes)");
+                    }
+                } else {
+                    Log.w(TAG, "No .drv files found in Wine prefix system32/ — "
+                            + "Wine cannot create windows without a display driver");
+                }
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "Failed to list .drv files: " + e.getMessage());
+        }
+
+        // Log key env vars for debugging
+        Log.i(TAG, "Wine env: WAYLAND_DISPLAY=" + env.get("WAYLAND_DISPLAY")
+                + " XDG_RUNTIME_DIR=" + env.get("XDG_RUNTIME_DIR")
+                + " VK_ICD_FILENAMES=" + env.get("VK_ICD_FILENAMES")
+                + " LD_LIBRARY_PATH=" + env.get("LD_LIBRARY_PATH"));
+
         Process p = pb.start();
 
         // Capture Wine output (CRITICAL for debugging)
