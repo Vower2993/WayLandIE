@@ -90,8 +90,8 @@ public final class HomeActivity extends Activity {
     // the user can inspect its status and forcibly kill it from the
     // home screen. Both fields are reset (null / -1) when the process
     // is detected to have exited (via Refresh).
-    private Process runningWineProcess;
-    private int winePid = -1;
+    private volatile Process runningWineProcess;
+    private volatile int winePid = -1;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -307,9 +307,9 @@ public final class HomeActivity extends Activity {
                 // BridgeLocalServer. On a cold start or activity recreation,
                 // this can take 10-20 seconds. We poll every 500ms for up to
                 // 30 seconds.
-                log("Waiting for Android bridge socket to be ready…");
                 final String BRIDGE_SOCKET = "waylandie.display.bridge.v1";
                 boolean bridgeReady = false;
+                runOnUiThread(() -> log("Waiting for Android bridge socket to be ready…"));
                 for (int i = 0; i < 60; i++) {  // 60 × 500ms = 30s max
                     try {
                         android.net.LocalSocket probe = new android.net.LocalSocket();
@@ -318,7 +318,8 @@ public final class HomeActivity extends Activity {
                                 android.net.LocalSocketAddress.Namespace.ABSTRACT));
                         probe.close();
                         bridgeReady = true;
-                        log("✓ Android bridge socket ready (after " + (i * 500) + "ms)");
+                        final int ms = i * 500;
+                        runOnUiThread(() -> log("Android bridge socket ready (after " + ms + "ms)"));
                         break;
                     } catch (IOException notReady) {
                         // Not ready yet — wait and retry
@@ -328,8 +329,8 @@ public final class HomeActivity extends Activity {
                     }
                 }
                 if (!bridgeReady) {
-                    log("⚠ Android bridge socket NOT ready after 30s — launching anyway "
-                            + "(game may not display)");
+                    runOnUiThread(() -> log("WARNING: Android bridge socket NOT ready after 30s — "
+                            + "launching anyway (game may not display)"));
                 }
 
                 String[] extraArgs = gamescopeFinal ? new String[]{"--gamescope"} : new String[0];
