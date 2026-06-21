@@ -296,6 +296,42 @@ public final class HomeActivity extends Activity {
         final boolean useProtonFinal = useProton;
         new Thread(() -> {
             try {
+                // CRITICAL: Wait for the Android bridge socket to be listening
+                // BEFORE launching Wine. The bionic bridge connects to the
+                // Android display bridge via abstract socket
+                // "waylandie.display.bridge.v1". If the Android side isn't
+                // listening yet, the bridge gets ECONNREFUSED (errno 111)
+                // and the game never displays.
+                //
+                // The Android bridge starts in MainActivity.onCreate() via
+                // BridgeLocalServer. On a cold start or activity recreation,
+                // this can take 10-20 seconds. We poll every 500ms for up to
+                // 30 seconds.
+                log("Waiting for Android bridge socket to be ready…");
+                final String BRIDGE_SOCKET = "waylandie.display.bridge.v1";
+                boolean bridgeReady = false;
+                for (int i = 0; i < 60; i++) {  // 60 × 500ms = 30s max
+                    try {
+                        android.net.LocalSocket probe = new android.net.LocalSocket();
+                        probe.connect(new android.net.LocalSocketAddress(
+                                BRIDGE_SOCKET,
+                                android.net.LocalSocketAddress.Namespace.ABSTRACT));
+                        probe.close();
+                        bridgeReady = true;
+                        log("✓ Android bridge socket ready (after " + (i * 500) + "ms)");
+                        break;
+                    } catch (IOException notReady) {
+                        // Not ready yet — wait and retry
+                    }
+                    try { Thread.sleep(500); } catch (InterruptedException ignored) {
+                        break;
+                    }
+                }
+                if (!bridgeReady) {
+                    log("⚠ Android bridge socket NOT ready after 30s — launching anyway "
+                            + "(game may not display)");
+                }
+
                 String[] extraArgs = gamescopeFinal ? new String[]{"--gamescope"} : new String[0];
                 io.waylandie.display.runtime.environment.GameLaunchTracer tracer =
                         new io.waylandie.display.runtime.environment.GameLaunchTracer(HomeActivity.this);
