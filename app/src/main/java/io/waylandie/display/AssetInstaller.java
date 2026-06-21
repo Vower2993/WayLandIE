@@ -52,31 +52,53 @@ final class AssetInstaller {
         AssetManager am = context.getAssets();
         copyAssetTree(am, ASSET_ROOT, root);
 
-        // Also push the scripts to the public Downloads folder so bundled rootfs can
-        // see them after app launch has been run. On Android 13+
-        // this requires MANAGE_EXTERNAL_STORAGE to be granted to WayLandIE.
-        // If the permission is not granted, fall back to app-private external
-        // storage at /sdcard/Android/data/io.waylandie.display/files/Download/
-        // which bundled rootfs can still read after app launch.
-        File publicRoot = new File(
-                android.os.Environment.getExternalStorageDirectory(),
-                "Download/WayLandIE/linux-runtime");
-        if (!publicRoot.exists() && !publicRoot.mkdirs()) {
-            Log.w(TAG, "Failed to mkdir public " + publicRoot
-                    + " (MANAGE_EXTERNAL_STORAGE not granted?)");
-            // Fall back to app-private external storage.
-            publicRoot = new File(
-                    context.getExternalFilesDir(android.os.Environment.DIRECTORY_DOWNLOADS),
-                    "WayLandIE/linux-runtime");
-            if (!publicRoot.exists() && !publicRoot.mkdirs()) {
-                Log.w(TAG, "Failed to mkdir app-private external " + publicRoot);
-            } else {
-                copyAssetTree(am, ASSET_ROOT, publicRoot);
-                Log.i(TAG, "Assets also written to app-private external: " + publicRoot);
+        // Also push the scripts to a location the bundled rootfs can read.
+        //
+        // CRITICAL: On Android 13+, writing to /storage/emulated/0/Download/
+        // requires MANAGE_EXTERNAL_STORAGE. The old code tried mkdirs() first
+        // and used the result to decide — but mkdirs() can return TRUE even
+        // when the directory isn't writable (e.g. dir already exists from a
+        // previous install, but app lost permission). This caused EACCES
+        // crashes in copyFile() when trying to write waylandie-audio etc.
+        //
+        // Fix: explicitly check MANAGE_EXTERNAL_STORAGE first. If not granted,
+        // skip public storage entirely and use app-private external storage
+        // (getExternalFilesDir) which needs NO permission and is always writable.
+        boolean hasManageStorage = android.os.Environment.isExternalStorageManager();
+        if (hasManageStorage) {
+            // Permission granted — use public Downloads folder (visible to rootfs
+            // via /sdcard bind mount).
+            File publicRoot = new File(
+                    android.os.Environment.getExternalStorageDirectory(),
+                    "Download/WayLandIE/linux-runtime");
+            try {
+                if (!publicRoot.exists() && !publicRoot.mkdirs()) {
+                    Log.w(TAG, "mkdirs failed for " + publicRoot);
+                } else {
+                    copyAssetTree(am, ASSET_ROOT, publicRoot);
+                    Log.i(TAG, "Assets also written to public: " + publicRoot);
+                }
+            } catch (IOException e) {
+                Log.w(TAG, "Public storage write failed (permission revoked?): " + e.getMessage());
             }
         } else {
-            copyAssetTree(am, ASSET_ROOT, publicRoot);
-            Log.i(TAG, "Assets also written to public: " + publicRoot);
+            // No MANAGE_EXTERNAL_STORAGE — use app-private external storage.
+            // This is always writable, no permission needed.
+            // Path: /sdcard/Android/data/io.waylandie.display/files/Download/WayLandIE/linux-runtime
+            File privateRoot = new File(
+                    context.getExternalFilesDir(android.os.Environment.DIRECTORY_DOWNLOADS),
+                    "WayLandIE/linux-runtime");
+            try {
+                if (!privateRoot.exists() && !privateRoot.mkdirs()) {
+                    Log.w(TAG, "mkdirs failed for " + privateRoot);
+                } else {
+                    copyAssetTree(am, ASSET_ROOT, privateRoot);
+                    Log.i(TAG, "Assets written to app-private external (no MANAGE_EXTERNAL_STORAGE): "
+                            + privateRoot);
+                }
+            } catch (IOException e) {
+                Log.w(TAG, "App-private external write failed: " + e.getMessage());
+            }
         }
         return root;
     }
