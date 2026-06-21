@@ -709,45 +709,127 @@ public final class WineRunner {
     private static boolean isBionicWine(File wineBin) {
         try (java.io.RandomAccessFile raf = new java.io.RandomAccessFile(wineBin, "r")) {
             if (raf.length() < 64) return false;
-            // ELF header: e_phoff at offset 0x20 (8 bytes, little-endian)
-            raf.seek(0x20);
-            long ePhoff = raf.readLong();  // already little-endian on arm64
-            // e_phentsize at 0x36 (2 bytes), e_phnum at 0x38 (2 bytes)
-            raf.seek(0x36);
-            int ePhentsize = raf.readUnsignedShort();  // little-endian
-            raf.seek(0x38);
-            int ePhnum = raf.readUnsignedShort();  // little-endian
+            // CRITICAL: arm64 ELF is LITTLE-ENDIAN, but Java's RandomAccessFile
+            // reads BIG-ENDIAN by default. We must read bytes manually and
+            // assemble them in little-endian order — same pattern as
+            // isArm64ecWine() above.
 
-            // Read program headers, look for PT_INTERP (type = 3)
+            // ELF64 header layout (offsets):
+            //   0x00: e_ident[16]   (magic + class + data + version + padding)
+            //   0x10: e_type        (2 bytes)
+            //   0x12: e_machine     (2 bytes)
+            //   0x14: e_version     (4 bytes)
+            //   0x18: e_entry       (8 bytes)
+            //   0x20: e_phoff       (8 bytes) — program header table offset
+            //   0x28: e_shoff       (8 bytes)
+            //   0x30: e_flags       (4 bytes)
+            //   0x34: e_ehsize      (2 bytes)
+            //   0x36: e_phentsize   (2 bytes) — program header entry size
+            //   0x38: e_phnum       (2 bytes) — number of program headers
+            //   0x3A: e_shentsize   (2 bytes)
+            //   0x3C: e_shnum       (2 bytes)
+            //   0x3E: e_shstrndx    (2 bytes)
+
+            // Read e_phoff (8 bytes, LE) at offset 0x20
+            raf.seek(0x20);
+            long ePhoff = readLongLE(raf);
+            // Read e_phentsize (2 bytes, LE) at offset 0x36
+            raf.seek(0x36);
+            int ePhentsize = readUShortLE(raf);
+            // Read e_phnum (2 bytes, LE) at offset 0x38
+            raf.seek(0x38);
+            int ePhnum = readUShortLE(raf);
+
+            Log.i(TAG, "Wine ELF: e_phoff=" + ePhoff + " e_phentsize=" + ePhentsize + " e_phnum=" + ePhnum);
+
+            // Sanity check: arm64 ELF should have e_phentsize=56 and e_phnum < 256
+            if (ePhentsize != 56 || ePhnum <= 0 || ePhnum > 256) {
+                Log.w(TAG, "Wine ELF: invalid program header table (e_phentsize="
+                        + ePhentsize + ", e_phnum=" + ePhnum + ") — assuming glibc");
+                return false;
+            }
+
+            // Program header entry layout (ELF64, 56 bytes):
+            //   0x00: p_type   (4 bytes) — segment type
+            //   0x04: p_flags  (4 bytes)
+            //   0x08: p_offset (8 bytes) — segment offset in file
+            //   0x10: p_vaddr  (8 bytes)
+            //   0x18: p_paddr  (8 bytes)
+            //   0x20: p_filesz (8 bytes) — segment size in file
+            //   0x28: p_memsz  (8 bytes)
+            //   0x30: p_align  (8 bytes)
+
+            // Scan program headers for PT_INTERP (type = 3)
             for (int i = 0; i < ePhnum; i++) {
-                long phdrOffset = ePhoff + (i * ePhentsize);
+                long phdrOffset = ePhoff + ((long) i * ePhentsize);
                 raf.seek(phdrOffset);
-                int pType = raf.readInt();  // little-endian on arm64
+                int pType = readIntLE(raf);
                 if (pType == 3) {  // PT_INTERP
-                    // p_offset at phdrOffset + 8 (8 bytes)
+                    // p_offset at phdrOffset + 8 (8 bytes, LE)
                     raf.seek(phdrOffset + 8);
-                    long pOffset = raf.readLong();
-                    // p_filesz at phdrOffset + 32 (8 bytes)
+                    long pOffset = readLongLE(raf);
+                    // p_filesz at phdrOffset + 32 (8 bytes, LE)
                     raf.seek(phdrOffset + 32);
-                    long pFilesz = raf.readLong();
+                    long pFilesz = readLongLE(raf);
+
+                    Log.i(TAG, "Wine ELF: PT_INTERP found at phdr[" + i
+                            + "] p_offset=" + pOffset + " p_filesz=" + pFilesz);
+
+                    if (pFilesz <= 0 || pFilesz > 4096) {
+                        Log.w(TAG, "Wine ELF: PT_INTERP has invalid p_filesz=" + pFilesz);
+                        return false;
+                    }
                     // Read the interpreter string
                     raf.seek(pOffset);
                     byte[] interp = new byte[(int) pFilesz];
                     raf.readFully(interp);
                     String interpStr = new String(interp, "UTF-8").trim();
-                    Log.i(TAG, "Wine ELF interpreter: " + interpStr);
+                    Log.i(TAG, "Wine ELF interpreter: '" + interpStr + "'");
                     // Bionic linker is /system/bin/linker64
-                    // Glibc linker is /lib/ld-linux-aarch64.so.1
-                    return interpStr.contains("linker64") || interpStr.contains("/system/bin/");
+                    // Glibc linker is /lib/ld-linux-aarch64.so.1 (or similar)
+                    boolean isBionic = interpStr.contains("linker64")
+                            || interpStr.contains("/system/bin/");
+                    Log.i(TAG, "Wine variant detected: " + (isBionic ? "BIONIC" : "GLIBC"));
+                    return isBionic;
                 }
             }
-            Log.w(TAG, "Wine ELF: no PT_INTERP found (statically linked?)");
-            // Statically linked binaries don't need a linker — launch directly
-            return true;
+            Log.w(TAG, "Wine ELF: no PT_INTERP found (statically linked?) — assuming glibc");
+            return false;  // statically linked is rare; safer to assume glibc
+                            // (glibc linker trick will fail loudly if wrong)
         } catch (Exception e) {
             Log.w(TAG, "isBionicWine check failed: " + e.getMessage());
             return false;  // assume glibc on error (safer default for our setup)
         }
+    }
+
+    /** Reads a 2-byte little-endian unsigned short from RandomAccessFile. */
+    private static int readUShortLE(java.io.RandomAccessFile raf) throws IOException {
+        int lo = raf.readUnsignedByte();
+        int hi = raf.readUnsignedByte();
+        return (hi << 8) | lo;
+    }
+
+    /** Reads a 4-byte little-endian int from RandomAccessFile. */
+    private static int readIntLE(java.io.RandomAccessFile raf) throws IOException {
+        int b0 = raf.readUnsignedByte();
+        int b1 = raf.readUnsignedByte();
+        int b2 = raf.readUnsignedByte();
+        int b3 = raf.readUnsignedByte();
+        return (b3 << 24) | (b2 << 16) | (b1 << 8) | b0;
+    }
+
+    /** Reads an 8-byte little-endian long from RandomAccessFile. */
+    private static long readLongLE(java.io.RandomAccessFile raf) throws IOException {
+        long b0 = raf.readUnsignedByte();
+        long b1 = raf.readUnsignedByte();
+        long b2 = raf.readUnsignedByte();
+        long b3 = raf.readUnsignedByte();
+        long b4 = raf.readUnsignedByte();
+        long b5 = raf.readUnsignedByte();
+        long b6 = raf.readUnsignedByte();
+        long b7 = raf.readUnsignedByte();
+        return (b7 << 56) | (b6 << 48) | (b5 << 40) | (b4 << 32)
+                | (b3 << 24) | (b2 << 16) | (b1 << 8) | b0;
     }
 
 
