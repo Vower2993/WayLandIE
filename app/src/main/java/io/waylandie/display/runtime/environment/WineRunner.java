@@ -615,6 +615,12 @@ public final class WineRunner {
     }
 
     private static long getPid(Process p) {
+        // Java 9+ Process.pid() — supported on Android API 26+
+        try {
+            return p.pid();
+        } catch (Exception ignored) {
+            // Fall back to reflection for very old runtimes (unlikely on Android 16)
+        }
         try {
             java.lang.reflect.Field pidField = p.getClass().getDeclaredField("pid");
             pidField.setAccessible(true);
