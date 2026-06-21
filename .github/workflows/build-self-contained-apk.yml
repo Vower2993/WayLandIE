@@ -252,6 +252,10 @@ jobs:
           ls -la app/src/main/cpp/bionic-libs/lib/
           ls app/src/main/cpp/bionic-libs/include/ | head
 
+      - name: Build winewayland driver (PE + bionic ELF)
+        run: |
+          bash .github/scripts/build-winewayland-driver.sh
+
       - name: Verify bionic bridge deps (cache hit)
         if: steps.cache-bionic-bridge.outputs.cache-hit == 'true'
         run: |
