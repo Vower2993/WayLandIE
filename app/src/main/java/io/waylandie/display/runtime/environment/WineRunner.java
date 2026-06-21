@@ -524,53 +524,142 @@ public final class WineRunner {
             Log.i(TAG, "FEXCore arm64ec: HODLL=libarm64ecfex.dll");
         }
 
-        // CRITICAL: Fix library loading for bionic Wine.
-        //
-        // Bionic Wine (linker64) CANNOT load glibc-compiled .so files from the
-        // rootfs. When Wine calls dlopen("libvulkan.so.1"), linker64 finds the
-        // glibc version in rootfs/usr/lib/aarch64-linux-gnu/ but can't load it
-        // (wrong ABI — glibc ELF depends on libc.so.6 which bionic doesn't have).
-        // It then searches /system/lib64/ but Android has libvulkan.so (no .1
-        // suffix), so dlopen("libvulkan.so.1") fails.
-        //
-        // Fix: replace the glibc libvulkan.so.1 with a symlink to Android's
-        // system libvulkan.so. Bionic linker64 CAN load /system/lib64/libvulkan.so
-        // (it's bionic-compiled). The system Vulkan loader then finds the GPU
-        // driver automatically (Adreno or Turnip via adrenotools).
+        // =================================================================
+        // COMPREHENSIVE BIONIC LIBRARY FIX + RUNTIME DIAGNOSTICS
+        // =================================================================
+        // Bionic Wine (linker64) cannot load glibc-compiled .so files.
+        // Create bionic-compatible symlinks in usr/local/lib (FIRST in
+        // LD_LIBRARY_PATH for bionic) pointing to Android system libs.
+        // Then run a full diagnostic dump of every component Wine needs.
+        // =================================================================
         try {
-            File vulkanGlibc = new File(rootDir, "usr/lib/aarch64-linux-gnu/libvulkan.so.1");
-            File androidVulkan = new File("/system/lib64/libvulkan.so");
-            if (vulkanGlibc.exists() && androidVulkan.exists()) {
-                // Remove glibc version and replace with symlink to Android's bionic version
-                vulkanGlibc.delete();
-                java.nio.file.Files.createSymbolicLink(
-                        vulkanGlibc.toPath(),
-                        androidVulkan.toPath());
-                Log.i(TAG, "Replaced glibc libvulkan.so.1 with symlink to "
-                        + androidVulkan.getAbsolutePath());
+            File localLib = new File(rootDir, "usr/local/lib");
+            if (!localLib.exists()) localLib.mkdirs();
+
+            // --- Create bionic-compatible symlinks ---
+            String[][] symlinks = {
+                // {symlink name, Android system lib path, description}
+                {"libvulkan.so.1", "/system/lib64/libvulkan.so", "Vulkan loader"},
+                {"libvulkan.so",   "/system/lib64/libvulkan.so", "Vulkan (unversioned)"},
+                {"libfreetype.so.6", "/system/lib64/libfreetype.so", "FreeType fonts"},
+                {"libfreetype.so",   "/system/lib64/libfreetype.so", "FreeType (unversioned)"},
+                {"libX11.so.6",    "/system/lib64/libX11.so", "X11 (if Android has it)"},
+                {"libX11.so",      "/system/lib64/libX11.so", "X11 (unversioned)"},
+            };
+            for (String[] sl : symlinks) {
+                File symlink = new File(localLib, sl[0]);
+                File target = new File(sl[1]);
+                if (target.exists()) {
+                    if (symlink.exists()) {
+                        symlink.delete();
+                    }
+                    try {
+                        java.nio.file.Files.createSymbolicLink(
+                                symlink.toPath(), target.toPath());
+                        Log.i(TAG, "  symlink ✓ " + sl[0] + " → " + sl[1]
+                                + " (" + sl[2] + ")");
+                        io.waylandie.display.shared.util.LogRingBuffer.append(
+                                "[diag] symlink ✓ " + sl[0] + " → " + sl[1]);
+                    } catch (Exception e) {
+                        Log.w(TAG, "  symlink ✗ " + sl[0] + ": " + e.getMessage());
+                    }
+                } else {
+                    Log.w(TAG, "  symlink ✗ " + sl[0] + " — target not found: " + sl[1]
+                            + " (" + sl[2] + " — Wine will fail to load this)");
+                    io.waylandie.display.shared.util.LogRingBuffer.append(
+                            "[diag] symlink ✗ " + sl[0] + " — target missing: " + sl[1]);
+                }
             }
         } catch (Exception e) {
-            Log.w(TAG, "Failed to symlink libvulkan.so.1: " + e.getMessage());
+            Log.w(TAG, "Bionic symlink setup failed: " + e.getMessage());
         }
 
-        // Also fix libvulkan.so (unversioned) — same issue
-        try {
-            File vulkanSo = new File(rootDir, "usr/lib/aarch64-linux-gnu/libvulkan.so");
-            File androidVulkan = new File("/system/lib64/libvulkan.so");
-            if (vulkanSo.exists() && androidVulkan.exists()) {
-                vulkanSo.delete();
-                java.nio.file.Files.createSymbolicLink(
-                        vulkanSo.toPath(),
-                        androidVulkan.toPath());
-                Log.i(TAG, "Replaced glibc libvulkan.so with symlink to Android system");
+        // =================================================================
+        // RUNTIME DIAGNOSTICS — dump every component Wine needs
+        // =================================================================
+        Log.i(TAG, "========== WINE RUNTIME DIAGNOSTICS ==========");
+        io.waylandie.display.shared.util.LogRingBuffer.append("[diag] ===== WINE RUNTIME DIAGNOSTICS =====");
+
+        // 1. Wine binary info
+        Log.i(TAG, "[diag] Wine binary: " + wineBin.getAbsolutePath()
+                + " (" + wineBin.length() + " bytes)");
+        io.waylandie.display.shared.util.LogRingBuffer.append(
+                "[diag] Wine binary: " + wineBin.length() + " bytes");
+
+        // 2. Wine ELF interpreter (bionic vs glibc)
+        try (java.io.RandomAccessFile raf = new java.io.RandomAccessFile(wineBin, "r")) {
+            raf.seek(0x20);
+            long ePhoff = 0;
+            for (int i = 7; i >= 0; i--) ePhoff = (ePhoff << 8) | raf.readUnsignedByte();
+            raf.seek(0x36);
+            int ePhentsize = raf.readUnsignedByte() | (raf.readUnsignedByte() << 8);
+            raf.seek(0x38);
+            int ePhnum = raf.readUnsignedByte() | (raf.readUnsignedByte() << 8);
+            for (int i = 0; i < ePhnum; i++) {
+                long phdrOff = ePhoff + ((long) i * ePhentsize);
+                raf.seek(phdrOff);
+                int pType = raf.readUnsignedByte() | (raf.readUnsignedByte() << 8)
+                        | (raf.readUnsignedByte() << 16) | (raf.readUnsignedByte() << 24);
+                if (pType == 3) {
+                    raf.seek(phdrOff + 8);
+                    long pOffset = 0;
+                    for (int b = 7; b >= 0; b--) pOffset = (pOffset << 8) | raf.readUnsignedByte();
+                    raf.seek(phdrOff + 32);
+                    long pFilesz = 0;
+                    for (int b = 7; b >= 0; b--) pFilesz = (pFilesz << 8) | raf.readUnsignedByte();
+                    raf.seek(pOffset);
+                    byte[] interp = new byte[(int) pFilesz];
+                    raf.readFully(interp);
+                    String interpStr = new String(interp, "UTF-8").trim();
+                    Log.i(TAG, "[diag] Wine ELF interpreter: " + interpStr);
+                    io.waylandie.display.shared.util.LogRingBuffer.append(
+                            "[diag] Wine interpreter: " + interpStr);
+                    break;
+                }
             }
         } catch (Exception e) {
-            Log.w(TAG, "Failed to symlink libvulkan.so: " + e.getMessage());
+            Log.w(TAG, "[diag] Failed to read Wine ELF: " + e.getMessage());
         }
 
-        // Log what display drivers are available in the Wine prefix.
-        // Wine needs winewayland.drv (for Wayland) or winex11.drv (for X11).
-        // Without a display driver, Wine can't create windows → nodrv_CreateWindow.
+        // 3. Key environment variables
+        String[] envKeys = {"LD_LIBRARY_PATH", "PATH", "HOME", "WINEPREFIX",
+                "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "VK_ICD_FILENAMES",
+                "VK_LAYER_PATH", "WINEDLLOVERRIDES", "HODLL", "PROTONPATH"};
+        for (String key : envKeys) {
+            String val = env.get(key);
+            String logLine = "[diag] ENV " + key + "=" + (val != null ? val : "(unset)");
+            Log.i(TAG, logLine);
+            io.waylandie.display.shared.util.LogRingBuffer.append(logLine);
+        }
+
+        // 4. Critical library check — verify each lib Wine needs is findable
+        String ldPath = env.get("LD_LIBRARY_PATH");
+        if (ldPath != null) {
+            String[] criticalLibs = {
+                "libvulkan.so.1", "libvulkan.so",
+                "libfreetype.so.6", "libfreetype.so",
+                "libwine.so", "libwine.so.1",
+                "libX11.so.6", "libwayland-client.so.0"
+            };
+            for (String lib : criticalLibs) {
+                boolean found = false;
+                String foundAt = null;
+                for (String dir : ldPath.split(":")) {
+                    File f = new File(dir, lib);
+                    if (f.exists()) {
+                        found = true;
+                        foundAt = dir;
+                        break;
+                    }
+                }
+                String status = found ? "✓ found at " + foundAt : "✗ NOT FOUND in LD_LIBRARY_PATH";
+                Log.i(TAG, "[diag] LIB " + lib + ": " + status);
+                io.waylandie.display.shared.util.LogRingBuffer.append(
+                        "[diag] LIB " + lib + ": " + status);
+            }
+        }
+
+        // 5. Display drivers (.drv files in Wine prefix)
         try {
             File system32 = new File(
                     new File(rootDir, "home/xuser/.wine"),
@@ -578,28 +667,124 @@ public final class WineRunner {
             if (system32.isDirectory()) {
                 File[] drvFiles = system32.listFiles(
                         (dir, name) -> name.endsWith(".drv"));
-                if (drvFiles != null) {
+                if (drvFiles != null && drvFiles.length > 0) {
                     for (File drv : drvFiles) {
-                        Log.i(TAG, "Wine display driver available: " + drv.getName()
-                                + " (" + drv.length() + " bytes)");
-                        io.waylandie.display.shared.util.LogRingBuffer.append(
-                                "[trace] Wine .drv: " + drv.getName()
-                                + " (" + drv.length() + " bytes)");
+                        String logLine = "[diag] DRV " + drv.getName() + " (" + drv.length() + " bytes)";
+                        Log.i(TAG, logLine);
+                        io.waylandie.display.shared.util.LogRingBuffer.append(logLine);
                     }
                 } else {
-                    Log.w(TAG, "No .drv files found in Wine prefix system32/ — "
-                            + "Wine cannot create windows without a display driver");
+                    String logLine = "[diag] DRV ✗ NO .drv files in Wine prefix — Wine CANNOT create windows";
+                    Log.w(TAG, logLine);
+                    io.waylandie.display.shared.util.LogRingBuffer.append(logLine);
                 }
+                // Also check for DXVK DLLs
+                String[] dxvkDlls = {"d3d9.dll", "d3d10core.dll", "d3d11.dll", "dxgi.dll"};
+                for (String dll : dxvkDlls) {
+                    File dllFile = new File(system32, dll);
+                    String logLine = "[diag] DXVK " + dll + ": "
+                            + (dllFile.exists()
+                                ? "✓ (" + dllFile.length() + " bytes)"
+                                : "✗ MISSING — DXVK won't work for this API");
+                    Log.i(TAG, logLine);
+                    io.waylandie.display.shared.util.LogRingBuffer.append(logLine);
+                }
+                // Check FEX DLL
+                File fexDll = new File(system32, "libarm64ecfex.dll");
+                String fexLine = "[diag] FEX " + fexDll.getName() + ": "
+                        + (fexDll.exists()
+                            ? "✓ (" + fexDll.length() + " bytes)"
+                            : "✗ MISSING — x86_64 emulation won't work");
+                Log.i(TAG, fexLine);
+                io.waylandie.display.shared.util.LogRingBuffer.append(fexLine);
+            } else {
+                Log.w(TAG, "[diag] Wine prefix system32/ not found at " + system32);
             }
         } catch (Exception e) {
-            Log.w(TAG, "Failed to list .drv files: " + e.getMessage());
+            Log.w(TAG, "[diag] Failed to check .drv/.dll: " + e.getMessage());
         }
 
-        // Log key env vars for debugging
-        Log.i(TAG, "Wine env: WAYLAND_DISPLAY=" + env.get("WAYLAND_DISPLAY")
-                + " XDG_RUNTIME_DIR=" + env.get("XDG_RUNTIME_DIR")
-                + " VK_ICD_FILENAMES=" + env.get("VK_ICD_FILENAMES")
-                + " LD_LIBRARY_PATH=" + env.get("LD_LIBRARY_PATH"));
+        // 6. Vulkan ICD JSON check
+        String icdPath = env.get("VK_ICD_FILENAMES");
+        if (icdPath != null) {
+            File icdFile = new File(icdPath);
+            String logLine = "[diag] VK_ICD " + icdFile.getName() + ": "
+                    + (icdFile.exists()
+                        ? "✓ exists (" + icdFile.length() + " bytes)"
+                        : "✗ MISSING — Vulkan driver won't be found");
+            Log.i(TAG, logLine);
+            io.waylandie.display.shared.util.LogRingBuffer.append(logLine);
+            // Read ICD JSON to see what driver it points to
+            if (icdFile.exists()) {
+                try {
+                    String json = new String(java.nio.file.Files.readAllBytes(icdFile.toPath()));
+                    Log.i(TAG, "[diag] VK_ICD content: " + json.trim());
+                    io.waylandie.display.shared.util.LogRingBuffer.append("[diag] VK_ICD JSON: " + json.trim());
+                } catch (Exception e) {
+                    Log.w(TAG, "[diag] Failed to read ICD JSON: " + e.getMessage());
+                }
+            }
+        } else {
+            Log.w(TAG, "[diag] VK_ICD_FILENAMES not set — Vulkan driver auto-discovery only");
+        }
+
+        // 7. Turnip driver check
+        File turnipSo = new File(rootDir, "usr/local/lib/libvulkan_freedreno.so");
+        String turnipLine = "[diag] Turnip libvulkan_freedreno.so: "
+                + (turnipSo.exists()
+                    ? "✓ (" + turnipSo.length() + " bytes)"
+                    : "✗ MISSING — no GPU driver will load");
+        Log.i(TAG, turnipLine);
+        io.waylandie.display.shared.util.LogRingBuffer.append(turnipLine);
+
+        // 8. Wayland socket check
+        File socketFile = new File(runtimeDir, "socket-name.txt");
+        String socketLine = "[diag] Wayland socket: "
+                + (socketFile.exists()
+                    ? "✓ name=" + new String(java.nio.file.Files.readAllBytes(socketFile.toPath())).trim()
+                    : "✗ socket-name.txt not written — bridge may have failed");
+        Log.i(TAG, socketLine);
+        io.waylandie.display.shared.util.LogRingBuffer.append(socketLine);
+
+        // 9. Android bridge socket check
+        try {
+            android.net.LocalSocket probe = new android.net.LocalSocket();
+            probe.connect(new android.net.LocalSocketAddress(
+                    "waylandie.display.bridge.v1",
+                    android.net.LocalSocketAddress.Namespace.ABSTRACT));
+            probe.close();
+            Log.i(TAG, "[diag] Android bridge socket: ✓ listening");
+            io.waylandie.display.shared.util.LogRingBuffer.append("[diag] Android bridge: ✓ listening");
+        } catch (Exception e) {
+            Log.w(TAG, "[diag] Android bridge socket: ✗ " + e.getMessage());
+            io.waylandie.display.shared.util.LogRingBuffer.append("[diag] Android bridge: ✗ " + e.getMessage());
+        }
+
+        // 10. Proton lib/ contents (Wine's own .so files)
+        File protonLib = new File(protonDir, "lib");
+        if (protonLib.isDirectory()) {
+            File[] libs = protonLib.listFiles();
+            if (libs != null) {
+                Log.i(TAG, "[diag] Proton lib/ (" + libs.length + " items):");
+                io.waylandie.display.shared.util.LogRingBuffer.append(
+                        "[diag] Proton lib/: " + libs.length + " items");
+                for (File lib : libs) {
+                    String name = lib.getName();
+                    // Only log .so files + dirs
+                    if (name.endsWith(".so") || lib.isDirectory()) {
+                        String logLine = "[diag]   " + name
+                                + (lib.isDirectory() ? "/" : " (" + lib.length() + " bytes)");
+                        Log.i(TAG, logLine);
+                        io.waylandie.display.shared.util.LogRingBuffer.append(logLine);
+                    }
+                }
+            }
+        } else {
+            Log.w(TAG, "[diag] Proton lib/ not found at " + protonLib);
+        }
+
+        Log.i(TAG, "========== END WINE RUNTIME DIAGNOSTICS ==========");
+        io.waylandie.display.shared.util.LogRingBuffer.append("[diag] ===== END DIAGNOSTICS =====");
 
         Process p = pb.start();
 
@@ -762,12 +947,18 @@ public final class WineRunner {
                 + new File(protonDir, "files/bin").getAbsolutePath() + ":"
                 + new File(rootDir, "usr/bin").getAbsolutePath() + ":"
                 + new File(rootDir, "usr/local/bin").getAbsolutePath());
-        // LD_LIBRARY_PATH — only relevant for glibc binaries (Wine + glibc bridge).
-        // The bionic bridge links against bionic libs in /system/lib64 (auto-found
-        // by linker64) and doesn't need LD_LIBRARY_PATH at all. Setting it to point
-        // at glibc rootfs libs would be actively harmful (linker64 might pick up
-        // glibc .so files and crash trying to load them).
-        if (!useBionicBridge) {
+        // LD_LIBRARY_PATH — controls where dynamic linker searches for .so.
+        // BIONIC Wine (linker64): CANNOT load glibc .so files. Needs only
+        //   bionic-compatible paths: usr/local/lib (symlinks), proton/lib,
+        //   /system/lib64. Do NOT include usr/lib/aarch64-linux-gnu (glibc).
+        // GLIBC Wine (ld-linux): needs full rootfs lib paths.
+        if (useBionicBridge) {
+            env.put("LD_LIBRARY_PATH",
+                    new File(rootDir, "usr/local/lib").getAbsolutePath() + ":"
+                    + new File(protonDir, "lib").getAbsolutePath() + ":"
+                    + new File(protonDir, "files/lib").getAbsolutePath() + ":"
+                    + "/system/lib64");
+        } else {
             env.put("LD_LIBRARY_PATH",
                     new File(rootDir, "usr/lib").getAbsolutePath() + ":"
                     + new File(rootDir, "usr/lib/aarch64-linux-gnu").getAbsolutePath() + ":"
@@ -806,8 +997,8 @@ public final class WineRunner {
         env.put("GST_PLUGIN_PATH", new File(rootDir, "usr/lib/gstreamer-1.0").getAbsolutePath());
         env.put("XDG_DATA_DIRS", new File(rootDir, "usr/share").getAbsolutePath());
         env.put("XDG_CONFIG_DIRS", new File(rootDir, "usr/etc/xdg").getAbsolutePath());
-        // Add /system/lib64 to LD_LIBRARY_PATH — some glibc libs link against Android system libs.
-        // SKIP for bionic bridge (no LD_LIBRARY_PATH at all — see above).
+        // /system/lib64 already included in bionic path above.
+        // For glibc path, append it here.
         if (!useBionicBridge) {
             env.put("LD_LIBRARY_PATH", env.get("LD_LIBRARY_PATH") + ":/system/lib64");
         }
