@@ -2,7 +2,7 @@
 #
 # This workflow:
 #   1. Sets up QEMU binfmt for arm64 cross-build (rootfs built on x86_64 runner)
-#   2. Builds the imagefs.tar.xz rootfs (~160 MB, cached between runs)
+#   2. Builds the imagefs.tar.gz rootfs (~160 MB, cached between runs)
 #   3. Verifies proot binary (already bundled in repo — no download needed)
 #   4. Builds the APK with everything bundled (~170 MB APK)
 #   5. Uploads the APK as an artifact
@@ -66,11 +66,11 @@ jobs:
         run: |
           echo "=== Building imagefs rootfs (this takes ~20 minutes) ==="
           sudo bash tools/build-imagefs.sh
-          if [ ! -f app/src/main/assets/imagefs/imagefs.tar.xz ]; then
+          if [ ! -f app/src/main/assets/imagefs/imagefs.tar.gz ]; then
             echo "ERROR: imagefs.tar.gz not created" >&2
             exit 1
           fi
-          SIZE=$(stat -c%s app/src/main/assets/imagefs/imagefs.tar.xz)
+          SIZE=$(stat -c%s app/src/main/assets/imagefs/imagefs.tar.gz)
           echo "✓ imagefs.tar.gz created ($SIZE bytes, $(numfmt --to=iec $SIZE))"
           if [ "$SIZE" -lt 33554432 ]; then
             echo "ERROR: imagefs.tar.gz is suspiciously small (< 50 MB)" >&2
@@ -80,7 +80,7 @@ jobs:
       - name: Verify imagefs cache hit
         if: steps.cache-imagefs.outputs.cache-hit == 'true'
         run: |
-          echo "✓ imagefs.tar.xz restored from cache"
+          echo "✓ imagefs.tar.gz restored from cache"
           ls -la app/src/main/assets/imagefs/imagefs.tar.gz
 
       - name: Extract glibc linker to jniLibs
@@ -91,17 +91,17 @@ jobs:
           mkdir -p /tmp/wl-linker-extract
           # List all ld-linux files in the tarball for debugging
           echo "  Searching for ld-linux in tarball…"
-          xz -dc app/src/main/assets/imagefs/imagefs.tar.xz 2>/dev/null | \
+          gzip -dc app/src/main/assets/imagefs/imagefs.tar.gz 2>/dev/null | \
             tar -tf - 2>/dev/null | grep "ld-linux" | head -10 || true
           # CRITICAL: The ld-linux-aarch64.so.1 entries in the tarball are SYMLINKS
           # pointing to ld-2.31.so (the REAL ELF). We must extract ld-2.31.so too.
           # Use tar -h (dereference) to extract symlink TARGETS as real files.
           echo "  Extracting ld-linux + ld-2.31.so (dereferenced)…"
           # Pattern matches both ld-linux-aarch64.so.1 (symlink) and ld-2.31.so (real)
-          xz -dc app/src/main/assets/imagefs/imagefs.tar.xz 2>/dev/null | \
+          gzip -dc app/src/main/assets/imagefs/imagefs.tar.gz 2>/dev/null | \
             tar -xhf - -C /tmp/wl-linker-extract \
               --wildcards "*ld-linux-aarch64*" 2>/dev/null || true
-          xz -dc app/src/main/assets/imagefs/imagefs.tar.xz 2>/dev/null | \
+          gzip -dc app/src/main/assets/imagefs/imagefs.tar.gz 2>/dev/null | \
             tar -xhf - -C /tmp/wl-linker-extract \
               --wildcards "*ld-2.*.so" 2>/dev/null || true
           echo "  Extracted files:"
@@ -275,9 +275,9 @@ jobs:
       - name: Verify all bundled assets present
         run: |
           echo "=== Pre-build verification ==="
-          echo "imagefs.tar.xz:"
+          echo "imagefs.tar.gz:"
           ls -la app/src/main/assets/imagefs/imagefs.tar.gz
-          IMG_SIZE=$(stat -c%s app/src/main/assets/imagefs/imagefs.tar.xz)
+          IMG_SIZE=$(stat -c%s app/src/main/assets/imagefs/imagefs.tar.gz)
           if [ "$IMG_SIZE" -lt 50331648 ]; then
             echo "ERROR: imagefs too small" >&2; exit 1
           fi
