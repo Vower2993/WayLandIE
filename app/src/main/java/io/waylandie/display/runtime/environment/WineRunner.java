@@ -851,6 +851,59 @@ public final class WineRunner {
         preLaunchDiagnostics.append("[diag] ===== END DIAGNOSTICS =====\n");
 
         Process p = pb.start();
+        // =================================================================
+        // CRITICAL: Force Wine to use the Wayland display driver.
+        // =================================================================
+        try {
+            File systemReg = new File(new File(rootDir, "home/xuser/.wine"), "system.reg");
+            if (systemReg.exists()) {
+                String regContent = new String(java.nio.file.Files.readAllBytes(systemReg.toPath()));
+                if (!regContent.contains("\"Graphics\"=\"wayland\"")) {
+                    String driversKey = "[HKEY_CURRENT_USER\\\\Software\\\\Wine\\\\Drivers]";
+                    if (regContent.contains(driversKey)) {
+                        regContent = regContent.replace(driversKey + "]",
+                            driversKey + "]\n\"Graphics\"=\"wayland\"");
+                    } else {
+                        regContent = regContent + "\n" + driversKey + "]\n\"Graphics\"=\"wayland\"\n";
+                    }
+                    java.nio.file.Files.write(systemReg.toPath(), regContent.getBytes());
+                    Log.i(TAG, "Set Wine registry: Graphics=wayland");
+                    preLaunchDiagnostics.append("[diag] Registry: Graphics=wayland SET\n");
+                } else {
+                    preLaunchDiagnostics.append("[diag] Registry: already set\n");
+                }
+            } else {
+                preLaunchDiagnostics.append("[diag] Registry: system.reg NOT FOUND\n");
+            }
+        } catch (Exception e) {
+            preLaunchDiagnostics.append("[diag] Registry FAILED: " + e.getMessage() + "\n");
+        }
+
+        // Create libwayland-client.so symlink
+        try {
+            File localLib = new File(rootDir, "usr/local/lib");
+            if (!localLib.exists()) localLib.mkdirs();
+            File rootfsWl = new File(rootDir, "usr/lib/aarch64-linux-gnu/libwayland-client.so.0");
+            File target = rootfsWl.exists() ? rootfsWl : null;
+            if (target != null) {
+                for (String name : new String[]{"libwayland-client.so", "libwayland-client.so.0"}) {
+                    File sym = new File(localLib, name);
+                    if (sym.exists()) sym.delete();
+                    java.nio.file.Files.createSymbolicLink(sym.toPath(), target.toPath());
+                    Log.i(TAG, "Symlink: " + name + " -> " + target);
+                    preLaunchDiagnostics.append("[diag] Symlink: " + name + " -> " + target + "\n");
+                }
+            } else {
+                preLaunchDiagnostics.append("[diag] WARNING: libwayland-client.so NOT FOUND\n");
+            }
+        } catch (Exception e) { Log.w(TAG, "libwayland-client failed: " + e.getMessage()); }
+
+        // Search for winewayland.so
+        try {
+            File protonLibForSearch = new File(protonDir, "lib");
+            if (protonLibForSearch.isDirectory()) searchForFile(protonLibForSearch, "winewayland.so", 5);
+        } catch (Exception e) { Log.w(TAG, "search failed: " + e.getMessage()); }
+
 
         // Capture Wine output (CRITICAL for debugging)
         new Thread(() -> {
@@ -1343,6 +1396,22 @@ public final class WineRunner {
                 preLaunchDiagnostics.append(logLine + "\n");
             } else if (f.isDirectory()) {
                 searchDrvFiles(f, indent + "  ", maxDepth - 1);
+            }
+        }
+    }
+
+    private void searchForFile(File dir, String name, int maxDepth) {
+        if (dir == null || !dir.isDirectory() || maxDepth <= 0) return;
+        File[] files = dir.listFiles();
+        if (files == null) return;
+        for (File f : files) {
+            if (f.getName().equals(name)) {
+                String line = "[diag] FOUND: " + f.getAbsolutePath() + " (" + f.length() + " bytes)";
+                Log.i(TAG, line);
+                io.waylandie.display.shared.util.LogRingBuffer.append(line);
+                preLaunchDiagnostics.append(line + "\n");
+            } else if (f.isDirectory()) {
+                searchForFile(f, name, maxDepth - 1);
             }
         }
     }
