@@ -14,8 +14,8 @@ import java.util.concurrent.atomic.AtomicLong;
  * ImageFsManager — manages the bundled rootfs (ImageFs) that ships inside
  * the APK's assets directory.
  *
- * <p>On first launch, the app extracts {@code assets/imagefs/imagefs.tar.xz}
- * (~150 MB compressed → ~500 MB extracted) into
+ * <p>On first launch, the app extracts {@code assets/imagefs/imagefs.tar.gz}
+ * (~220 MB compressed → ~500 MB extracted) into
  * {@code getFilesDir()/imagefs/}. This rootfs contains:
  *
  * <ul>
@@ -56,7 +56,7 @@ public final class ImageFsManager {
     // stripped debug symbols from all .so files. Smaller rootfs = faster
     // extraction. Bumping forces re-extraction of the new smaller rootfs.
     public static final int LATEST_VERSION = 6;
-    private static final String IMAGEFS_ARCHIVE = "imagefs/imagefs.tar.xz";
+    private static final String IMAGEFS_ARCHIVE = "imagefs/imagefs.tar.gz";
     private static final long IMAGEFS_EXTRACTED_BYTES = 500_000_000L;
 
     private final Context context;
@@ -227,7 +227,7 @@ public final class ImageFsManager {
 
         // Extract the imagefs tarball
         // FAST PATH: Use Android's native toybox tar (3-5x faster than Java).
-        // Copy asset to temp file, then run 'tar -xJf <temp> -C <rootDir>'.
+        // Copy asset to temp file, then run 'tar -xzf <temp> -C <rootDir>'.
         // FALLBACK: If native tar fails, use Java extraction (Apache Commons).
         if (listener != null) listener.onProgress(1);
         boolean ok = false;
@@ -263,7 +263,7 @@ public final class ImageFsManager {
                     };
 
             ok = TarCompressorUtils.extractSync(
-                    TarCompressorUtils.Type.XZ,
+                    TarCompressorUtils.Type.GZIP,
                     context,
                     IMAGEFS_ARCHIVE,
                     rootDir,
@@ -330,8 +330,8 @@ public final class ImageFsManager {
      *
      * <p>Process:
      * <ol>
-     *   <li>Copy the asset to a temp file (cacheDir/imagefs.tar.xz)</li>
-     *   <li>Run {@code /system/bin/tar -xJf <temp> -C <rootDir>}</li>
+     *   <li>Copy the asset to a temp file (cacheDir/imagefs.tar.gz)</li>
+     *   <li>Run {@code /system/bin/tar -xzf <temp> -C <rootDir>}</li>
      *   <li>Delete the temp file</li>
      * </ol>
      *
@@ -341,7 +341,7 @@ public final class ImageFsManager {
     private boolean extractWithNativeTar(android.content.Context ctx,
                                           String assetName, File destDir,
                                           ProgressListener listener) {
-        File tempFile = new File(ctx.getCacheDir(), "imagefs.tar.xz");
+        File tempFile = new File(ctx.getCacheDir(), "imagefs.tar.gz");
         try {
             // Step 1: Copy asset to temp file
             Log.i(TAG, "Copying imagefs asset to temp file for native extraction…");
@@ -360,14 +360,15 @@ public final class ImageFsManager {
             if (listener != null) listener.onProgress(10);
 
             // Step 2: Run native extraction
-            // Try multiple approaches — Samsung's toybox tar may not support -J (xz)
-            // Approach 1: tar -xJf (if toybox has xz support)
-            // Approach 2: xz -dc | tar -xf - (more widely supported)
+            // Try multiple approaches — gzip is universally supported.
+            // Approach 1: tar -xzf (primary — gzip is in every Android toybox)
+            // Approach 2: gzip -dc | tar -xf - (fallback if tar -z missing)
             Log.i(TAG, "Running native tar extraction…");
 
-            // Try approach 1: tar -xJf
+            // Try approach 1: tar -xzf (gzip — universally supported in
+            // Android's toybox since 6.0; Samsung's toybox lacks -J xz support)
             ProcessBuilder pb = new ProcessBuilder(
-                    "/system/bin/tar", "-xJf", tempFile.getAbsolutePath(),
+                    "/system/bin/tar", "-xzf", tempFile.getAbsolutePath(),
                     "-C", destDir.getAbsolutePath());
             pb.redirectErrorStream(true);
             Process p = pb.start();
@@ -388,19 +389,20 @@ public final class ImageFsManager {
             boolean exited = p.waitFor(3, java.util.concurrent.TimeUnit.MINUTES);
             if (!exited) {
                 p.destroyForcibly();
-                Log.e(TAG, "Native tar -xJf timed out");
+                Log.e(TAG, "Native tar -xzf timed out");
                 return false;
             }
             reader.join(2000);
             int exitCode = p.exitValue();
 
-            // If tar -xJf failed, try approach 2: xz -dc | tar -xf -
+            // If tar -xzf failed, try approach 2: gzip -dc | tar -xf -
             if (exitCode != 0) {
-                Log.w(TAG, "tar -xJf failed (exit=" + exitCode + "), trying xz | tar pipeline");
+                Log.w(TAG, "tar -xzf failed (exit=" + exitCode + "), trying gzip | tar pipeline");
                 output.setLength(0);
-                // Use shell to pipe: xz -dc <file> | tar -xf - -C <dir>
+                // Use shell to pipe: gzip -dc <file> | tar -xf - -C <dir>
+                // (gzip is universally available on Android, unlike xz)
                 pb = new ProcessBuilder("/system/bin/sh", "-c",
-                        "/system/bin/xz -dc " + tempFile.getAbsolutePath()
+                        "/system/bin/gzip -dc " + tempFile.getAbsolutePath()
                                 + " | /system/bin/tar -xf - -C " + destDir.getAbsolutePath());
                 pb.redirectErrorStream(true);
                 Process p2 = pb.start();
@@ -417,7 +419,7 @@ public final class ImageFsManager {
                 exited = p2.waitFor(5, java.util.concurrent.TimeUnit.MINUTES);
                 if (!exited) {
                     p2.destroyForcibly();
-                    Log.e(TAG, "xz | tar pipeline timed out");
+                    Log.e(TAG, "gzip | tar pipeline timed out");
                     return false;
                 }
                 reader.join(2000);

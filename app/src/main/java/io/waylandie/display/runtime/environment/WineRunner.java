@@ -181,16 +181,19 @@ public final class WineRunner {
             boolean isArm64ec, boolean fexCoreInstalled, File protonDir)
             throws IOException {
 
-        // BIONIC Wine detection — must use PRoot path to bypass W^X
+        // BIONIC Wine detection — use native launcher stub to bypass W^X.
+        // The launcher (libwine_launcher.so) is in nativeLibraryDir where
+        // Android allows execve. It then execve()'s the wine binary from
+        // getFilesDir() — works because the launcher process has the right
+        // SELinux context. This eliminates PRoot entirely (no ptrace overhead).
         boolean bionicWine = isBionicWine(wineBin);
         Log.i(TAG, "Wine variant: " + (bionicWine ? "BIONIC" : "GLIBC"));
         if (bionicWine) {
-            Log.i(TAG, "Bionic Wine detected — routing through PRoot to bypass W^X "
-                    + "(Android 10+ blocks execve of binaries in getFilesDir for "
-                    + "targetSdk >= 29; PRoot's ptrace intercepts the exec and "
-                    + "bypasses the check)");
-            return launchViaProot(rootDir, wineBin, exePath, extraArgs,
-                    isArm64ec, fexCoreInstalled);
+            Log.i(TAG, "Bionic Wine detected — launching via native launcher stub "
+                    + "(libwine_launcher.so in nativeLibraryDir bypasses W^X; "
+                    + "no PRoot needed, no ptrace overhead)");
+            return launchViaNativeLauncher(rootDir, nativeLibDir, wineBin, exePath,
+                    extraArgs, isArm64ec, fexCoreInstalled, protonDir);
         }
 
         File linker = new File(nativeLibDir, "libld_glibc.so");
@@ -356,6 +359,174 @@ public final class WineRunner {
 
         // Capture output in a background thread so we can see Wine errors
         // in logcat. Without this, if Wine crashes we have no idea why.
+        new Thread(() -> {
+            try (java.io.BufferedReader reader = new java.io.BufferedReader(
+                    new java.io.InputStreamReader(p.getInputStream()))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    Log.i("WayLandIE/Wine", line);
+                    io.waylandie.display.shared.util.LogRingBuffer.append("[wine] " + line);
+                }
+            } catch (java.io.IOException e) {
+                Log.w(TAG, "Wine output stream closed: " + e.getMessage());
+            }
+        }, "wl-wine-output").start();
+
+        return p;
+    }
+
+    /**
+     * Launch bionic Wine via the native launcher stub (libwine_launcher.so).
+     *
+     * <p>The launcher is a tiny C program packaged in jniLibs. Android
+     * extracts it to nativeLibraryDir at install time, where SELinux
+     * allows execve(). The launcher then execve()'s the actual wine binary
+     * from getFilesDir() — works because the launcher process inherits
+     * the app's SELinux context, which CAN exec from nativeLibraryDir.
+     *
+     * <p>This eliminates PRoot entirely. PRoot was adding 2-5x overhead
+     * to every syscall (ptrace traps), which is brutal for games.
+     *
+     * <p>The launcher does NOT do path translation or bind mounts. Instead:
+     * <ul>
+     *   <li>Wine runs with the REAL Android filesystem (no fake rootfs view)</li>
+     *   <li>LD_LIBRARY_PATH points at the rootfs libs (so libwine.so etc. load from there)</li>
+     *   <li>HOME, WINEPREFIX, PATH etc. point at the rootfs paths</li>
+     *   <li>/dev, /proc, /sys are Android's real ones (accessible from app processes)</li>
+     * </ul>
+     *
+     * <p>Launch sequence:
+     * <pre>
+     *   libwine_launcher.so &lt;wineBinary&gt; &lt;exePath&gt; [extraArgs...]
+     * </pre>
+     * Environment (set by Java before exec):
+     * <pre>
+     *   LD_LIBRARY_PATH = rootfs/usr/lib:rootfs/usr/lib/aarch64-linux-gnu:proton/lib:...
+     *   HOME            = rootfs/home/xuser
+     *   WINEPREFIX      = rootfs/home/xuser/.wine
+     *   PATH            = proton/bin:rootfs/usr/bin:...
+     *   (plus all other Wine env vars from setupEnvironment)
+     * </pre>
+     */
+    private Process launchViaNativeLauncher(File rootDir, String nativeLibDir,
+            File wineBin, String exePath, String[] extraArgs,
+            boolean isArm64ec, boolean fexCoreInstalled, File protonDir)
+            throws IOException {
+
+        File launcher = new File(nativeLibDir, "libwine_launcher.so");
+        if (!launcher.exists()) {
+            throw new IOException("Native wine launcher not found at " + launcher
+                    + " — was libwine_launcher.so built and packaged in jniLibs?");
+        }
+        launcher.setExecutable(true, false);
+
+        // XDG_RUNTIME_DIR — must match what setupEnvironment() sets
+        File runtimeDir = new File(new File(rootDir, "usr/tmp"), "runtime");
+        if (!runtimeDir.exists()) runtimeDir.mkdirs();
+
+        // Start the bionic bridge FIRST (same as launchNative).
+        // The bridge is also bionic-compiled, runs in nativeLibraryDir, no PRoot needed.
+        File bionicBridge = new File(nativeLibDir, "libwaylandie_bridge.so");
+        if (bionicBridge.exists()) {
+            bionicBridge.setExecutable(true, false);
+            Log.i(TAG, "Starting BIONIC bridge translator (direct launch)…");
+            try {
+                List<String> bridgeCmd = new ArrayList<>();
+                bridgeCmd.add(bionicBridge.getAbsolutePath());
+                String[] displaySize = getDisplaySize();
+                bridgeCmd.add("waylandie.display.bridge.v1");
+                bridgeCmd.add("1");
+                bridgeCmd.add(new File(runtimeDir, "socket-name.txt").getAbsolutePath());
+                bridgeCmd.add("15000");
+                bridgeCmd.add("0");
+                bridgeCmd.add("0");
+                bridgeCmd.add(displaySize[0]);
+                bridgeCmd.add(displaySize[1]);
+
+                ProcessBuilder pbBridge = new ProcessBuilder(bridgeCmd);
+                pbBridge.directory(rootDir);
+                pbBridge.redirectErrorStream(true);
+                Map<String, String> bridgeEnv = pbBridge.environment();
+                bridgeEnv.clear();
+                setupEnvironment(bridgeEnv, rootDir, protonDir, isArm64ec, fexCoreInstalled, true);
+                Process bridgeProcess = pbBridge.start();
+                Log.i(TAG, "Bridge translator started (pid=" + getPid(bridgeProcess)
+                        + ", variant=bionic)");
+
+                new Thread(() -> {
+                    try (java.io.BufferedReader reader = new java.io.BufferedReader(
+                            new java.io.InputStreamReader(bridgeProcess.getInputStream()))) {
+                        String line;
+                        while ((line = reader.readLine()) != null) {
+                            Log.i("WayLandIE/Bridge", line);
+                            io.waylandie.display.shared.util.LogRingBuffer.append("[bridge] " + line);
+                        }
+                    } catch (java.io.IOException e) {
+                        Log.w(TAG, "Bridge output stream closed: " + e.getMessage());
+                    }
+                }, "wl-bridge-output").start();
+                try { Thread.sleep(2000); } catch (InterruptedException ignored) {}
+            } catch (IOException e) {
+                Log.w(TAG, "Bridge failed to start: " + e.getMessage());
+            }
+        } else {
+            Log.w(TAG, "Bionic bridge not found at " + bionicBridge);
+        }
+
+        // Read the socket name the bridge created
+        String waylandSocketName = null;
+        File socketNameFile = new File(runtimeDir, "socket-name.txt");
+        if (socketNameFile.exists()) {
+            try {
+                String socketName = new String(java.nio.file.Files.readAllBytes(socketNameFile.toPath())).trim();
+                if (!socketName.isEmpty()) {
+                    waylandSocketName = socketName;
+                    Log.i(TAG, "Wayland socket: " + socketName + " (from bridge)");
+                }
+            } catch (Exception e) {
+                Log.w(TAG, "Could not read socket name: " + e.getMessage());
+            }
+        }
+
+        // Build the launcher command:
+        //   libwine_launcher.so <wineBinary> <exePath> [extraArgs...]
+        List<String> cmd = new ArrayList<>();
+        cmd.add(launcher.getAbsolutePath());
+        cmd.add(wineBin.getAbsolutePath());
+        cmd.add(exePath);
+        if (extraArgs != null) {
+            for (String arg : extraArgs) cmd.add(arg);
+        }
+
+        Log.i(TAG, "Native launcher command: " + String.join(" ", cmd));
+
+        ProcessBuilder pb = new ProcessBuilder(cmd);
+        pb.directory(rootDir);
+        pb.redirectErrorStream(true);
+
+        Map<String, String> env = pb.environment();
+        env.clear();
+        // setupEnvironment populates all the Wine env vars (HOME, WINEPREFIX,
+        // PATH, LD_LIBRARY_PATH, WINEDLLOVERRIDES, etc.) pointing at rootfs paths.
+        // The launcher passes these through unchanged to Wine via execve().
+        // useBionicBridge=true skips glibc-specific env vars (GLIBC_TUNABLES,
+        // LD_PRELOAD shim) that would crash a bionic Wine.
+        setupEnvironment(env, rootDir, protonDir, isArm64ec, fexCoreInstalled, true);
+
+        // Override WAYLAND_DISPLAY with the actual socket name the bridge created
+        if (waylandSocketName != null) {
+            env.put("WAYLAND_DISPLAY", waylandSocketName);
+        }
+
+        // Set FEX env var if FEX + arm64ec (HODLL tells Wine which FEX DLL to load)
+        if (fexCoreInstalled && isArm64ec) {
+            env.put("HODLL", "libarm64ecfex.dll");
+            Log.i(TAG, "FEXCore arm64ec: HODLL=libarm64ecfex.dll");
+        }
+
+        Process p = pb.start();
+
+        // Capture Wine output (CRITICAL for debugging)
         new Thread(() -> {
             try (java.io.BufferedReader reader = new java.io.BufferedReader(
                     new java.io.InputStreamReader(p.getInputStream()))) {

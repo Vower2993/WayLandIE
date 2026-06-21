@@ -1,5 +1,5 @@
 #!/bin/bash
-# build-imagefs.sh — generates the BASE rootfs (imagefs.tar.xz) that
+# build-imagefs.sh — generates the BASE rootfs (imagefs.tar.gz) that
 # ships inside the WayLandIE APK.
 #
 # IMPORTANT: This rootfs does NOT include Wine. Wine/Proton/DXVK/Turnip
@@ -15,7 +15,7 @@
 #      Uses debootstrap --foreign + --second-stage with qemu-user-static
 #      binfmt support.
 #
-# Output: app/src/main/assets/imagefs/imagefs.tar.xz (~80-100 MB compressed)
+# Output: app/src/main/assets/imagefs/imagefs.tar.gz (~220 MB compressed)
 #
 # The rootfs contains ONLY:
 #   - Ubuntu 20.04 Focal arm64 base (minimal) — glibc 2.31
@@ -51,7 +51,7 @@ set -o pipefail  # CRITICAL: without this, 'cmd | tail' masks cmd failures
 WORK_DIR="${WORK_DIR:-/tmp/waylandie-imagefs-build}"
 ROOTFS_DIR="$WORK_DIR/rootfs"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-OUTPUT_FILE="${OUTPUT_FILE:-$SCRIPT_DIR/../app/src/main/assets/imagefs/imagefs.tar.xz}"
+OUTPUT_FILE="${OUTPUT_FILE:-$SCRIPT_DIR/../app/src/main/assets/imagefs/imagefs.tar.gz}"
 ARCH="${ARCH:-arm64}"
 DIST="${DIST:-focal}"
 
@@ -394,7 +394,7 @@ fi
 # ---------------------------------------------------------------------
 # 7. Create the tarball
 # ---------------------------------------------------------------------
-echo "[7/7] Creating imagefs.tar.xz…"
+echo "[7/7] Creating imagefs.tar.gz…"
 
 # Purge dev packages — only needed for bridge compilation, bloat rootfs 3x
 # Ubuntu 20.04 Focal ships gcc-9 (not gcc-14 like Trixie)
@@ -469,10 +469,16 @@ echo "  ✓ Aggressive trimming complete"
 echo "  ✓ Cleanup complete"
 
 cd "$ROOTFS_DIR"
-# Use xz compression. On-device extraction uses Android's native toybox tar
-# (tar -xJf) which is 3-5x faster than Java extraction. XZ is also faster
-# to decompress in Java (tukaani) than Zstd (Apache Commons) as a fallback.
-tar --xattrs -cJf "$OUTPUT_FILE" .
+# Use GZIP compression (not xz). Rationale: Samsung's toybox tar (and
+# several other OEM toybox builds) does NOT support -J (xz decompression)
+# at extract time, which forces the app to fall back to slow Java xz
+# extraction — 15-20 minutes per install on S24. GZIP support (-z) is
+# universally present in every Android toybox build since Android 6.0.
+# Trade-off: imagefs.tar.gz is ~220 MB vs imagefs.tar.xz at ~150 MB
+# (APK grows ~70 MB), but on-device extraction drops to 30-60 seconds.
+# If APK size becomes a concern later, switch to .tar.zst (Android 13+
+# toybox supports --zstd, ~165 MB compressed, ~30 sec extraction).
+tar --xattrs -czf "$OUTPUT_FILE" .
 
 SIZE=$(stat -c%s "$OUTPUT_FILE")
 echo

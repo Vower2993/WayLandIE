@@ -55,8 +55,8 @@ jobs:
         id: cache-imagefs
         uses: actions/cache@v4
         with:
-          path: app/src/main/assets/imagefs/imagefs.tar.xz
-          key: imagefs-${{ hashFiles('tools/build-imagefs.sh') }}-v6
+          path: app/src/main/assets/imagefs/imagefs.tar.gz
+          key: imagefs-${{ hashFiles('tools/build-imagefs.sh') }}-v7
 
       # -----------------------------------------------------------------
       # Build the rootfs (only on cache miss)
@@ -67,13 +67,13 @@ jobs:
           echo "=== Building imagefs rootfs (this takes ~20 minutes) ==="
           sudo bash tools/build-imagefs.sh
           if [ ! -f app/src/main/assets/imagefs/imagefs.tar.xz ]; then
-            echo "ERROR: imagefs.tar.xz not created" >&2
+            echo "ERROR: imagefs.tar.gz not created" >&2
             exit 1
           fi
           SIZE=$(stat -c%s app/src/main/assets/imagefs/imagefs.tar.xz)
-          echo "✓ imagefs.tar.xz created ($SIZE bytes, $(numfmt --to=iec $SIZE))"
+          echo "✓ imagefs.tar.gz created ($SIZE bytes, $(numfmt --to=iec $SIZE))"
           if [ "$SIZE" -lt 33554432 ]; then
-            echo "ERROR: imagefs.tar.xz is suspiciously small (< 50 MB)" >&2
+            echo "ERROR: imagefs.tar.gz is suspiciously small (< 50 MB)" >&2
             exit 1
           fi
 
@@ -81,7 +81,7 @@ jobs:
         if: steps.cache-imagefs.outputs.cache-hit == 'true'
         run: |
           echo "✓ imagefs.tar.xz restored from cache"
-          ls -la app/src/main/assets/imagefs/imagefs.tar.xz
+          ls -la app/src/main/assets/imagefs/imagefs.tar.gz
 
       - name: Extract glibc linker to jniLibs
         run: |
@@ -276,9 +276,9 @@ jobs:
         run: |
           echo "=== Pre-build verification ==="
           echo "imagefs.tar.xz:"
-          ls -la app/src/main/assets/imagefs/imagefs.tar.xz
+          ls -la app/src/main/assets/imagefs/imagefs.tar.gz
           IMG_SIZE=$(stat -c%s app/src/main/assets/imagefs/imagefs.tar.xz)
-          if [ "$IMG_SIZE" -lt 33554432 ]; then
+          if [ "$IMG_SIZE" -lt 50331648 ]; then
             echo "ERROR: imagefs too small" >&2; exit 1
           fi
           echo

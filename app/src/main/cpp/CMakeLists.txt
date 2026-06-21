@@ -210,3 +210,55 @@ else()
                     "or wait for CI to populate the directory.")
 endif()
 
+
+# ----------------------------------------------------------------------
+# wine_launcher — tiny native launcher stub for bionic Wine.
+#
+# WHY: Android 10+ (targetSdk >= 29) blocks execve() of binaries in
+# getFilesDir() (W^X enforcement). This launcher is packaged as
+# libwine_launcher.so in jniLibs, so Android extracts it to
+# nativeLibraryDir where execve is allowed. The launcher then execve()'s
+# the actual wine binary from getFilesDir() — works because the launcher
+# process already has the right SELinux context.
+#
+# This eliminates PRoot entirely. PRoot was adding 2-5x overhead to every
+# syscall (ptrace traps), which is brutal for games.
+#
+# The launcher itself is a single C file (~100 lines). It reads env vars
+# set by Java (LD_LIBRARY_PATH, HOME, WINEPREFIX, etc.) and calls
+# execve() on the wine binary path passed as argv[1].
+#
+# Launch sequence (Java side, in WineRunner.java):
+#   ProcessBuilder pb = new ProcessBuilder(
+#       nativeLibDir + "/libwine_launcher.so",
+#       wineBin.getAbsolutePath(),    // argv[1] — wine binary
+#       exePath,                       // argv[2] — .exe to run
+#       extraArgs...                   // argv[3..] — extra wine args
+#   );
+#   pb.environment().put("LD_LIBRARY_PATH", ...);
+#   pb.environment().put("HOME", ...);
+#   pb.environment().put("WINEPREFIX", ...);
+#   Process p = pb.start();
+# ----------------------------------------------------------------------
+add_executable(wine_launcher wine_launcher.c)
+
+# Android requires .so naming for jniLibs packaging (same trick as
+# libld_glibc.so, libproot.so, libwaylandie_bridge.so, etc.)
+set_target_properties(wine_launcher PROPERTIES
+    OUTPUT_NAME "wine_launcher"
+    PREFIX "lib"
+    SUFFIX ".so"
+)
+
+# Link against bionic libc + liblog for __android_log_print
+target_link_libraries(wine_launcher log)
+
+# Strip in release for size
+if(CMAKE_BUILD_TYPE STREQUAL "Release")
+    add_custom_command(TARGET wine_launcher POST_BUILD
+        COMMAND ${CMAKE_STRIP} --strip-unneeded
+                $<TARGET_FILE:wine_launcher>
+        COMMENT "Stripping libwine_launcher.so")
+endif()
+
+message(STATUS "wine_launcher: target enabled (libwine_launcher.so)")
