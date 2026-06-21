@@ -246,6 +246,26 @@ public final class GameLaunchTracer {
         log("");
 
         // ---------------------------------------------------------------
+        // 4b. Dump WineRunner's pre-launch diagnostics into trace file
+        // ---------------------------------------------------------------
+        // WineRunner.execWine() ran diagnostics (library checks, .drv search,
+        // env vars, symlinks, etc.) and stored them in a static buffer.
+        // Write them to the trace file here so they're visible alongside
+        // Wine's stdout.
+        logSection("WINE RUNNER DIAGNOSTICS (pre-launch)");
+        String diag = io.waylandie.display.runtime.environment.WineRunner.preLaunchDiagnostics.toString();
+        if (diag != null && !diag.isEmpty()) {
+            for (String line : diag.split("\n")) {
+                if (!line.isEmpty()) {
+                    log("  " + line);
+                }
+            }
+        } else {
+            log("  (no diagnostics — WineRunner may not have reached the diagnostic section)");
+        }
+        log("");
+
+        // ---------------------------------------------------------------
         // 5. Capture Wine stdout/stderr line-by-line with timestamps
         // ---------------------------------------------------------------
         logSection("WINE STDOUT/STDERR");

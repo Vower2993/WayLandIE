@@ -37,6 +37,10 @@ public final class WineRunner {
 
     private static final String TAG = "WayLandIE/WineRunner";
 
+    // Static buffer for pre-launch diagnostics. GameLaunchTracer reads this
+    // after WineRunner.execWine() returns and appends it to the trace file.
+    public static final StringBuilder preLaunchDiagnostics = new StringBuilder();
+
     private final Context context;
     private final ImageFsManager imageFs;
 
@@ -579,6 +583,9 @@ public final class WineRunner {
         // =================================================================
         Log.i(TAG, "========== WINE RUNTIME DIAGNOSTICS ==========");
         io.waylandie.display.shared.util.LogRingBuffer.append("[diag] ===== WINE RUNTIME DIAGNOSTICS =====");
+        preLaunchDiagnostics.append("[diag] ===== WINE RUNTIME DIAGNOSTICS =====\n");
+        preLaunchDiagnostics.setLength(0);
+        preLaunchDiagnostics.append("===== WINE RUNTIME DIAGNOSTICS =====\n");
 
         // 1. Wine binary info
         Log.i(TAG, "[diag] Wine binary: " + wineBin.getAbsolutePath()
@@ -659,11 +666,65 @@ public final class WineRunner {
             }
         }
 
-        // 5. Display drivers (.drv files in Wine prefix)
+        // 5. Display drivers — search EVERYWHERE Wine might have them
         try {
+            // Search in the Wine prefix system32/
             File system32 = new File(
                     new File(rootDir, "home/xuser/.wine"),
                     "drive_c/windows/system32");
+            // Also search in Proton's lib/wine/ directories (where built-in
+            // Wine DLLs actually live — .drv files may not be copied to the
+            // prefix until first use)
+            File protonLibWine = new File(protonDir, "lib/wine");
+            File protonFilesLibWine = new File(protonDir, "files/lib/wine");
+            File protonLibWine64 = new File(protonDir, "lib/wine/aarch64-unix");
+            File protonLibWineAlternate = new File(protonDir, "lib/wine/arm64-unix");
+
+            // Search for ALL .drv files in all possible locations
+            File[] searchDirs = {system32, protonLibWine, protonFilesLibWine,
+                                 protonLibWine64, protonLibWineAlternate,
+                                 new File(protonDir, "lib"),
+                                 new File(protonDir, "files/lib")};
+            for (File searchDir : searchDirs) {
+                if (searchDir == null || !searchDir.isDirectory()) continue;
+                searchDrvFiles(searchDir, "  ", 3);
+            }
+
+            // Specifically check for known display drivers
+            String[] knownDrvs = {"winewayland.drv", "winex11.drv", "wineandroid.drv",
+                                  "winemac.drv", "winetest.drv"};
+            for (String drv : knownDrvs) {
+                boolean found = false;
+                String foundAt = null;
+                for (File dir : searchDirs) {
+                    if (dir == null || !dir.isDirectory()) continue;
+                    File drvFile = new File(dir, drv);
+                    if (drvFile.exists()) {
+                        found = true;
+                        foundAt = dir.getAbsolutePath();
+                        break;
+                    }
+                    // Also search subdirectories (lib/wine/aarch64-unix/ etc.)
+                    searchSubdir:
+                    for (File sub : dir.listFiles()) {
+                        if (sub.isDirectory()) {
+                            File subDrv = new File(sub, drv);
+                            if (subDrv.exists()) {
+                                found = true;
+                                foundAt = subDrv.getAbsolutePath();
+                                break searchSubdir;
+                            }
+                        }
+                    }
+                    if (found) break;
+                }
+                String status = found ? "FOUND at " + foundAt : "NOT FOUND";
+                String logLine = "[diag] DRV " + drv + ": " + status;
+                Log.i(TAG, logLine);
+                io.waylandie.display.shared.util.LogRingBuffer.append(logLine);
+                preLaunchDiagnostics.append(logLine + "\n");
+            }
+
             if (system32.isDirectory()) {
                 File[] drvFiles = system32.listFiles(
                         (dir, name) -> name.endsWith(".drv"));
@@ -755,6 +816,7 @@ public final class WineRunner {
             probe.close();
             Log.i(TAG, "[diag] Android bridge socket: ✓ listening");
             io.waylandie.display.shared.util.LogRingBuffer.append("[diag] Android bridge: ✓ listening");
+            preLaunchDiagnostics.append("[diag] Android bridge: ✓ listening\n");
         } catch (Exception e) {
             Log.w(TAG, "[diag] Android bridge socket: ✗ " + e.getMessage());
             io.waylandie.display.shared.util.LogRingBuffer.append("[diag] Android bridge: ✗ " + e.getMessage());
@@ -785,6 +847,8 @@ public final class WineRunner {
 
         Log.i(TAG, "========== END WINE RUNTIME DIAGNOSTICS ==========");
         io.waylandie.display.shared.util.LogRingBuffer.append("[diag] ===== END DIAGNOSTICS =====");
+        preLaunchDiagnostics.append("===== END DIAGNOSTICS =====\n");
+        preLaunchDiagnostics.append("[diag] ===== END DIAGNOSTICS =====\n");
 
         Process p = pb.start();
 
@@ -989,6 +1053,10 @@ public final class WineRunner {
         if (!winePrefix.exists()) winePrefix.mkdirs();
         env.put("WINEPREFIX", winePrefix.getAbsolutePath());
         env.put("WINEDLLOVERRIDES", "d3d9,d3d10core,d3d11,dxgi=native");
+        // CRITICAL: Enable Wine debug channels for display driver + module loading.
+        // This tells us EXACTLY which .drv files Wine tries to load and why they
+        // fail. The output goes to Wine's stderr (captured by GameLaunchTracer).
+        env.put("WINEDEBUG", "+module,+display,+driver");
         env.put("DXVK_STATE_CACHE_PATH", new File(homeDir, ".dxvk-cache").getAbsolutePath());
         env.put("MESA_VK_WSI_PRESENT_MODE", "immediate");
         // Winlator-inspired env vars — Wine needs these for proper operation
@@ -1261,6 +1329,24 @@ public final class WineRunner {
     }
 
     /** Reads an 8-byte little-endian long from RandomAccessFile. */
+    /** Recursively searches for .drv files and logs them. */
+    private void searchDrvFiles(File dir, String indent, int maxDepth) {
+        if (dir == null || !dir.isDirectory() || maxDepth <= 0) return;
+        File[] files = dir.listFiles();
+        if (files == null) return;
+        for (File f : files) {
+            if (f.getName().endsWith(".drv")) {
+                String logLine = "[diag] DRV FOUND: " + f.getAbsolutePath()
+                        + " (" + f.length() + " bytes)";
+                Log.i(TAG, logLine);
+                io.waylandie.display.shared.util.LogRingBuffer.append(logLine);
+                preLaunchDiagnostics.append(logLine + "\n");
+            } else if (f.isDirectory()) {
+                searchDrvFiles(f, indent + "  ", maxDepth - 1);
+            }
+        }
+    }
+
     private static long readLongLE(java.io.RandomAccessFile raf) throws IOException {
         long b0 = raf.readUnsignedByte();
         long b1 = raf.readUnsignedByte();
