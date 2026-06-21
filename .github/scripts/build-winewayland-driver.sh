@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
-# Two-stage Wine cross-build:
-#   Stage A: build Wine tools natively (x86_64)
-#   Stage B: cross-compile winewayland.drv + winewayland.so for aarch64 Android
+# Two-stage Wine cross-build with GameNative android patches
 set -euo pipefail
 
 WORKSPACE="${GITHUB_WORKSPACE:-$(pwd)}"
@@ -14,7 +12,7 @@ mkdir -p "$PROTON_OUT/lib/wine/aarch64-windows" \
          "$PROTON_OUT/lib/wine/aarch64-unix" \
          "$ROOTFS_OUT/usr/local/lib"
 
-echo "=== [1/8] Install build deps ==="
+echo "=== [1/9] Install build deps ==="
 sudo apt-get install -y -qq \
   autoconf automake libtool bison flex gettext \
   pkg-config python3 python3-pip libffi-dev libexpat1-dev \
@@ -22,7 +20,7 @@ sudo apt-get install -y -qq \
 pip3 install --user meson ninja 2>&1 | tail -3
 export PATH="$HOME/.local/bin:$PATH"
 
-echo "=== [2/8] Locate NDK ==="
+echo "=== [2/9] Locate NDK ==="
 NDK_DIR="$ANDROID_HOME/ndk/26.1.10909125"
 [ -d "$NDK_DIR" ] || NDK_DIR=$(ls -d $ANDROID_HOME/ndk/* 2>/dev/null | head -1)
 echo "Using NDK: $NDK_DIR"
@@ -39,7 +37,7 @@ export SYSROOT="$TOOLCHAIN/sysroot"
 BIONIC_LIBS="$WORKSPACE/app/src/main/cpp/bionic-libs"
 ls "$BIONIC_LIBS/lib/" 2>/dev/null | head
 
-echo "=== [3/8] Clone proton-wine ==="
+echo "=== [3/9] Clone proton-wine ==="
 cd /tmp
 rm -rf proton-wine
 git clone --depth=1 https://github.com/GameNative/proton-wine.git
@@ -47,45 +45,73 @@ cd proton-wine
 chmod +x autogen.sh
 ./autogen.sh 2>&1 | tail -5
 
-echo "=== [4/8] Stage A: Native x86_64 tools build ==="
+echo "=== [4/9] Build libandroid-sysvshm.so ==="
+cd /tmp/proton-wine/android/android_sysvshm
+# Adapt build-aarch64.sh to our NDK path
+"$CC" -Wall -std=gnu99 -shared -fPIC \
+  -I"$(pwd)" \
+  -o libandroid-sysvshm.so \
+  android_sysvshm.c
+echo "Built: $(ls -la libandroid-sysvshm.so)"
+# Install into bionic-libs so Wine configure picks it up
+cp libandroid-sysvshm.so "$BIONIC_LIBS/lib/"
+cp -r sys "$BIONIC_LIBS/include/sys" 2>/dev/null || true
+cp -r sys /tmp/sysvshm-sys
+mkdir -p "$BIONIC_LIBS/include/sys"
+cp -r sys/* "$BIONIC_LIBS/include/sys/" 2>/dev/null || true
+# Also stage for runtime rootfs
+cp libandroid-sysvshm.so "$ROOTFS_OUT/usr/local/lib/"
+
+echo "=== [5/9] Apply GameNative patches (common + arm64ec) ==="
+cd /tmp/proton-wine
+apply_patches() {
+  local dir="$1"
+  local count=0
+  local failed=0
+  for p in "$dir"/*.patch; do
+    [ -f "$p" ] || continue
+    if git apply --3way --whitespace=nowarn "$p" 2>/dev/null; then
+      count=$((count+1))
+    elif git apply --whitespace=nowarn "$p" 2>/dev/null; then
+      count=$((count+1))
+    else
+      failed=$((failed+1))
+      echo "  ⚠ failed: $(basename "$p")"
+    fi
+  done
+  echo "  Applied $count, failed $failed from $dir"
+}
+apply_patches /tmp/proton-wine/android/patches/common
+apply_patches /tmp/proton-wine/android/patches/arm64ec
+
+# Also copy shm_utils.h where configure can find it
+cp /tmp/proton-wine/android/shm_utils/shm_utils.h /tmp/proton-wine/include/
+
+echo "=== [6/9] Stage A: Native x86_64 tools build ==="
 mkdir -p /tmp/proton-wine-tools-build
 cd /tmp/proton-wine-tools-build
-# Native build, minimal — just produces tools/winebuild, tools/wrc, tools/wmc, etc.
 unset CC CXX AR STRIP LDFLAGS
 export CFLAGS="-O2"
 export CXXFLAGS="-O2"
 /tmp/proton-wine/configure \
-  --without-x \
-  --without-opengl \
-  --without-vulkan \
-  --without-alsa \
-  --without-oss \
-  --without-pulse \
-  --without-cups \
-  --without-sane \
-  --without-usb \
-  --without-sdl \
-  --without-gstreamer \
-  --without-freetype \
-  --without-fontconfig \
-  --without-v4l2 \
+  --without-x --without-opengl --without-vulkan \
+  --without-alsa --without-oss --without-pulse --without-cups \
+  --without-sane --without-usb --without-sdl --without-gstreamer \
+  --without-freetype --without-fontconfig --without-v4l2 \
   --disable-tests \
-  2>&1 | tail -20
-
-# Build only the tools directory (much faster than full Wine)
+  2>&1 | tail -10
 make -j$(nproc) tools 2>&1 | tail -10
-echo "Native tools built:"
 ls tools/winebuild tools/wrc tools/wmc 2>&1
 
-echo "=== [5/8] Stage B: Cross-compile configure ==="
+echo "=== [7/9] Stage B: Cross-compile configure ==="
 cd /tmp/proton-wine
 export CC="$TOOLCHAIN/bin/aarch64-linux-android${API}-clang"
 export CXX="$TOOLCHAIN/bin/aarch64-linux-android${API}-clang++"
 export AR="$TOOLCHAIN/bin/llvm-ar"
 export STRIP="$TOOLCHAIN/bin/llvm-strip"
-export CFLAGS="-fPIC --sysroot=$SYSROOT -I$SYSROOT/usr/include -I$BIONIC_LIBS/include -D__ANDROID_API__=$API"
+export CFLAGS="-fPIC --sysroot=$SYSROOT -I$SYSROOT/usr/include -I$BIONIC_LIBS/include -I/tmp/proton-wine/include -D__ANDROID_API__=$API"
 export CXXFLAGS="$CFLAGS"
-export LDFLAGS="--sysroot=$SYSROOT -L$BIONIC_LIBS/lib"
+export LDFLAGS="--sysroot=$SYSROOT -L$BIONIC_LIBS/lib -landroid-sysvshm"
 export WAYLAND_CFLAGS="-I$BIONIC_LIBS/include"
 export WAYLAND_LIBS="-L$BIONIC_LIBS/lib -lwayland-client"
 export XKB_COMMON_CFLAGS="-I$BIONIC_LIBS/include"
@@ -95,30 +121,20 @@ export XKB_COMMON_LIBS="-L$BIONIC_LIBS/lib -lxkbcommon"
   --host=aarch64-linux-android \
   --prefix=/usr/local \
   --with-wine-tools=/tmp/proton-wine-tools-build \
-  --without-x \
-  --without-opengl \
-  --without-vulkan \
-  --without-alsa \
-  --without-oss \
-  --without-pulse \
-  --without-cups \
-  --without-sane \
-  --without-usb \
-  --without-sdl \
-  --without-gstreamer \
-  --without-freetype \
-  --without-fontconfig \
-  --without-v4l2 \
+  --without-x --without-opengl --without-vulkan \
+  --without-alsa --without-oss --without-pulse --without-cups \
+  --without-sane --without-usb --without-sdl --without-gstreamer \
+  --without-freetype --without-fontconfig --without-v4l2 \
   --disable-tests \
   2>&1 | tail -60
 
-echo "=== [6/8] Build winewayland targets ==="
+echo "=== [8/9] Build winewayland targets ==="
 make -j$(nproc) dlls/winewayland.drv 2>&1 | tail -50
 
 echo "=== Searching for built artifacts ==="
 find /tmp/proton-wine -name "winewayland*" -type f -newer /tmp/proton-wine/configure 2>/dev/null | head -20
 
-echo "=== [7/8] Collect ==="
+echo "=== [9/9] Collect + zip ==="
 for f in \
   "/tmp/proton-wine/dlls/winewayland.drv/winewayland.drv.so" \
   "/tmp/proton-wine/dlls/winewayland.drv/winewayland.drv" \
@@ -129,7 +145,6 @@ for f in \
     break
   fi
 done
-
 for f in \
   "/tmp/proton-wine/dlls/winewayland.drv/winewayland.so" \
   "/tmp/proton-wine/dlls/winewayland.drv/winewayland.dll.so"; do
@@ -149,12 +164,11 @@ if [ "$DRV_SIZE" -lt 5000 ]; then
   echo "✗ FATAL: winewayland.drv missing or too small"
   echo "=== dlls/winewayland.drv/ contents ==="
   ls -la /tmp/proton-wine/dlls/winewayland.drv/ 2>/dev/null || true
-  echo "=== Config.log tail ==="
+  echo "=== config.log tail ==="
   tail -80 /tmp/proton-wine/config.log 2>/dev/null || true
   exit 1
 fi
 
-echo "=== [8/8] Zip ==="
 cd "$OUTDIR"
 mkdir -p "$WORKSPACE/app/src/main/assets"
 rm -f "$WORKSPACE/app/src/main/assets/winewayland-driver.zip"
