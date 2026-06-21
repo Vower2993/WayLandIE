@@ -47,19 +47,14 @@ chmod +x autogen.sh
 
 echo "=== [4/9] Build libandroid-sysvshm.so ==="
 cd /tmp/proton-wine/android/android_sysvshm
-# Adapt build-aarch64.sh to our NDK path
 "$CC" -Wall -std=gnu99 -shared -fPIC \
   -I"$(pwd)" \
   -o libandroid-sysvshm.so \
   android_sysvshm.c
 echo "Built: $(ls -la libandroid-sysvshm.so)"
-# Install into bionic-libs so Wine configure picks it up
 cp libandroid-sysvshm.so "$BIONIC_LIBS/lib/"
-cp -r sys "$BIONIC_LIBS/include/sys" 2>/dev/null || true
-cp -r sys /tmp/sysvshm-sys
 mkdir -p "$BIONIC_LIBS/include/sys"
 cp -r sys/* "$BIONIC_LIBS/include/sys/" 2>/dev/null || true
-# Also stage for runtime rootfs
 cp libandroid-sysvshm.so "$ROOTFS_OUT/usr/local/lib/"
 
 echo "=== [5/9] Apply GameNative patches (common + arm64ec) ==="
@@ -83,8 +78,6 @@ apply_patches() {
 }
 apply_patches /tmp/proton-wine/android/patches/common
 apply_patches /tmp/proton-wine/android/patches/arm64ec
-
-# Also copy shm_utils.h where configure can find it
 cp /tmp/proton-wine/android/shm_utils/shm_utils.h /tmp/proton-wine/include/
 
 echo "=== [6/9] Stage A: Native x86_64 tools build ==="
@@ -98,6 +91,7 @@ export CXXFLAGS="-O2"
   --without-alsa --without-oss --without-pulse --without-cups \
   --without-sane --without-usb --without-sdl --without-gstreamer \
   --without-freetype --without-fontconfig --without-v4l2 \
+  --enable-win64 \
   --disable-tests \
   2>&1 | tail -10
 make -j$(nproc) tools 2>&1 | tail -10
@@ -125,6 +119,7 @@ export XKB_COMMON_LIBS="-L$BIONIC_LIBS/lib -lxkbcommon"
   --without-alsa --without-oss --without-pulse --without-cups \
   --without-sane --without-usb --without-sdl --without-gstreamer \
   --without-freetype --without-fontconfig --without-v4l2 \
+  --enable-win64 \
   --disable-tests \
   2>&1 | tail -60
 
