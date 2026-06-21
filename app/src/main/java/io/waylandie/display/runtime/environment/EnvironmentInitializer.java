@@ -267,7 +267,7 @@ public final class EnvironmentInitializer extends Activity {
                             // later.
                             if (!imageFs.isValid()) {
                                 String reason = "Extraction reported success but rootfs is invalid. "
-                                        + "Likely cause: APK was built without the real imagefs.tar.gz "
+                                        + "Likely cause: APK was built without the real imagefs.tar.xz "
                                         + "(placeholder README.txt was extracted instead). "
                                         + "Use the 'Build Self-Contained APK' workflow, not 'Build APK'.\n\n"
                                         + "Detailed validity check:\n"
