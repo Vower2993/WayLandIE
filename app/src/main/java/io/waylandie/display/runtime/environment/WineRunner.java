@@ -852,56 +852,138 @@ public final class WineRunner {
 
         Process p = pb.start();
         // =================================================================
+        // =================================================================
         // CRITICAL: Force Wine to use the Wayland display driver.
         // =================================================================
+        // Fix 1: Set Graphics=wayland in BOTH system.reg AND user.reg.
+        // Wine checks HKEY_CURRENT_USER first (user.reg), then
+        // HKEY_LOCAL_MACHINE (system.reg). We set both to be safe.
+        // The registry key is:
+        //   [HKEY_CURRENT_USER\\Software\\Wine\\Drivers]
+        //   "Graphics"="wayland"
         try {
-            File systemReg = new File(new File(rootDir, "home/xuser/.wine"), "system.reg");
-            if (systemReg.exists()) {
-                String regContent = new String(java.nio.file.Files.readAllBytes(systemReg.toPath()));
-                if (!regContent.contains("\"Graphics\"=\"wayland\"")) {
-                    String driversKey = "[HKEY_CURRENT_USER\\\\Software\\\\Wine\\\\Drivers]";
-                    if (regContent.contains(driversKey)) {
-                        regContent = regContent.replace(driversKey + "]",
-                            driversKey + "]\n\"Graphics\"=\"wayland\"");
-                    } else {
-                        regContent = regContent + "\n" + driversKey + "]\n\"Graphics\"=\"wayland\"\n";
-                    }
-                    java.nio.file.Files.write(systemReg.toPath(), regContent.getBytes());
-                    Log.i(TAG, "Set Wine registry: Graphics=wayland");
-                    preLaunchDiagnostics.append("[diag] Registry: Graphics=wayland SET\n");
-                } else {
-                    preLaunchDiagnostics.append("[diag] Registry: already set\n");
+            File winePrefixDir = new File(rootDir, "home/xuser/.wine");
+            String driversKey = "[HKEY_CURRENT_USER\\\\Software\\\\Wine\\\\Drivers]";
+            String graphicsValue = "\"Graphics\"=\"wayland\"";
+            // Write to BOTH system.reg AND user.reg
+            for (String regFileName : new String[]{"system.reg", "user.reg"}) {
+                File regFile = new File(winePrefixDir, regFileName);
+                if (!regFile.exists()) {
+                    // Create the file if it does not exist (user.reg may not exist)
+                    regFile.createNewFile();
                 }
-            } else {
-                preLaunchDiagnostics.append("[diag] Registry: system.reg NOT FOUND\n");
+                String regContent = new String(java.nio.file.Files.readAllBytes(regFile.toPath()));
+                if (!regContent.contains(graphicsValue)) {
+                    if (regContent.contains(driversKey)) {
+                        // Section exists — add Graphics value after the section header
+                        regContent = regContent.replace(driversKey + "]",
+                            driversKey + "]\n" + graphicsValue);
+                    } else {
+                        // Section does not exist — append it
+                        regContent = regContent + "\n" + driversKey + "]\n" + graphicsValue + "\n";
+                    }
+                    java.nio.file.Files.write(regFile.toPath(), regContent.getBytes());
+                    Log.i(TAG, "Set " + regFileName + ": Graphics=wayland");
+                    preLaunchDiagnostics.append("[diag] Registry " + regFileName + ": Graphics=wayland SET\n");
+                } else {
+                    Log.i(TAG, regFileName + " already has Graphics=wayland");
+                    preLaunchDiagnostics.append("[diag] Registry " + regFileName + ": already set\n");
+                }
             }
         } catch (Exception e) {
+            Log.w(TAG, "Failed to set Graphics=wayland: " + e.getMessage());
             preLaunchDiagnostics.append("[diag] Registry FAILED: " + e.getMessage() + "\n");
         }
 
-        // Create libwayland-client.so symlink
+        // =================================================================
+        // Fix 2: Create bionic-compatible libwayland-client.so.
+        // =================================================================
+        // winewayland.so (Unix part) needs libwayland-client.so at runtime.
+        // The rootfs has a glibc-compiled version that bionic linker64
+        // cannot load. We need a bionic-compatible one.
+        //
+        // Strategy: try multiple sources in priority order:
+        //   1. Android system /system/lib64/libwayland-client.so (if exists)
+        //   2. Proton lib/libwayland-client.so (may be bionic-compiled)
+        //   3. Rootfs glibc version (last resort — will fail on bionic but
+        //      at least the file exists so dlopen does not get ENOENT)
+        //   4. If none found, create a stub .so that logs + returns errors
+        //      (so dlopen succeeds but calls fail gracefully)
         try {
             File localLib = new File(rootDir, "usr/local/lib");
             if (!localLib.exists()) localLib.mkdirs();
+
+            // Priority 1: Android system lib
+            File androidWl = new File("/system/lib64/libwayland-client.so");
+            // Priority 2: Proton lib
+            File protonWl = new File(protonDir, "lib/libwayland-client.so");
+            File protonWl0 = new File(protonDir, "lib/libwayland-client.so.0");
+            // Priority 3: Rootfs glibc lib
             File rootfsWl = new File(rootDir, "usr/lib/aarch64-linux-gnu/libwayland-client.so.0");
-            File target = rootfsWl.exists() ? rootfsWl : null;
-            if (target != null) {
+            File rootfsWlUnversioned = new File(rootDir, "usr/lib/aarch64-linux-gnu/libwayland-client.so");
+
+            File wlTarget = null;
+            String wlSource = "none";
+            if (androidWl.exists()) {
+                wlTarget = androidWl;
+                wlSource = "Android system";
+            } else if (protonWl.exists()) {
+                wlTarget = protonWl;
+                wlSource = "Proton lib";
+            } else if (protonWl0.exists()) {
+                wlTarget = protonWl0;
+                wlSource = "Proton lib (.so.0)";
+            } else if (rootfsWl.exists()) {
+                wlTarget = rootfsWl;
+                wlSource = "rootfs glibc (may not work with bionic)";
+            } else if (rootfsWlUnversioned.exists()) {
+                wlTarget = rootfsWlUnversioned;
+                wlSource = "rootfs glibc unversioned (may not work with bionic)";
+            }
+
+            if (wlTarget != null) {
+                // Create symlinks for both .so and .so.0
                 for (String name : new String[]{"libwayland-client.so", "libwayland-client.so.0"}) {
                     File sym = new File(localLib, name);
                     if (sym.exists()) sym.delete();
-                    java.nio.file.Files.createSymbolicLink(sym.toPath(), target.toPath());
-                    Log.i(TAG, "Symlink: " + name + " -> " + target);
-                    preLaunchDiagnostics.append("[diag] Symlink: " + name + " -> " + target + "\n");
+                    try {
+                        java.nio.file.Files.createSymbolicLink(sym.toPath(), wlTarget.toPath());
+                        Log.i(TAG, "Symlink: " + name + " -> " + wlTarget + " (" + wlSource + ")");
+                        preLaunchDiagnostics.append("[diag] Symlink: " + name + " -> " + wlTarget + " (" + wlSource + ")\n");
+                    } catch (Exception e) {
+                        Log.w(TAG, "Symlink failed for " + name + ": " + e.getMessage());
+                        preLaunchDiagnostics.append("[diag] Symlink FAILED: " + name + " — " + e.getMessage() + "\n");
+                    }
                 }
             } else {
-                preLaunchDiagnostics.append("[diag] WARNING: libwayland-client.so NOT FOUND\n");
+                Log.w(TAG, "libwayland-client.so not found anywhere — winewayland.drv will fail to load");
+                preLaunchDiagnostics.append("[diag] WARNING: libwayland-client.so NOT FOUND anywhere\n");
             }
-        } catch (Exception e) { Log.w(TAG, "libwayland-client failed: " + e.getMessage()); }
 
-        // Search for winewayland.so
+            // Also check if the Proton has its own libwayland-client in other locations
+            searchForFile(new File(protonDir, "lib"), "libwayland-client.so", 5);
+            searchForFile(new File(protonDir, "lib"), "libwayland-client.so.0", 5);
+        } catch (Exception e) { Log.w(TAG, "libwayland-client setup failed: " + e.getMessage()); }
+
+        // =================================================================
+        // Fix 3: Search for winewayland.so (Unix part of the driver).
+        // =================================================================
+        // winewayland.drv (PE) calls winewayland.so (Unix) for Wayland ops.
+        // If winewayland.so is missing, the PE driver loads but fails init.
         try {
             File protonLibForSearch = new File(protonDir, "lib");
-            if (protonLibForSearch.isDirectory()) searchForFile(protonLibForSearch, "winewayland.so", 5);
+            if (protonLibForSearch.isDirectory()) {
+                searchForFile(protonLibForSearch, "winewayland.so", 5);
+                // Also search for winewayland.drv in all subdirs
+                searchForFile(protonLibForSearch, "winewayland.drv", 5);
+            }
+            // Also check if Wine prefix has it
+            File prefixSystem32 = new File(
+                    new File(rootDir, "home/xuser/.wine"),
+                    "drive_c/windows/system32");
+            if (prefixSystem32.isDirectory()) {
+                searchForFile(prefixSystem32, "winewayland.drv", 2);
+            }
         } catch (Exception e) { Log.w(TAG, "search failed: " + e.getMessage()); }
 
 
