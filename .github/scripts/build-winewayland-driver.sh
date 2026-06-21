@@ -16,7 +16,7 @@ echo "=== [1/9] Install build deps ==="
 sudo apt-get install -y -qq \
   autoconf automake libtool bison flex gettext \
   pkg-config python3 python3-pip libffi-dev libexpat1-dev \
-  libxml2-dev libxkbcommon-dev wayland-protocols
+  libxml2-dev libxkbcommon-dev wayland-protocols libwayland-bin
 pip3 install --user meson ninja 2>&1 | tail -3
 export PATH="$HOME/.local/bin:$PATH"
 
@@ -35,7 +35,10 @@ export STRIP="$TOOLCHAIN/bin/llvm-strip"
 export SYSROOT="$TOOLCHAIN/sysroot"
 
 BIONIC_LIBS="$WORKSPACE/app/src/main/cpp/bionic-libs"
-ls "$BIONIC_LIBS/lib/" 2>/dev/null | head
+echo "=== bionic-libs contents ==="
+ls "$BIONIC_LIBS/lib/" 2>/dev/null | head -20
+ls "$BIONIC_LIBS/lib/pkgconfig/" 2>/dev/null
+ls "$BIONIC_LIBS/include/" 2>/dev/null | head -20
 
 echo "=== [3/9] Clone proton-wine ==="
 cd /tmp
@@ -56,6 +59,77 @@ cp libandroid-sysvshm.so "$BIONIC_LIBS/lib/"
 mkdir -p "$BIONIC_LIBS/include/sys"
 cp -r sys/* "$BIONIC_LIBS/include/sys/" 2>/dev/null || true
 cp libandroid-sysvshm.so "$ROOTFS_OUT/usr/local/lib/"
+
+echo "=== [4b/9] Write pkg-config files for bionic wayland/xkbcommon ==="
+mkdir -p "$BIONIC_LIBS/lib/pkgconfig"
+
+# wayland-client.pc
+cat > "$BIONIC_LIBS/lib/pkgconfig/wayland-client.pc" << EOF
+prefix=$BIONIC_LIBS
+exec_prefix=\${prefix}
+libdir=\${exec_prefix}/lib
+includedir=\${prefix}/include
+
+Name: wayland-client
+Description: Wayland client bionic lib (for Android cross-build)
+Version: 1.20.0
+Libs: -L\${libdir} -lwayland-client
+Cflags: -I\${includedir}
+EOF
+
+# wayland-server.pc
+cat > "$BIONIC_LIBS/lib/pkgconfig/wayland-server.pc" << EOF
+prefix=$BIONIC_LIBS
+exec_prefix=\${prefix}
+libdir=\${exec_prefix}/lib
+includedir=\${prefix}/include
+
+Name: wayland-server
+Description: Wayland server bionic lib (for Android cross-build)
+Version: 1.20.0
+Libs: -L\${libdir} -lwayland-server
+Cflags: -I\${includedir}
+EOF
+
+# wayland-scanner.pc — point at system binary
+SCANNER_PATH=$(which wayland-scanner)
+cat > "$BIONIC_LIBS/lib/pkgconfig/wayland-scanner.pc" << EOF
+prefix=/usr
+exec_prefix=\${prefix}
+bindir=\${exec_prefix}/bin
+
+Name: wayland-scanner
+Description: Wayland scanner (system binary)
+Version: 1.20.0
+wayland_scanner=\${bindir}/wayland-scanner
+EOF
+
+# xkbcommon.pc
+cat > "$BIONIC_LIBS/lib/pkgconfig/xkbcommon.pc" << EOF
+prefix=$BIONIC_LIBS
+exec_prefix=\${prefix}
+libdir=\${exec_prefix}/lib
+includedir=\${prefix}/include
+
+Name: xkbcommon
+Description: XKB common bionic lib (for Android cross-build)
+Version: 1.4.0
+Libs: -L\${libdir} -lxkbcommon
+Cflags: -I\${includedir}
+EOF
+
+echo "=== written .pc files ==="
+ls -la "$BIONIC_LIBS/lib/pkgconfig/"
+
+# Configure pkg-config to use ONLY bionic-libs
+export PKG_CONFIG_PATH="$BIONIC_LIBS/lib/pkgconfig"
+export PKG_CONFIG_LIBDIR="$BIONIC_LIBS/lib/pkgconfig"
+unset PKG_CONFIG_SYSROOT_DIR
+
+# Verify pkg-config works
+echo "=== pkg-config check ==="
+pkg-config --cflags --libs wayland-client || echo "wayland-client not found via pkg-config"
+pkg-config --cflags --libs xkbcommon || echo "xkbcommon not found via pkg-config"
 
 echo "=== [5/9] Apply GameNative patches (common + arm64ec) ==="
 cd /tmp/proton-wine
@@ -83,7 +157,7 @@ cp /tmp/proton-wine/android/shm_utils/shm_utils.h /tmp/proton-wine/include/
 echo "=== [6/9] Stage A: Native x86_64 tools build ==="
 mkdir -p /tmp/proton-wine-tools-build
 cd /tmp/proton-wine-tools-build
-unset CC CXX AR STRIP LDFLAGS
+unset CC CXX AR STRIP LDFLAGS PKG_CONFIG_PATH PKG_CONFIG_LIBDIR
 export CFLAGS="-O2"
 export CXXFLAGS="-O2"
 /tmp/proton-wine/configure \
@@ -106,10 +180,9 @@ export STRIP="$TOOLCHAIN/bin/llvm-strip"
 export CFLAGS="-fPIC --sysroot=$SYSROOT -I$SYSROOT/usr/include -I$BIONIC_LIBS/include -I/tmp/proton-wine/include -D__ANDROID_API__=$API"
 export CXXFLAGS="$CFLAGS"
 export LDFLAGS="--sysroot=$SYSROOT -L$BIONIC_LIBS/lib -landroid-sysvshm"
-export WAYLAND_CFLAGS="-I$BIONIC_LIBS/include"
-export WAYLAND_LIBS="-L$BIONIC_LIBS/lib -lwayland-client"
-export XKB_COMMON_CFLAGS="-I$BIONIC_LIBS/include"
-export XKB_COMMON_LIBS="-L$BIONIC_LIBS/lib -lxkbcommon"
+export PKG_CONFIG_PATH="$BIONIC_LIBS/lib/pkgconfig"
+export PKG_CONFIG_LIBDIR="$BIONIC_LIBS/lib/pkgconfig"
+unset PKG_CONFIG_SYSROOT_DIR
 
 ./configure \
   --host=aarch64-linux-android \
@@ -121,10 +194,13 @@ export XKB_COMMON_LIBS="-L$BIONIC_LIBS/lib -lxkbcommon"
   --without-freetype --without-fontconfig --without-v4l2 \
   --enable-win64 \
   --disable-tests \
-  2>&1 | tail -60
+  2>&1 | tail -80
+
+echo "=== configure summary (Wayland detection) ==="
+grep -i "wayland" /tmp/proton-wine/config.log | tail -20 || true
 
 echo "=== [8/9] Build winewayland targets ==="
-make -j$(nproc) dlls/winewayland.drv 2>&1 | tail -50
+make -j$(nproc) dlls/winewayland.drv 2>&1 | tail -80
 
 echo "=== Searching for built artifacts ==="
 find /tmp/proton-wine -name "winewayland*" -type f -newer /tmp/proton-wine/configure 2>/dev/null | head -20
@@ -159,8 +235,8 @@ if [ "$DRV_SIZE" -lt 5000 ]; then
   echo "✗ FATAL: winewayland.drv missing or too small"
   echo "=== dlls/winewayland.drv/ contents ==="
   ls -la /tmp/proton-wine/dlls/winewayland.drv/ 2>/dev/null || true
-  echo "=== config.log tail ==="
-  tail -80 /tmp/proton-wine/config.log 2>/dev/null || true
+  echo "=== config.log Wayland section ==="
+  grep -B2 -A5 -i "wayland" /tmp/proton-wine/config.log | tail -50 || true
   exit 1
 fi
 
