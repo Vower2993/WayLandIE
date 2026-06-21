@@ -455,12 +455,15 @@ public final class WineRunner {
      *
      * @param useBionicBridge true if the bridge being launched is the bionic
      *     variant (compiled with NDK against bionic libc). When true, the
-     *     glibc-specific environment variables (GLIBC_TUNABLES, LD_PRELOAD
-     *     shim, LD_LIBRARY_PATH pointing at glibc rootfs libs, /system/lib64)
-     *     are SKIPPED for the bridge process — they don't apply to a bionic
-     *     binary and would be actively harmful (LD_PRELOAD of a glibc shim
-     *     into a bionic binary would crash). Wine still gets the full glibc
-     *     environment via the 5-arg overload above.
+     *     glibc-specific environment variables (LD_LIBRARY_PATH pointing at
+     *     glibc rootfs libs, /system/lib64) are SKIPPED for the bridge
+     *     process — they don't apply to a bionic binary and would be
+     *     actively harmful (linker64 might pick up glibc .so files and crash).
+     *     Wine still gets the full glibc environment via the 5-arg overload
+     *     above. (GLIBC_TUNABLES and the LD_PRELOAD shim were removed —
+     *     GLIBC_TUNABLES is a no-op on glibc 2.31, and the shim didn't work
+     *     because Android's seccomp uses SECCOMP_RET_KILL_PROCESS. The bionic
+     *     bridge eliminates the SIGSYS issue entirely.)
      */
     private void setupEnvironment(Map<String, String> env, File rootDir,
             File protonDir, boolean isArm64ec, boolean fexCoreInstalled,
@@ -497,38 +500,18 @@ public final class WineRunner {
         env.put("TMPDIR", tmpDir.getAbsolutePath());
         env.put("XDG_RUNTIME_DIR", runtimeDir.getAbsolutePath());
 
-        // CRITICAL: Disable glibc rseq (restartable sequences) to avoid SIGSYS.
-        // glibc 2.35+ calls the rseq() syscall (334 on arm64) during
-        // __libc_start_main() — BEFORE main() runs. Android's seccomp filter
-        // blocks rseq() with SECCOMP_RET_KILL_PROCESS → SIGSYS → exit code 159.
-        // This kills the bridge (and Wine) before any output is produced.
-        // Setting GLIBC_TUNABLES=glibc.pthread.rseq=0 tells glibc to skip rseq
-        // registration, avoiding the blocked syscall entirely.
-        //
-        // GLIBC_TUNABLES is glibc-only — bionic ignores it. Skip for the bionic
-        // bridge to keep the env clean (no harm in setting it, but cleaner).
-        if (!useBionicBridge) {
-            env.put("GLIBC_TUNABLES", "glibc.pthread.rseq=0");
-        }
+        // NOTE: GLIBC_TUNABLES (glibc.pthread.rseq=0) was removed — it's a
+        // no-op on glibc 2.31 (our rootfs is Ubuntu 20.04 Focal). glibc 2.35+
+        // calls rseq() during __libc_start_main(), but 2.31 doesn't. The
+        // bionic bridge eliminates the SIGSYS issue entirely for the bridge;
+        // Wine (which still uses glibc) works fine on 2.31 without the tunable.
 
-        // CRITICAL: LD_PRELOAD syscall shim — intercepts syscalls blocked by
-        // Android's seccomp filter (rseq, clone3, openat2, io_uring, etc.).
-        // Test F showed libwayland-server 1.22 and libvulkan trigger SIGSYS
-        // (exit 159). The shim returns ENOSYS so libraries fall back to
-        // older methods. Compiled in build-imagefs.sh → /usr/local/lib/
-        //
-        // SKIP for bionic bridge: the shim is a glibc .so — LD_PRELOADing it
-        // into a bionic binary would crash (incompatible ABIs). The bionic
-        // bridge doesn't need the shim because it doesn't link against glibc.
-        if (!useBionicBridge) {
-            File shimFile = new File(rootDir, "usr/local/lib/libwaylandie_shim.so");
-            if (shimFile.exists()) {
-                env.put("LD_PRELOAD", shimFile.getAbsolutePath());
-                Log.i(TAG, "LD_PRELOAD syscall shim: " + shimFile.getAbsolutePath());
-            } else {
-                Log.w(TAG, "libwaylandie_shim.so NOT FOUND — bridge/Wine may crash with SIGSYS");
-            }
-        }
+        // NOTE: LD_PRELOAD syscall shim was removed — the shim didn't work
+        // (Android's seccomp uses SECCOMP_RET_KILL_PROCESS for blocked syscalls,
+        // which kills the process BEFORE the shim's signal handler can intercept).
+        // The bionic bridge replaces the shim: it links against bionic libc
+        // (no glibc constructors → no SIGSYS). Wine still uses glibc 2.31,
+        // which is safe (no rseq/clone3 during startup).
 
         // Wine prefix — created during Proton install (prefixPack.txz unpacked there)
         File winePrefix = new File(homeDir, ".wine");

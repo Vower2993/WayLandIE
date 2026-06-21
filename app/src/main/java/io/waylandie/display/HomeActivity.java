@@ -487,11 +487,9 @@ public final class HomeActivity extends Activity {
                 } else {
                     // ACTUALLY execute `libld_glibc.so /bin/echo test` to confirm
                     // SELinux allows execve on the extracted .so AND the glibc
-                    // runtime works (no SIGSYS from seccomp).
-                    // NOTE: We can't use `--version` because glibc 2.31's linker
-                    // treats it as a program name when invoked standalone.
-                    // Instead, we run /bin/echo (which links libc) and read the
-                    // glibc version from libc.so.6 strings.
+                    // runtime works. With the bionic bridge as the primary path,
+                    // this is a fallback check — the glibc linker is only used
+                    // for the glibc bridge variant and for Wine itself.
                     try {
                         File echoBin = new File(rootDir, "usr/bin/echo");
                         String libPath = new File(rootDir, "usr/lib").getAbsolutePath() + ":"
@@ -517,47 +515,6 @@ public final class HomeActivity extends Activity {
                             results.append("✓ SELinux ALLOWED execve of libld_glibc.so\n");
                             results.append("✓ glibc linker executes /bin/echo successfully (exit=0)\n");
                             passed++;
-
-                            // Read glibc version from libc.so.6 strings
-                            File libcSo = new File(rootDir, "usr/lib/aarch64-linux-gnu/libc.so.6");
-                            String glibcVersion = "";
-                            if (libcSo.exists()) {
-                                try {
-                                    java.io.RandomAccessFile raf = new java.io.RandomAccessFile(libcSo, "r");
-                                    byte[] data = new byte[(int) Math.min(raf.length(), 2 * 1024 * 1024)];
-                                    raf.readFully(data);
-                                    raf.close();
-                                    String content = new String(data, java.nio.charset.StandardCharsets.US_ASCII);
-                                    // Look for "GLIBC_2.XX" or "release version 2.XX"
-                                    java.util.regex.Pattern pat = java.util.regex.Pattern.compile(
-                                            "(?:GLIBC_|release version )(\\d+\\.\\d+)");
-                                    java.util.regex.Matcher m = pat.matcher(content);
-                                    double maxVer = 0;
-                                    while (m.find()) {
-                                        try {
-                                            double v = Double.parseDouble(m.group(1));
-                                            if (v > maxVer) maxVer = v;
-                                        } catch (Exception ignored) {}
-                                    }
-                                    if (maxVer > 0) {
-                                        glibcVersion = String.valueOf(maxVer);
-                                        results.append("  glibc version: " + glibcVersion + "\n");
-                                        // Check version safety
-                                        if (maxVer >= 2.34) {
-                                            results.append("  ✗ FATAL: glibc " + glibcVersion + " is too new!\n");
-                                            results.append("    glibc 2.34+ calls clone3/rseq → SIGSYS (exit 159) on Android\n");
-                                            results.append("    Need glibc < 2.34. Rebuild rootfs with Ubuntu 20.04 Focal.\n");
-                                            failed++;
-                                        } else {
-                                            results.append("  ✓ glibc " + glibcVersion + " is safe (< 2.34 — no seccomp SIGSYS)\n");
-                                            passed++;
-                                        }
-                                    }
-                                } catch (Exception e) {
-                                    results.append("  ⚠ Could not read glibc version: " + e.getMessage() + "\n");
-                                    warned++;
-                                }
-                            }
                         } else {
                             results.append("✗ libld_glibc.so executed but FAILED (exit=" + exit + ")\n");
                             results.append("  Output: " + out.toString().trim() + "\n");
@@ -572,95 +529,64 @@ public final class HomeActivity extends Activity {
                 }
             }
 
-            // === 3. BRIDGE TRANSLATOR — ACTUALLY LAUNCH it with 6 args ===
+            // === 3. BRIDGE TRANSLATOR — launch test (bionic preferred, glibc fallback) ===
             results.append("\n--- BRIDGE TRANSLATOR (launch test) ---\n");
-            File bridgeBin = new File(rootDir, "usr/local/bin/waylandie-wayland-bridge");
-            if (!bridgeBin.exists()) {
-                results.append("✗ Bridge binary NOT FOUND at " + bridgeBin + "\n");
-                results.append("  Wine will have no Wayland display to render to.\n");
-                results.append("  Rebuild rootfs with libc6-dev + wayland-scanner.\n");
-                failed++;
-            } else if (!linker.exists()) {
-                results.append("⚠ Bridge binary present but libld_glibc.so missing — cannot launch\n");
-                warned++;
-            } else {
-                results.append("✓ Bridge binary found: " + bridgeBin.length() + " bytes\n");
-                bridgeBin.setExecutable(true, false);
-                // Build the --library-path (same set WineRunner uses)
-                File protonDirProbe = new File(filesDir, "contents/proton/active");
-                String libPath = new File(rootDir, "usr/lib").getAbsolutePath() + ":"
-                        + new File(rootDir, "usr/lib/aarch64-linux-gnu").getAbsolutePath() + ":"
-                        + new File(rootDir, "usr/local/lib").getAbsolutePath() + ":"
-                        + new File(protonDirProbe, "lib").getAbsolutePath() + ":"
-                        + new File(protonDirProbe, "files/lib").getAbsolutePath();
-                File socketFile = new File(rootDir, "tmp/diag-socket.txt");
-                try { socketFile.getParentFile().mkdirs(); socketFile.delete(); } catch (Exception ignored) {}
+            // Determine which bridge to test: bionic (preferred) or glibc (fallback).
+            // The bionic bridge (libwaylandie_bridge.so) is compiled with NDK
+            // against bionic libc — no glibc SIGSYS issue. The glibc bridge
+            // (usr/local/bin/waylandie-wayland-bridge) is the legacy fallback.
+            File bionicBridgeForLaunch = new File(nativeLibDir, "libwaylandie_bridge.so");
+            File glibcBridgeBin = new File(rootDir, "usr/local/bin/waylandie-wayland-bridge");
+            File socketFile = new File(rootDir, "tmp/diag-socket.txt");
+            try { socketFile.getParentFile().mkdirs(); socketFile.delete(); } catch (Exception ignored) {}
 
-                // --- ldd probe: use LD_TRACE_LOADED_OBJECTS=1 to list dependencies ---
-                // This catches "error while loading shared libraries" BEFORE the
-                // bridge launch, giving us a clear error message instead of a
-                // silent crash.
-                // NOTE: We can't use 'linker --list bridge' because glibc 2.31's
-                // ld-linux treats --list as a program name (same bug as --version).
-                // Instead, set LD_TRACE_LOADED_OBJECTS=1 env var which makes the
-                // linker print library dependencies and exit (this is what ldd does).
-                try {
-                    List<String> lddCmd = new ArrayList<>();
-                    lddCmd.add(linker.getAbsolutePath());
-                    lddCmd.add("--library-path");
-                    lddCmd.add(libPath);
-                    lddCmd.add(bridgeBin.getAbsolutePath());
-                    ProcessBuilder lddPb = new ProcessBuilder(lddCmd);
-                    lddPb.redirectErrorStream(true);
-                    lddPb.environment().clear();
-                    lddPb.environment().put("LD_LIBRARY_PATH", libPath);
-                    lddPb.environment().put("LD_TRACE_LOADED_OBJECTS", "1");
-                    Process lddProc = lddPb.start();
-                    StringBuilder lddOut = new StringBuilder();
-                    java.io.BufferedReader lddReader = new java.io.BufferedReader(
-                            new java.io.InputStreamReader(lddProc.getInputStream()));
-                    String lddLine;
-                    while ((lddLine = lddReader.readLine()) != null) {
-                        lddOut.append(lddLine).append('\n');
-                    }
-                    lddProc.waitFor(3, java.util.concurrent.TimeUnit.SECONDS);
-                    lddProc.destroyForcibly();
-                    String lddStr = lddOut.toString();
-                    if (lddStr.contains("not found")) {
-                        results.append("✗ ldd probe found MISSING libraries:\n");
-                        for (String l : lddStr.split("\n")) {
-                            if (l.contains("not found")) {
-                                results.append("    ").append(l.trim()).append("\n");
-                            }
-                        }
-                        failed++;
-                    } else {
-                        results.append("✓ ldd probe: all shared libraries resolved\n");
-                        passed++;
-                    }
-                } catch (Exception e) {
-                    results.append("⚠ ldd probe failed: " + e.getMessage() + "\n");
-                    warned++;
-                }
+            // Build the --library-path (same set WineRunner uses) for glibc fallback
+            File protonDirProbe = new File(filesDir, "contents/proton/active");
+            String glibcLibPath = new File(rootDir, "usr/lib").getAbsolutePath() + ":"
+                    + new File(rootDir, "usr/lib/aarch64-linux-gnu").getAbsolutePath() + ":"
+                    + new File(rootDir, "usr/local/lib").getAbsolutePath() + ":"
+                    + new File(protonDirProbe, "lib").getAbsolutePath() + ":"
+                    + new File(protonDirProbe, "files/lib").getAbsolutePath();
 
-                // Bridge requires 8 args (argc=9):
-                //   argv[1]=bridge_socket  argv[2]=target_commits  argv[3]=socket_file
-                //   argv[4]=timeout_ms     argv[5]=clear_ahb       argv[6]=accept_client
-                //   argv[7]=output_width   argv[8]=output_height
-                // Without all 8, the bridge prints a usage message to stderr and exits(2).
-                int dispW = 2688, dispH = 1216;
-                try {
-                    android.graphics.Point sz = new android.graphics.Point();
-                    getWindowManager().getDefaultDisplay().getRealSize(sz);
-                    dispW = Math.max(sz.x, sz.y);
-                    dispH = Math.min(sz.x, sz.y);
-                } catch (Exception ignored) {}
+            // Bridge requires 8 args (argc=9):
+            //   argv[1]=bridge_socket  argv[2]=target_commits  argv[3]=socket_file
+            //   argv[4]=timeout_ms     argv[5]=clear_ahb       argv[6]=accept_client
+            //   argv[7]=output_width   argv[8]=output_height
+            // Without all 8, the bridge prints a usage message to stderr and exits(2).
+            int dispW = 2688, dispH = 1216;
+            try {
+                android.graphics.Point sz = new android.graphics.Point();
+                getWindowManager().getDefaultDisplay().getRealSize(sz);
+                dispW = Math.max(sz.x, sz.y);
+                dispH = Math.min(sz.x, sz.y);
+            } catch (Exception ignored) {}
 
-                List<String> cmd = new ArrayList<>();
+            List<String> cmd = new ArrayList<>();
+            String bridgeType;
+            if (bionicBridgeForLaunch.exists()) {
+                // Bionic bridge (PREFERRED): launch directly — no linker, no
+                // LD_LIBRARY_PATH, no LD_PRELOAD shim, no GLIBC_TUNABLES.
+                // Compiled with NDK against bionic libc — no glibc SIGSYS issue.
+                bionicBridgeForLaunch.setExecutable(true, false);
+                cmd.add(bionicBridgeForLaunch.getAbsolutePath());
+                bridgeType = "bionic";
+            } else if (glibcBridgeBin.exists() && linker.exists()) {
+                // Glibc bridge (FALLBACK): launch via libld_glibc.so.
+                // Used when the bionic bridge isn't in the APK.
+                glibcBridgeBin.setExecutable(true, false);
                 cmd.add(linker.getAbsolutePath());
                 cmd.add("--library-path");
-                cmd.add(libPath);
-                cmd.add(bridgeBin.getAbsolutePath());
+                cmd.add(glibcLibPath);
+                cmd.add(glibcBridgeBin.getAbsolutePath());
+                bridgeType = "glibc";
+            } else {
+                results.append("✗ No bridge binary available (bionic bridge not built, glibc bridge missing)\n");
+                results.append("  Wine will have no Wayland display to render to.\n");
+                failed++;
+                bridgeType = null;
+            }
+
+            if (bridgeType != null) {
                 cmd.add("waylandie.display.bridge.v1");   // argv[1]
                 cmd.add("1");                              // argv[2] target_commits
                 cmd.add(socketFile.getAbsolutePath());     // argv[3] socket file
@@ -674,7 +600,7 @@ public final class HomeActivity extends Activity {
                     ProcessBuilder pb = new ProcessBuilder(cmd);
                     pb.directory(rootDir);
                     pb.redirectErrorStream(true);
-                    // CRITICAL: Set env vars the bridge needs.
+                    // Env vars the bridge needs (both bionic and glibc).
                     // Without XDG_RUNTIME_DIR, wl_display_add_socket_auto() fails
                     // and the bridge crashes with no output.
                     File runtimeDir = new File(rootDir, "usr/tmp/runtime");
@@ -684,7 +610,6 @@ public final class HomeActivity extends Activity {
                     pb.environment().put("HOME", new File(rootDir, "home/xuser").getAbsolutePath());
                     pb.environment().put("PATH", new File(rootDir, "usr/bin").getAbsolutePath() + ":"
                             + new File(rootDir, "usr/local/bin").getAbsolutePath());
-                    pb.environment().put("LD_LIBRARY_PATH", libPath);
                     pb.environment().put("XDG_RUNTIME_DIR", runtimeDir.getAbsolutePath());
                     pb.environment().put("WAYLAND_DISPLAY", "waylandie");
                     pb.environment().put("WAYLANDIE_BRIDGE_SOCKET", "waylandie.display.bridge.v1");
@@ -692,19 +617,12 @@ public final class HomeActivity extends Activity {
                     pb.environment().put("WAYLANDIE_FINAL_COPY", "forbidden");
                     pb.environment().put("TMPDIR", tmpDir.getAbsolutePath());
                     pb.environment().put("LANG", "en_US.UTF-8");
-                    // CRITICAL: Disable glibc rseq to avoid SIGSYS from seccomp.
-                    // glibc 2.35+ calls rseq() during __libc_start_main() (before
-                    // main). Android's seccomp blocks rseq() → SIGSYS → exit 159.
-                    pb.environment().put("GLIBC_TUNABLES", "glibc.pthread.rseq=0");
-                    // LD_PRELOAD syscall shim — intercepts blocked syscalls from
-                    // libwayland-server/libvulkan constructors (Test F finding)
-                    File diagShim = new File(rootDir, "usr/local/lib/libwaylandie_shim.so");
-                    if (diagShim.exists()) {
-                        pb.environment().put("LD_PRELOAD", diagShim.getAbsolutePath());
-                        results.append("  (with LD_PRELOAD shim)\n");
+                    // Glibc bridge needs LD_LIBRARY_PATH; bionic bridge doesn't.
+                    if (bridgeType.equals("glibc")) {
+                        pb.environment().put("LD_LIBRARY_PATH", glibcLibPath);
                     }
                     Process bridge = pb.start();
-                    results.append("  Launched bridge via linker (8 args, output=" + dispW + "x" + dispH + ")\n");
+                    results.append("  Launched " + bridgeType + " bridge (8 args, output=" + dispW + "x" + dispH + ")\n");
 
                     // Drain ALL output in a reader thread (avoids race where
                     // process exits before we read buffered data).
@@ -739,7 +657,7 @@ public final class HomeActivity extends Activity {
                     if (bridgeOut.length() == 0) {
                         results.append("✗ Bridge produced NO output — likely crashed on launch\n");
                         results.append("  Exit code: " + exitCode + "\n");
-                        results.append("  Check LD_LIBRARY_PATH / missing libs (see ldd probe above).\n");
+                        results.append("  Check LD_LIBRARY_PATH / missing libs.\n");
                         failed++;
                     } else {
                         String snippet = bridgeOut.toString();
@@ -776,567 +694,12 @@ public final class HomeActivity extends Activity {
                 }
             }
 
-            // === 3b. SIGSYS DIAGNOSIS ===
-            // If the bridge crashed with exit 159 (SIGSYS from seccomp), run
-            // additional tests to isolate the blocked syscall.
-            results.append("\n--- SIGSYS DIAGNOSIS (exit 159 = signal 31 = blocked syscall) ---\n");
-            File echoBin = new File(rootDir, "usr/bin/echo");
-            File runtimeDirDiag = new File(rootDir, "usr/tmp/runtime");
-            if (!runtimeDirDiag.exists()) runtimeDirDiag.mkdirs();
-            File tmpDirDiag = new File(rootDir, "usr/tmp");
-            // Rebuild libPath (same as bridge section — needed because libPath
-            // was scoped to the bridge else-block above)
-            File protonDirProbeSig = new File(filesDir, "contents/proton/active");
-            String sigsysLibPath = new File(rootDir, "usr/lib").getAbsolutePath() + ":"
-                    + new File(rootDir, "usr/lib/aarch64-linux-gnu").getAbsolutePath() + ":"
-                    + new File(rootDir, "usr/local/lib").getAbsolutePath() + ":"
-                    + new File(protonDirProbeSig, "lib").getAbsolutePath() + ":"
-                    + new File(protonDirProbeSig, "files/lib").getAbsolutePath();
-
-            // Test A: Minimal glibc binary WITHOUT rseq disable
-            // /bin/echo only links libc — if this crashes, glibc's own
-            // startup is making a blocked syscall (likely rseq).
-            if (echoBin.exists() && linker.exists()) {
-                results.append("Test A: /bin/echo via linker (NO rseq disable):\n");
-                try {
-                    List<String> echoCmd = new ArrayList<>();
-                    echoCmd.add(linker.getAbsolutePath());
-                    echoCmd.add("--library-path");
-                    echoCmd.add(sigsysLibPath);
-                    echoCmd.add(echoBin.getAbsolutePath());
-                    echoCmd.add("hello-sigsys-test");
-                    ProcessBuilder echoPb = new ProcessBuilder(echoCmd);
-                    echoPb.directory(rootDir);
-                    echoPb.redirectErrorStream(true);
-                    echoPb.environment().clear();
-                    echoPb.environment().put("LD_LIBRARY_PATH", sigsysLibPath);
-                    echoPb.environment().put("HOME", new File(rootDir, "home/xuser").getAbsolutePath());
-                    echoPb.environment().put("TMPDIR", tmpDirDiag.getAbsolutePath());
-                    echoPb.environment().put("PATH", new File(rootDir, "usr/bin").getAbsolutePath() + ":"
-                            + new File(rootDir, "usr/local/bin").getAbsolutePath());
-                    // NOTE: GLIBC_TUNABLES intentionally NOT set — testing default behavior
-                    Process echoProc = echoPb.start();
-                    StringBuilder echoOut = new StringBuilder();
-                    Thread echoReader = new Thread(() -> {
-                        try (java.io.BufferedReader r = new java.io.BufferedReader(
-                                new java.io.InputStreamReader(echoProc.getInputStream()))) {
-                            String l;
-                            while ((l = r.readLine()) != null) echoOut.append(l).append('\n');
-                        } catch (Exception ex) {
-                            echoOut.append("[read error: ").append(ex.getMessage()).append("]\n");
-                        }
-                    }, "wl-diag-echo-a");
-                    echoReader.start();
-                    boolean echoExited = echoProc.waitFor(5, java.util.concurrent.TimeUnit.SECONDS);
-                    if (!echoExited) echoProc.destroyForcibly();
-                    echoReader.join(1000);
-                    int echoExit = -1;
-                    try { echoExit = echoProc.exitValue(); } catch (Exception ignored) {}
-                    if (echoExit == 0 && echoOut.toString().contains("hello-sigsys-test")) {
-                        results.append("  ✓ /bin/echo succeeded (exit=0) — glibc runtime OK without rseq disable\n");
-                        results.append("  → SIGSYS is bridge-specific (library constructor or early syscall)\n");
-                    } else if (echoExit == 159) {
-                        results.append("  ✗ /bin/echo killed by SIGSYS (exit=159) — glibc startup itself is blocked\n");
-                        results.append("  → Likely rseq() syscall (334) blocked by Android seccomp\n");
-                        failed++;
-                    } else {
-                        results.append("  ⚠ /bin/echo exit=" + echoExit + " output='" + echoOut.toString().trim() + "'\n");
-                        warned++;
-                    }
-                } catch (Exception e) {
-                    results.append("  ⚠ /bin/echo test failed: " + e.getMessage() + "\n");
-                    warned++;
-                }
-            } else {
-                results.append("Test A: SKIP (/bin/echo or linker not found)\n");
-            }
-
-            // Test B: Minimal glibc binary WITH rseq disable
-            // If Test A crashed but Test B works → rseq is confirmed as the culprit.
-            if (echoBin.exists() && linker.exists()) {
-                results.append("Test B: /bin/echo via linker (WITH rseq disable):\n");
-                try {
-                    List<String> echoCmd = new ArrayList<>();
-                    echoCmd.add(linker.getAbsolutePath());
-                    echoCmd.add("--library-path");
-                    echoCmd.add(sigsysLibPath);
-                    echoCmd.add(echoBin.getAbsolutePath());
-                    echoCmd.add("hello-rseq-disabled");
-                    ProcessBuilder echoPb = new ProcessBuilder(echoCmd);
-                    echoPb.directory(rootDir);
-                    echoPb.redirectErrorStream(true);
-                    echoPb.environment().clear();
-                    echoPb.environment().put("LD_LIBRARY_PATH", sigsysLibPath);
-                    echoPb.environment().put("HOME", new File(rootDir, "home/xuser").getAbsolutePath());
-                    echoPb.environment().put("TMPDIR", tmpDirDiag.getAbsolutePath());
-                    echoPb.environment().put("PATH", new File(rootDir, "usr/bin").getAbsolutePath() + ":"
-                            + new File(rootDir, "usr/local/bin").getAbsolutePath());
-                    echoPb.environment().put("GLIBC_TUNABLES", "glibc.pthread.rseq=0");
-                    Process echoProc = echoPb.start();
-                    StringBuilder echoOut = new StringBuilder();
-                    Thread echoReader = new Thread(() -> {
-                        try (java.io.BufferedReader r = new java.io.BufferedReader(
-                                new java.io.InputStreamReader(echoProc.getInputStream()))) {
-                            String l;
-                            while ((l = r.readLine()) != null) echoOut.append(l).append('\n');
-                        } catch (Exception ex) {
-                            echoOut.append("[read error: ").append(ex.getMessage()).append("]\n");
-                        }
-                    }, "wl-diag-echo-b");
-                    echoReader.start();
-                    boolean echoExited = echoProc.waitFor(5, java.util.concurrent.TimeUnit.SECONDS);
-                    if (!echoExited) echoProc.destroyForcibly();
-                    echoReader.join(1000);
-                    int echoExit = -1;
-                    try { echoExit = echoProc.exitValue(); } catch (Exception ignored) {}
-                    if (echoExit == 0 && echoOut.toString().contains("hello-rseq-disabled")) {
-                        results.append("  ✓ /bin/echo succeeded (exit=0) with rseq disabled\n");
-                        passed++;
-                    } else if (echoExit == 159) {
-                        results.append("  ✗ /bin/echo STILL killed by SIGSYS (exit=159) even with rseq disabled\n");
-                        results.append("  → rseq is NOT the culprit — another glibc syscall is blocked\n");
-                        failed++;
-                    } else {
-                        results.append("  ⚠ /bin/echo exit=" + echoExit + " output='" + echoOut.toString().trim() + "'\n");
-                        warned++;
-                    }
-                } catch (Exception e) {
-                    results.append("  ⚠ /bin/echo (rseq disabled) test failed: " + e.getMessage() + "\n");
-                    warned++;
-                }
-            } else {
-                results.append("Test B: SKIP (/bin/echo or linker not found)\n");
-            }
-
-            // Test C: Capture logcat for seccomp audit messages.
-            // When Android's seccomp filter kills a process with SIGSYS, the
-            // kernel/auditd logs the blocked syscall number. We capture logcat
-            // output after the echo crash and search for "syscall=" to identify
-            // the exact blocked syscall.
-            results.append("Test C: logcat seccomp capture (identifies blocked syscall):\n");
-            try {
-                // Give logcat a moment to flush the seccomp message
-                try { Thread.sleep(500); } catch (InterruptedException ignored) {}
-                // Capture last 200 lines from main + kernel buffers
-                ProcessBuilder logcatPb = new ProcessBuilder(
-                        "logcat", "-d", "-b", "main", "-b", "crash", "-b", "kernel", "-t", "200");
-                logcatPb.redirectErrorStream(true);
-                Process logcatProc = logcatPb.start();
-                StringBuilder logcatOut = new StringBuilder();
-                Thread logcatReader = new Thread(() -> {
-                    try (java.io.BufferedReader r = new java.io.BufferedReader(
-                            new java.io.InputStreamReader(logcatProc.getInputStream()))) {
-                        String l;
-                        while ((l = r.readLine()) != null) logcatOut.append(l).append('\n');
-                    } catch (Exception ex) {
-                        logcatOut.append("[read error: ").append(ex.getMessage()).append("]\n");
-                    }
-                }, "wl-diag-logcat");
-                logcatReader.start();
-                logcatProc.waitFor(3, java.util.concurrent.TimeUnit.SECONDS);
-                logcatReader.join(1000);
-                String logcatStr = logcatOut.toString();
-                // Search for seccomp/SIGSYS/syscall messages
-                boolean found = false;
-                for (String l : logcatStr.split("\n")) {
-                    String lower = l.toLowerCase();
-                    if (lower.contains("seccomp") || lower.contains("sigsys")
-                            || lower.contains("syscall=") || lower.contains("fatal signal 31")
-                            || lower.contains("sys_seccomp") || lower.contains("auditd")) {
-                        results.append("  ").append(l.trim()).append("\n");
-                        found = true;
-                    }
-                }
-                if (!found) {
-                    results.append("  (no seccomp/SIGSYS messages found in logcat)\n");
-                    results.append("  Note: kernel buffer may require root. Trying dmesg…\n");
-                    // Try dmesg as fallback
-                    try {
-                        ProcessBuilder dmesgPb = new ProcessBuilder("dmesg");
-                        dmesgPb.redirectErrorStream(true);
-                        Process dmesgProc = dmesgPb.start();
-                        StringBuilder dmesgOut = new StringBuilder();
-                        Thread dmesgReader = new Thread(() -> {
-                            try (java.io.BufferedReader r = new java.io.BufferedReader(
-                                    new java.io.InputStreamReader(dmesgProc.getInputStream()))) {
-                                String l;
-                                while ((l = r.readLine()) != null) dmesgOut.append(l).append('\n');
-                            } catch (Exception ex) { /* ignore */ }
-                        }, "wl-diag-dmesg");
-                        dmesgReader.start();
-                        dmesgProc.waitFor(2, java.util.concurrent.TimeUnit.SECONDS);
-                        dmesgReader.join(500);
-                        for (String l : dmesgOut.toString().split("\n")) {
-                            String lower = l.toLowerCase();
-                            if (lower.contains("seccomp") || lower.contains("sigsys")
-                                    || lower.contains("syscall=")) {
-                                results.append("  [dmesg] ").append(l.trim()).append("\n");
-                                found = true;
-                            }
-                        }
-                        if (!found) results.append("  (no seccomp messages in dmesg either)\n");
-                    } catch (Exception de) {
-                        results.append("  (dmesg not available: ").append(de.getMessage()).append(")\n");
-                    }
-                }
-                if (found) {
-                    results.append("  → The 'syscall=NNN' number above identifies the blocked syscall\n");
-                    passed++;
-                } else {
-                    results.append("  ⚠ Could not capture seccomp audit log (may need root)\n");
-                    warned++;
-                }
-            } catch (Exception e) {
-                results.append("  ⚠ logcat capture failed: " + e.getMessage() + "\n");
-                warned++;
-            }
-
-            // Test D: /bin/echo via PROOT (bypasses native seccomp).
-            // Proot translates syscalls via ptrace, potentially avoiding the
-            // blocked syscall. If this works, proot is a viable fallback.
-            results.append("Test D: /bin/echo via proot (bypasses native seccomp):\n");
-            File prootBinary = new File(nativeLibDir, "libproot.so");
-            if (prootBinary.exists() && echoBin.exists()) {
-                try {
-                    List<String> prootCmd = new ArrayList<>();
-                    prootCmd.add(prootBinary.getAbsolutePath());
-                    prootCmd.add("-r");
-                    prootCmd.add(rootDir.getAbsolutePath());
-                    prootCmd.add("-w");
-                    prootCmd.add("/home/xuser");
-                    prootCmd.add("-b");
-                    prootCmd.add("/dev:/dev");
-                    prootCmd.add("-b");
-                    prootCmd.add("/proc:/proc");
-                    prootCmd.add("-b");
-                    prootCmd.add("/sys:/sys");
-                    prootCmd.add("/bin/echo");
-                    prootCmd.add("hello-from-proot");
-                    ProcessBuilder prootPb = new ProcessBuilder(prootCmd);
-                    prootPb.redirectErrorStream(true);
-                    Process prootProc = prootPb.start();
-                    StringBuilder prootOut = new StringBuilder();
-                    Thread prootReader = new Thread(() -> {
-                        try (java.io.BufferedReader r = new java.io.BufferedReader(
-                                new java.io.InputStreamReader(prootProc.getInputStream()))) {
-                            String l;
-                            while ((l = r.readLine()) != null) prootOut.append(l).append('\n');
-                        } catch (Exception ex) {
-                            prootOut.append("[read error: ").append(ex.getMessage()).append("]\n");
-                        }
-                    }, "wl-diag-proot");
-                    prootReader.start();
-                    boolean prootExited = prootProc.waitFor(10, java.util.concurrent.TimeUnit.SECONDS);
-                    if (!prootExited) prootProc.destroyForcibly();
-                    prootReader.join(1000);
-                    int prootExit = -1;
-                    try { prootExit = prootProc.exitValue(); } catch (Exception ignored) {}
-                    if (prootExit == 0 && prootOut.toString().contains("hello-from-proot")) {
-                        results.append("  ✓ /bin/echo succeeded via proot (exit=0)\n");
-                        results.append("  → PROOT WORKS — proot bypasses the seccomp-blocked syscall\n");
-                        results.append("  → Recommend: use proot mode for bridge + Wine until native seccomp is resolved\n");
-                        passed++;
-                    } else if (prootExit == 159) {
-                        results.append("  ✗ /bin/echo killed by SIGSYS via proot too (exit=159)\n");
-                        results.append("  → seccomp blocks proot as well — deeper issue\n");
-                        failed++;
-                    } else {
-                        String snippet = prootOut.toString();
-                        if (snippet.length() > 200) snippet = snippet.substring(0, 200);
-                        results.append("  ⚠ /bin/echo via proot exit=" + prootExit + " output='" + snippet.trim() + "'\n");
-                        warned++;
-                    }
-                } catch (Exception e) {
-                    results.append("  ⚠ proot echo test failed: " + e.getMessage() + "\n");
-                    warned++;
-                }
-            } else {
-                results.append("Test D: SKIP (libproot.so or /bin/echo not found)\n");
-            }
-
-            // Test E: Bionic test binary (compiled with NDK, linked against bionic).
-            // This is the KEY test — if bionic works, it proves the seccomp issue
-            // is glibc-specific and bionic is the correct native path.
-            // The binary also tests individual syscalls (rseq, getcpu, clone3, etc.)
-            // to identify which ones Android's seccomp blocks.
-            results.append("Test E: bionic test binary (NDK-compiled, NO glibc):\n");
-            File bionicTest = new File(nativeLibDir, "libwaylandie_bionic_test.so");
-            if (bionicTest.exists()) {
-                try {
-                    bionicTest.setExecutable(true, false);
-                    // Direct execve — bionic binary doesn't need a linker wrapper.
-                    // Android's own linker (linker64) handles it natively.
-                    ProcessBuilder bionicPb = new ProcessBuilder(bionicTest.getAbsolutePath());
-                    bionicPb.redirectErrorStream(true);
-                    Process bionicProc = bionicPb.start();
-                    StringBuilder bionicOut = new StringBuilder();
-                    Thread bionicReader = new Thread(() -> {
-                        try (java.io.BufferedReader r = new java.io.BufferedReader(
-                                new java.io.InputStreamReader(bionicProc.getInputStream()))) {
-                            String l;
-                            while ((l = r.readLine()) != null) bionicOut.append(l).append('\n');
-                        } catch (Exception ex) {
-                            bionicOut.append("[read error: ").append(ex.getMessage()).append("]\n");
-                        }
-                    }, "wl-diag-bionic");
-                    bionicReader.start();
-                    boolean bionicExited = bionicProc.waitFor(5, java.util.concurrent.TimeUnit.SECONDS);
-                    if (!bionicExited) bionicProc.destroyForcibly();
-                    bionicReader.join(1000);
-                    int bionicExit = -1;
-                    try { bionicExit = bionicProc.exitValue(); } catch (Exception ignored) {}
-                    String bionicStr = bionicOut.toString();
-                    if (bionicExit == 0 && bionicStr.contains("hello-bionic")) {
-                        results.append("  ✓ BIONIC TEST PASSED (exit=0)\n");
-                        results.append("  → Bionic executes WITHOUT SIGSYS — seccomp issue is glibc-specific\n");
-                        results.append("  → Bionic is the correct native path (no glibc, no proot needed)\n");
-                        for (String l : bionicStr.split("\n")) {
-                            if (!l.isEmpty() && !l.equals("hello-bionic")) {
-                                results.append("    ").append(l).append("\n");
-                            }
-                        }
-                        passed++;
-                    } else if (bionicExit == 159) {
-                        results.append("  ✗ Bionic test ALSO killed by SIGSYS (exit=159)\n");
-                        results.append("  → seccomp blocks bionic too — deeper kernel-level issue\n");
-                        failed++;
-                    } else {
-                        results.append("  ⚠ Bionic test exit=" + bionicExit + " output:\n");
-                        for (String l : bionicStr.split("\n")) {
-                            if (!l.isEmpty()) results.append("    ").append(l).append("\n");
-                        }
-                        warned++;
-                    }
-                } catch (Exception e) {
-                    results.append("  ⚠ Bionic test failed: " + e.getMessage() + "\n");
-                    warned++;
-                }
-            } else {
-                results.append("Test E: SKIP (libwaylandie_bionic_test.so not found in nativeLibDir)\n");
-                results.append("  → APK may not include the bionic test binary\n");
-                warned++;
-            }
-
-            // Test F: LD_PRELOAD each bridge library to identify which one
-            // triggers SIGSYS. /bin/echo works alone but the bridge crashes,
-            // so a library CONSTRUCTOR is making a blocked syscall.
-            // Test each library: libwayland-server, libX11, libXtst, libvulkan
-            results.append("Test F: LD_PRELOAD library constructor SIGSYS test:\n");
-            File echoBinF = new File(rootDir, "usr/bin/echo");
-            File linkerF = new File(nativeLibDir, "libld_glibc.so");
-            if (echoBinF.exists() && linkerF.exists()) {
-                String baseLibPath = new File(rootDir, "usr/lib").getAbsolutePath() + ":"
-                        + new File(rootDir, "usr/lib/aarch64-linux-gnu").getAbsolutePath() + ":"
-                        + new File(rootDir, "usr/local/lib").getAbsolutePath();
-                String[] libsToTest = {
-                    "libwayland-server.so.0",
-                    "libwayland-client.so.0",
-                    "libX11.so.6",
-                    "libXtst.so.6",
-                    "libXext.so.6",
-                    "libX11-xcb.so.1",
-                    "libxcb.so.1",
-                    "libvulkan.so.1",
-                    "libfreetype.so.6"
-                };
-                for (String libName : libsToTest) {
-                    File libFile = new File(rootDir, "usr/lib/aarch64-linux-gnu/" + libName);
-                    if (!libFile.exists()) libFile = new File(rootDir, "usr/local/lib/" + libName);
-                    if (!libFile.exists()) {
-                        results.append("  " + libName + ": NOT FOUND — skip\n");
-                        continue;
-                    }
-                    try {
-                        List<String> cmd = new ArrayList<>();
-                        cmd.add(linkerF.getAbsolutePath());
-                        cmd.add("--library-path");
-                        cmd.add(baseLibPath);
-                        cmd.add(echoBinF.getAbsolutePath());
-                        cmd.add("preload-test-" + libName);
-                        ProcessBuilder pb = new ProcessBuilder(cmd);
-                        pb.redirectErrorStream(true);
-                        pb.environment().clear();
-                        pb.environment().put("LD_LIBRARY_PATH", baseLibPath);
-                        pb.environment().put("LD_PRELOAD", libFile.getAbsolutePath());
-                        Process p = pb.start();
-                        StringBuilder out = new StringBuilder();
-                        Thread reader = new Thread(() -> {
-                            try (java.io.BufferedReader r = new java.io.BufferedReader(
-                                    new java.io.InputStreamReader(p.getInputStream()))) {
-                                String l;
-                                while ((l = r.readLine()) != null) out.append(l).append('\n');
-                            } catch (Exception ignored) {}
-                        }, "wl-diag-preload-" + libName);
-                        reader.start();
-                        boolean exited = p.waitFor(5, java.util.concurrent.TimeUnit.SECONDS);
-                        if (!exited) p.destroyForcibly();
-                        reader.join(500);
-                        int exit = -1;
-                        try { exit = p.exitValue(); } catch (Exception ignored) {}
-                        if (exit == 0) {
-                            results.append("  ✓ " + libName + ": OK (exit=0)\n");
-                        } else if (exit == 159) {
-                            results.append("  ✗ " + libName + ": SIGSYS (exit=159) ← THIS LIBRARY TRIGGERS SIGSYS\n");
-                        } else {
-                            String snippet = out.toString().trim();
-                            if (snippet.length() > 100) snippet = snippet.substring(0, 100);
-                            results.append("  ⚠ " + libName + ": exit=" + exit + " " + snippet + "\n");
-                        }
-                    } catch (Exception e) {
-                        results.append("  ⚠ " + libName + ": test failed: " + e.getMessage() + "\n");
-                    }
-                }
-            } else {
-                results.append("Test F: SKIP (/bin/echo or linker not found)\n");
-            }
-
-            // Test G: Verify the LD_PRELOAD syscall shim fixes libwayland-server SIGSYS.
-            // Test F showed libwayland-server triggers SIGSYS. The shim intercepts
-            // blocked syscalls. This test verifies: /bin/echo + shim + libwayland-server
-            // = exit 0 (shim catches the blocked syscall).
-            results.append("Test G: LD_PRELOAD shim + libwayland-server test:\n");
-            File shimFile = new File(rootDir, "usr/local/lib/libwaylandie_shim.so");
-            File wlServerLib = new File(rootDir, "usr/lib/aarch64-linux-gnu/libwayland-server.so.0");
-            if (shimFile.exists() && echoBinF.exists() && linkerF.exists() && wlServerLib.exists()) {
-                try {
-                    List<String> cmd = new ArrayList<>();
-                    cmd.add(linkerF.getAbsolutePath());
-                    cmd.add("--library-path");
-                    cmd.add(sigsysLibPath);
-                    cmd.add(echoBinF.getAbsolutePath());
-                    cmd.add("shim-test-ok");
-                    ProcessBuilder pb = new ProcessBuilder(cmd);
-                    pb.redirectErrorStream(true);
-                    pb.environment().clear();
-                    pb.environment().put("LD_LIBRARY_PATH", sigsysLibPath);
-                    pb.environment().put("LD_PRELOAD", shimFile.getAbsolutePath() + ":"
-                            + wlServerLib.getAbsolutePath());
-                    pb.environment().put("WAYLANDIE_SHIM_DEBUG", "1");
-                    Process p = pb.start();
-                    StringBuilder out = new StringBuilder();
-                    Thread reader = new Thread(() -> {
-                        try (java.io.BufferedReader r = new java.io.BufferedReader(
-                                new java.io.InputStreamReader(p.getInputStream()))) {
-                            String l;
-                            while ((l = r.readLine()) != null) out.append(l).append('\n');
-                        } catch (Exception ignored) {}
-                    }, "wl-diag-shim");
-                    reader.start();
-                    boolean exited = p.waitFor(5, java.util.concurrent.TimeUnit.SECONDS);
-                    if (!exited) p.destroyForcibly();
-                    reader.join(500);
-                    int exit = -1;
-                    try { exit = p.exitValue(); } catch (Exception ignored) {}
-                    if (exit == 0 && out.toString().contains("shim-test-ok")) {
-                        results.append("  ✓ SHIM WORKS! /bin/echo + shim + libwayland-server = exit 0\n");
-                        results.append("  → The shim successfully intercepted the blocked syscall\n");
-                        // Show which syscalls were intercepted
-                        for (String l : out.toString().split("\n")) {
-                            if (l.contains("WAYLANDIE_SHIM:")) {
-                                results.append("    ").append(l).append("\n");
-                            }
-                        }
-                        passed++;
-                    } else if (exit == 159) {
-                        results.append("  ✗ Shim did NOT fix libwayland-server SIGSYS (exit=159)\n");
-                        results.append("  → The blocked syscall is NOT in our intercept list\n");
-                        results.append("  → Need to identify the exact syscall (expand shim blocklist)\n");
-                        failed++;
-                    } else {
-                        String snippet = out.toString().trim();
-                        if (snippet.length() > 200) snippet = snippet.substring(0, 200);
-                        results.append("  ⚠ exit=").append(exit).append(" output: ").append(snippet).append("\n");
-                        warned++;
-                    }
-                } catch (Exception e) {
-                    results.append("  ⚠ Shim test failed: " + e.getMessage() + "\n");
-                    warned++;
-                }
-            } else {
-                results.append("Test G: SKIP (shim or libwayland-server not found)\n");
-                results.append("  shim: " + shimFile.exists() + " wl-server: " + wlServerLib.exists() + "\n");
-                warned++;
-            }
-
-            // Test H: Syscall scanner — identifies EXACT blocked syscalls.
-            // Runs a bionic binary that forks for each syscall number (0-450).
-            // If a child exits with SIGSYS (signal 31), that syscall is blocked.
-            // This gives us the device's EXACT seccomp blocklist so we can
-            // expand the shim to intercept the right syscalls.
-            results.append("Test H: Syscall scanner (identifies ALL blocked syscalls):\n");
-            File scanBin = new File(nativeLibDir, "libwaylandie_syscall_scan.so");
-            if (scanBin.exists()) {
-                try {
-                    scanBin.setExecutable(true, false);
-                    ProcessBuilder scanPb = new ProcessBuilder(scanBin.getAbsolutePath());
-                    scanPb.redirectErrorStream(true);
-                    Process scanProc = scanPb.start();
-                    StringBuilder scanOut = new StringBuilder();
-                    Thread scanReader = new Thread(() -> {
-                        try (java.io.BufferedReader r = new java.io.BufferedReader(
-                                new java.io.InputStreamReader(scanProc.getInputStream()))) {
-                            String l;
-                            while ((l = r.readLine()) != null) scanOut.append(l).append('\n');
-                        } catch (Exception ignored) {}
-                    }, "wl-diag-syscall-scan");
-                    scanReader.start();
-                    // Scanning 451 syscalls with fork() takes ~60-120s
-                    boolean scanExited = scanProc.waitFor(180, java.util.concurrent.TimeUnit.SECONDS);
-                    if (!scanExited) scanProc.destroyForcibly();
-                    scanReader.join(3000);
-                    int scanExit = -1;
-                    try { scanExit = scanProc.exitValue(); } catch (Exception ignored) {}
-
-                    // Parse ALL blocked syscalls from output (no truncation)
-                    String scanStr = scanOut.toString();
-                    int blockedCount = 0;
-                    StringBuilder blockedList = new StringBuilder();
-                    for (String l : scanStr.split("\n")) {
-                        if (l.startsWith("BLOCKED:")) {
-                            blockedList.append("    ").append(l).append("\n");
-                            blockedCount++;
-                        }
-                    }
-
-                    if (scanExit == 0 || blockedCount > 0) {
-                        results.append("  Syscall scan results (exit=" + scanExit + "):\n");
-                        if (blockedCount > 0) {
-                            results.append("  BLOCKED SYSCALLS (" + blockedCount + " total):\n");
-                            results.append(blockedList);
-                        } else {
-                            results.append("  ⚠ No blocked syscalls found\n");
-                        }
-                        if (scanStr.contains("SCAN_COMPLETE")) {
-                            results.append("  ✓ Scan completed fully\n");
-                        } else {
-                            results.append("  ⚠ Scan was incomplete (timeout) — partial results above\n");
-                        }
-                        if (blockedCount > 0) {
-                            results.append("  → These are ALL syscalls blocked by Android's seccomp on this device\n");
-                            passed++;
-                        } else {
-                            warned++;
-                        }
-                    } else {
-                        results.append("  ✗ Syscall scanner failed (exit=" + scanExit + ")\n");
-                        results.append("  Output: " + scanStr.trim() + "\n");
-                        failed++;
-                    }
-                } catch (Exception e) {
-                    results.append("  ⚠ Syscall scanner failed: " + e.getMessage() + "\n");
-                    warned++;
-                }
-            } else {
-                results.append("Test H: SKIP (libwaylandie_syscall_scan.so not found)\n");
-                warned++;
-            }
-
-            // Test I: Bionic bridge launch test — verifies the bionic-compiled
+            // Test A: Bionic bridge launch test — verifies the bionic-compiled
             // bridge (libwaylandie_bridge.so) can execute without SIGSYS.
             // The bionic bridge is compiled with NDK against bionic libc,
             // eliminating the glibc seccomp issues. If it exists and runs
             // (even with usage error exit=2), the seccomp problem is solved.
-            results.append("Test I: Bionic bridge launch test:\n");
+            results.append("Test A: Bionic bridge launch test:\n");
             File bionicBridgeBin = new File(nativeLibDir, "libwaylandie_bridge.so");
             if (bionicBridgeBin.exists()) {
                 try {
@@ -1388,7 +751,7 @@ public final class HomeActivity extends Activity {
                     warned++;
                 }
             } else {
-                results.append("Test I: SKIP (libwaylandie_bridge.so not found in nativeLibDir)\n");
+                results.append("Test A: SKIP (libwaylandie_bridge.so not found in nativeLibDir)\n");
                 results.append("  → Bionic bridge not built — using glibc bridge (SIGSYS expected)\n");
                 warned++;
             }

@@ -320,30 +320,6 @@ else
 fi
 
 # ---------------------------------------------------------------------
-# 3.55. Compile the LD_PRELOAD syscall shim
-# ---------------------------------------------------------------------
-# Test F showed libwayland-server 1.22 triggers SIGSYS (exit 159) from
-# Android's seccomp filter. The shim intercepts blocked syscalls via
-# LD_PRELOAD and returns ENOSYS so the library falls back to older methods.
-# The shim is compiled with glibc 2.31 (safe — no rseq/clone3 during startup).
-echo "[3.55/7] Compiling LD_PRELOAD syscall shim…"
-SHIM_SRC="$SCRIPT_DIR/../app/src/main/assets/linux-runtime/shim/waylandie_syscall_shim.c"
-if [ -f "$SHIM_SRC" ]; then
-    cp "$SHIM_SRC" "$ROOTFS_DIR/tmp/waylandie_syscall_shim.c"
-    if ! chroot_run bash -c 'set -e; \
-        cc -shared -fPIC -O2 -o /usr/local/lib/libwaylandie_shim.so \
-            /tmp/waylandie_syscall_shim.c -ldl && \
-        echo "  ✓ shim compiled → /usr/local/lib/libwaylandie_shim.so" && \
-        ls -la /usr/local/lib/libwaylandie_shim.so'; then
-        echo "  ✗ FATAL: shim compilation FAILED"
-        exit 1
-    fi
-    rm -f "$ROOTFS_DIR/tmp/waylandie_syscall_shim.c"
-else
-    echo "  ⚠ shim source not found at $SHIM_SRC — skipping"
-fi
-
-# ---------------------------------------------------------------------
 # 3.6. Verify glibc version is < 2.34 (seccomp safety check)
 # ---------------------------------------------------------------------
 # glibc 2.34+ calls clone3() and glibc 2.35+ calls rseq() during
@@ -458,6 +434,38 @@ rm -rf "$ROOTFS_DIR/usr/share/doc" 2>/dev/null || true
 rm -rf "$ROOTFS_DIR/usr/share/man" 2>/dev/null || true
 rm -rf "$ROOTFS_DIR/usr/share/locale" 2>/dev/null || true
 rm -rf "$ROOTFS_DIR/usr/share/info" 2>/dev/null || true
+
+# Aggressive size reduction — remove build-time-only artifacts left over
+# from the libwayland 1.22 + wayland-protocols 1.27 source builds. These
+# are not needed at runtime and bloat the tarball significantly.
+echo "  Aggressive rootfs trimming…"
+# Remove Python packages (leftover from meson install — meson was purged
+# above but its site-packages remain). ~20-40 MB on Focal.
+rm -rf "$ROOTFS_DIR/usr/local/lib/python3.8" 2>/dev/null || true
+rm -rf "$ROOTFS_DIR/usr/local/lib/python3."* 2>/dev/null || true
+# Remove static libraries (not needed at runtime — only for linking)
+find "$ROOTFS_DIR/usr/lib" -name "*.a" -delete 2>/dev/null || true
+find "$ROOTFS_DIR/usr/local/lib" -name "*.a" -delete 2>/dev/null || true
+# Remove libtool .la files (only needed at link time)
+find "$ROOTFS_DIR/usr/lib" -name "*.la" -delete 2>/dev/null || true
+find "$ROOTFS_DIR/usr/local/lib" -name "*.la" -delete 2>/dev/null || true
+# Remove wayland-protocols XML (only needed at build time for code generation;
+# the bridge already compiled the protocol C sources into the binary)
+rm -rf "$ROOTFS_DIR/usr/share/wayland-protocols" 2>/dev/null || true
+# Remove pkgconfig files (only needed at build time)
+find "$ROOTFS_DIR/usr/lib" -name "*.pc" -delete 2>/dev/null || true
+find "$ROOTFS_DIR/usr/local/lib" -name "*.pc" -delete 2>/dev/null || true
+find "$ROOTFS_DIR/usr/share/pkgconfig" -name "*.pc" -delete 2>/dev/null || true
+# Remove wayland-scanner binary (not needed at runtime — only for codegen)
+rm -f "$ROOTFS_DIR/usr/bin/wayland-scanner" 2>/dev/null || true
+# Strip debug symbols from shared libraries (saves ~30-50% on .so size).
+# --strip-unneeded removes debug symbols but keeps dynamic symbols.
+find "$ROOTFS_DIR/usr/lib" -name "*.so*" -exec strip --strip-unneeded {} \; 2>/dev/null || true
+find "$ROOTFS_DIR/usr/local/lib" -name "*.so*" -exec strip --strip-unneeded {} \; 2>/dev/null || true
+# Strip the bridge binary too
+strip --strip-unneeded "$ROOTFS_DIR/usr/local/bin/waylandie-wayland-bridge" 2>/dev/null || true
+echo "  ✓ Aggressive trimming complete"
+
 echo "  ✓ Cleanup complete"
 
 cd "$ROOTFS_DIR"

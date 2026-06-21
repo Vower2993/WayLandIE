@@ -81,36 +81,6 @@ if(CMAKE_BUILD_TYPE STREQUAL "Release")
 endif()
 
 # ----------------------------------------------------------------------
-# Bionic test binary — proves bionic works without SIGSYS on Android 16.
-# Compiled as a PIE executable, but named lib*.so so Android packages it
-# in jniLibs. Android extracts it to nativeLibraryDir where we can execve
-# it directly (same trick as libld_glibc.so and libproot.so).
-# ----------------------------------------------------------------------
-add_executable(waylandie_bionic_test bionic_test.c)
-# Android requires .so naming for jniLibs packaging
-set_target_properties(waylandie_bionic_test PROPERTIES
-    OUTPUT_NAME "waylandie_bionic_test"
-    PREFIX "lib"
-    SUFFIX ".so"
-)
-# Link against bionic libc + liblog for __android_log_print (if needed)
-target_link_libraries(waylandie_bionic_test log)
-
-# ----------------------------------------------------------------------
-# Syscall scanner — identifies EXACT blocked syscalls on this device.
-# Tests each syscall number in a forked child. If child exits with
-# SIGSYS (159), that syscall is blocked by seccomp.
-# Same jniLibs packaging trick: libwaylandie_syscall_scan.so
-# ----------------------------------------------------------------------
-add_executable(waylandie_syscall_scan syscall_scan.c)
-set_target_properties(waylandie_syscall_scan PROPERTIES
-    OUTPUT_NAME "waylandie_syscall_scan"
-    PREFIX "lib"
-    SUFFIX ".so"
-)
-target_link_libraries(waylandie_syscall_scan log)
-
-# ----------------------------------------------------------------------
 # Bionic Wayland bridge — the long-term fix for bridge SIGSYS.
 #
 # This is the same ~3900-line Wayland compositor (waylandie-wayland-bridge.c)
@@ -133,14 +103,14 @@ target_link_libraries(waylandie_syscall_scan log)
 #
 # Launch: WineRunner detects libwaylandie_bridge.so in nativeLibraryDir and
 # launches it directly via ProcessBuilder — no glibc linker, no LD_PRELOAD
-# shim, no rootfs dependency for the bridge itself. (Wine still uses glibc +
-# shim, that's expected — this only fixes the bridge.)
+# shim, no rootfs dependency for the bridge itself. (Wine still uses glibc,
+# that's expected — this only fixes the bridge.)
 #
 # The bionic libs at /tmp/bionic-libs/ are populated by:
 #   - Local dev: bash tools/build-bionic-bridge.sh
 #   - CI: the "Build bionic bridge deps" step in build-self-contained-apk.yml
 # If the directory is missing, this target is SKIPPED with a warning, and
-# WineRunner falls back to the glibc bridge (with shim).
+# WineRunner falls back to the glibc bridge.
 #
 # ARM64-ONLY: The bionic static libs are cross-compiled for aarch64 only.
 # x86_64 builds skip this target (the bridge is only needed on the actual

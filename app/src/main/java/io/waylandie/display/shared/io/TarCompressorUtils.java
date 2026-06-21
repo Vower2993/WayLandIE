@@ -35,6 +35,9 @@ public final class TarCompressorUtils {
 
     private static final String TAG = "WayLandIE/Tar";
 
+    /** I/O buffer size for extraction — 1MB reduces syscall overhead for large files. */
+    private static final int BUFFER_SIZE = 1024 * 1024;  // 1MB
+
     public enum Type {
         XZ,      // .tar.xz / .txz
         GZIP,    // .tar.gz / .tgz
@@ -72,7 +75,7 @@ public final class TarCompressorUtils {
      */
     public static Type detectArchiveType(File archiveFile) {
         if (archiveFile == null || !archiveFile.isFile()) return null;
-        try (InputStream in = new BufferedInputStream(new FileInputStream(archiveFile), 65536)) {
+        try (InputStream in = new BufferedInputStream(new FileInputStream(archiveFile), 1048576)) {
             byte[] magic = new byte[6];
             int read = in.read(magic);
             if (read < 4) return null;
@@ -90,7 +93,7 @@ public final class TarCompressorUtils {
                     && (magic[2] & 0xFF) == 0x03 && (magic[3] & 0xFF) == 0x04) return Type.ZIP;
             // Check for ustar magic at offset 257 (plain tar)
             if (archiveFile.length() > 263) {
-                try (InputStream in2 = new BufferedInputStream(new FileInputStream(archiveFile), 65536)) {
+                try (InputStream in2 = new BufferedInputStream(new FileInputStream(archiveFile), 1048576)) {
                     in2.skip(257);
                     byte[] ustar = new byte[5];
                     int r2 = in2.read(ustar);
@@ -192,7 +195,7 @@ public final class TarCompressorUtils {
             throws IOException {
         extractCompressedTar(archiveFile, outDir, listener,
                 new org.apache.commons.compress.compressors.xz.XZCompressorInputStream(
-                        new BufferedInputStream(new FileInputStream(archiveFile), 262144)));
+                        new BufferedInputStream(new FileInputStream(archiveFile), BUFFER_SIZE)));
     }
 
     /**
@@ -201,7 +204,7 @@ public final class TarCompressorUtils {
     private static void extractGzipTar(File archiveFile, File outDir, OnExtractFileListener listener)
             throws IOException {
         extractCompressedTar(archiveFile, outDir, listener,
-                new GZIPInputStream(new BufferedInputStream(new FileInputStream(archiveFile), 262144)));
+                new GZIPInputStream(new BufferedInputStream(new FileInputStream(archiveFile), BUFFER_SIZE)));
     }
 
     /**
@@ -210,7 +213,7 @@ public final class TarCompressorUtils {
     private static void extractPlainTar(File archiveFile, File outDir, OnExtractFileListener listener)
             throws IOException {
         extractCompressedTar(archiveFile, outDir, listener,
-                new BufferedInputStream(new FileInputStream(archiveFile), 262144));
+                new BufferedInputStream(new FileInputStream(archiveFile), BUFFER_SIZE));
     }
 
     /**
@@ -222,6 +225,9 @@ public final class TarCompressorUtils {
         long totalExtracted = 0;
         org.apache.commons.compress.archivers.tar.TarArchiveInputStream tarIn =
                 new org.apache.commons.compress.archivers.tar.TarArchiveInputStream(decompressed);
+        // Parallel file writer — 4 threads overlap tar reading with file writing
+        ExecutorService writerPool = Executors.newFixedThreadPool(4);
+        java.util.List<Future<?>> futures = new java.util.ArrayList<>();
         org.apache.commons.compress.archivers.tar.TarArchiveEntry entry;
         while ((entry = tarIn.getNextTarEntry()) != null) {
             String name = entry.getName();
@@ -238,9 +244,6 @@ public final class TarCompressorUtils {
             if (entry.isDirectory()) {
                 outFile.mkdirs();
             } else if (entry.isSymbolicLink()) {
-                // CRITICAL: Check symlink BEFORE creating file.
-                // If we create a regular file first, createSymbolicLink() fails
-                // because the file already exists → 0-byte file → "file too short"
                 outFile.getParentFile().mkdirs();
                 if (outFile.exists()) outFile.delete();
                 try {
@@ -252,25 +255,60 @@ public final class TarCompressorUtils {
                 }
             } else {
                 outFile.getParentFile().mkdirs();
-                try (OutputStream out = new BufferedOutputStream(new FileOutputStream(outFile), 262144)) {
-                    byte[] buf = new byte[262144];
-                    int n;
-                    while ((n = tarIn.read(buf)) > 0) {
-                        out.write(buf, 0, n);
-                        totalExtracted += n;
-                        if (listener != null && (totalExtracted % (1024 * 1024)) < 262144) {
-                            listener.onExtractedBytes(totalExtracted);
+                long entrySize = entry.getSize();
+                if (entrySize > 0 && entrySize < 8 * 1024 * 1024) {
+                    // Small/medium file — buffer in memory, write via thread pool
+                    byte[] data = new byte[(int) entrySize];
+                    int off = 0;
+                    while (off < data.length) {
+                        int n = tarIn.read(data, off, data.length - off);
+                        if (n < 0) break;
+                        off += n;
+                    }
+                    totalExtracted += off;
+                    if (listener != null && (totalExtracted % (1024 * 1024)) < 1048576) {
+                        listener.onExtractedBytes(totalExtracted);
+                    }
+                    final byte[] fileData = data;
+                    final int fileLen = off;
+                    final File f = outFile;
+                    final String fname = name;
+                    futures.add(writerPool.submit(() -> {
+                        try (OutputStream out = new BufferedOutputStream(new FileOutputStream(f), 1048576)) {
+                            out.write(fileData, 0, fileLen);
+                        } catch (IOException e) {
+                            Log.e(TAG, "Parallel write failed for " + fname + ": " + e.getMessage());
+                        }
+                        if (fname.contains("/bin/") || fname.startsWith("bin/")) {
+                            f.setExecutable(true, false);
+                        }
+                    }));
+                } else {
+                    // Large file (>8MB) or unknown size — write directly
+                    try (OutputStream out = new BufferedOutputStream(new FileOutputStream(outFile), 1048576)) {
+                        byte[] buf = new byte[1048576];
+                        int n;
+                        while ((n = tarIn.read(buf)) > 0) {
+                            out.write(buf, 0, n);
+                            totalExtracted += n;
+                            if (listener != null && (totalExtracted % (1024 * 1024)) < 1048576) {
+                                listener.onExtractedBytes(totalExtracted);
+                            }
                         }
                     }
-                }
-                if (name.contains("/bin/") || name.startsWith("bin/")) {
-                    outFile.setExecutable(true, false);
+                    if (name.contains("/bin/") || name.startsWith("bin/")) {
+                        outFile.setExecutable(true, false);
+                    }
                 }
             }
         }
+        for (Future<?> f : futures) {
+            try { f.get(); } catch (Exception e) { Log.w(TAG, "Write future failed: " + e.getMessage()); }
+        }
+        writerPool.shutdown();
         tarIn.close();
         decompressed.close();
-        Log.i(TAG, "Apache Commons tar extraction complete. Total: " + totalExtracted + " bytes");
+        Log.i(TAG, "Apache Commons tar extraction complete (parallel). Total: " + totalExtracted + " bytes");
     }
 
     /**
@@ -281,7 +319,7 @@ public final class TarCompressorUtils {
     private static void extractZstdTar(File archiveFile, File outDir, OnExtractFileListener listener)
             throws IOException {
         long totalExtracted = 0;
-        try (InputStream fis = new BufferedInputStream(new FileInputStream(archiveFile), 65536)) {
+        try (InputStream fis = new BufferedInputStream(new FileInputStream(archiveFile), BUFFER_SIZE)) {
             // ZstdCompressorInputStream wraps the zstd-compressed stream
             org.apache.commons.compress.compressors.zstandard.ZstdCompressorInputStream zstdIn =
                     new org.apache.commons.compress.compressors.zstandard.ZstdCompressorInputStream(fis);
@@ -318,13 +356,13 @@ public final class TarCompressorUtils {
                     }
                 } else {
                     outFile.getParentFile().mkdirs();
-                    try (OutputStream out = new BufferedOutputStream(new FileOutputStream(outFile), 65536)) {
-                        byte[] buf = new byte[65536];
+                    try (OutputStream out = new BufferedOutputStream(new FileOutputStream(outFile), BUFFER_SIZE)) {
+                        byte[] buf = new byte[BUFFER_SIZE];
                         int n;
                         while ((n = tarIn.read(buf)) > 0) {
                             out.write(buf, 0, n);
                             totalExtracted += n;
-                            if (listener != null && (totalExtracted % (1024 * 1024)) < 65536) {
+                            if (listener != null && (totalExtracted % (1024 * 1024)) < 1048576) {
                                 listener.onExtractedBytes(totalExtracted);
                             }
                         }
@@ -347,7 +385,7 @@ public final class TarCompressorUtils {
     private static void extractZip(File zipFile, File outDir, OnExtractFileListener listener)
             throws IOException {
         long totalExtracted = 0;
-        try (InputStream fis = new BufferedInputStream(new FileInputStream(zipFile), 65536);
+        try (InputStream fis = new BufferedInputStream(new FileInputStream(zipFile), BUFFER_SIZE);
              ZipInputStream zis = new ZipInputStream(fis)) {
             ZipEntry entry;
             while ((entry = zis.getNextEntry()) != null) {
@@ -366,13 +404,13 @@ public final class TarCompressorUtils {
                     outFile.mkdirs();
                 } else {
                     outFile.getParentFile().mkdirs();
-                    try (OutputStream out = new BufferedOutputStream(new FileOutputStream(outFile), 65536)) {
-                        byte[] buf = new byte[65536];
+                    try (OutputStream out = new BufferedOutputStream(new FileOutputStream(outFile), BUFFER_SIZE)) {
+                        byte[] buf = new byte[BUFFER_SIZE];
                         int n;
                         while ((n = zis.read(buf)) > 0) {
                             out.write(buf, 0, n);
                             totalExtracted += n;
-                            if (listener != null && (totalExtracted % (1024 * 1024)) < 65536) {
+                            if (listener != null && (totalExtracted % (1024 * 1024)) < 1048576) {
                                 listener.onExtractedBytes(totalExtracted);
                             }
                         }
@@ -400,7 +438,7 @@ public final class TarCompressorUtils {
             return false;
         }
         try (InputStream assetIn = context.getAssets().open(assetName);
-             BufferedInputStream bis = new BufferedInputStream(assetIn, 262144)) {
+             BufferedInputStream bis = new BufferedInputStream(assetIn, BUFFER_SIZE)) {
 
             InputStream decompressed;
             if (type == Type.XZ) {
@@ -445,13 +483,13 @@ public final class TarCompressorUtils {
                     }
                 } else {
                     outFile.getParentFile().mkdirs();
-                    try (OutputStream out = new BufferedOutputStream(new FileOutputStream(outFile), 262144)) {
-                        byte[] buf = new byte[262144];
+                    try (OutputStream out = new BufferedOutputStream(new FileOutputStream(outFile), BUFFER_SIZE)) {
+                        byte[] buf = new byte[BUFFER_SIZE];
                         int n;
                         while ((n = tar.read(buf)) > 0) {
                             out.write(buf, 0, n);
                             totalExtracted += n;
-                            if (listener != null && (totalExtracted % (1024 * 1024)) < 262144) {
+                            if (listener != null && (totalExtracted % (1024 * 1024)) < 1048576) {
                                 listener.onExtractedBytes(totalExtracted);
                             }
                         }
@@ -518,7 +556,7 @@ public final class TarCompressorUtils {
                     + " (" + totalBytes + " bytes)");
 
             // Step 2: Create the decompression stream
-            InputStream fileIn = new BufferedInputStream(new FileInputStream(tmpArchive), 65536);
+            InputStream fileIn = new BufferedInputStream(new FileInputStream(tmpArchive), BUFFER_SIZE);
             InputStream decompressed;
             if (type == Type.XZ) {
                 decompressed = new org.tukaani.xz.XZInputStream(fileIn);
@@ -644,8 +682,8 @@ public final class TarCompressorUtils {
                 File outFile = new File(outDir, fullName);
                 outFile.getParentFile().mkdirs();
 
-                try (OutputStream out = new BufferedOutputStream(new FileOutputStream(outFile), 65536)) {
-                    byte[] buf = new byte[65536];
+                try (OutputStream out = new BufferedOutputStream(new FileOutputStream(outFile), BUFFER_SIZE)) {
+                    byte[] buf = new byte[BUFFER_SIZE];
                     while (remaining > 0) {
                         int toRead = (int) Math.min(remaining, buf.length);
                         int n = in.read(buf, 0, toRead);
@@ -655,7 +693,7 @@ public final class TarCompressorUtils {
                         totalExtracted += n;
 
                         // Report progress
-                        if (listener != null && totalExtracted % (1024 * 1024) < 65536) {
+                        if (listener != null && totalExtracted % (1024 * 1024) < 1048576) {
                             final long te = totalExtracted;
                             listener.onExtractedBytes(te);
                         }
@@ -773,8 +811,8 @@ public final class TarCompressorUtils {
             throws IOException {
         long total = 0;
         try (InputStream in = context.getAssets().open(assetName);
-             OutputStream out = new BufferedOutputStream(new FileOutputStream(outFile), 65536)) {
-            byte[] buf = new byte[65536];
+             OutputStream out = new BufferedOutputStream(new FileOutputStream(outFile), BUFFER_SIZE)) {
+            byte[] buf = new byte[BUFFER_SIZE];
             int n;
             while ((n = in.read(buf)) > 0) {
                 out.write(buf, 0, n);

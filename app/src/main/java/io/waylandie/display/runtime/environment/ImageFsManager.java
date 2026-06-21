@@ -50,7 +50,12 @@ public final class ImageFsManager {
     // Android 16 (seccomp blocks rseq/clone3). glibc 2.31 is safe.
     // Version 5: Added LD_PRELOAD syscall shim (libwaylandie_shim.so) to
     // intercept blocked syscalls from libwayland-server/libvulkan constructors.
-    public static final int LATEST_VERSION = 5;
+    // Version 6: Removed shim (bionic bridge replaces it). Aggressive rootfs
+    // trimming: removed Python packages, static libs (.a), libtool files (.la),
+    // pkgconfig files (.pc), wayland-protocols XML, wayland-scanner binary;
+    // stripped debug symbols from all .so files. Smaller rootfs = faster
+    // extraction. Bumping forces re-extraction of the new smaller rootfs.
+    public static final int LATEST_VERSION = 6;
     private static final String IMAGEFS_ARCHIVE = "imagefs/imagefs.tar.xz";
     private static final long IMAGEFS_EXTRACTED_BYTES = 500_000_000L;
 
