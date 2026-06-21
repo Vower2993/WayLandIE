@@ -278,26 +278,44 @@ public final class HomeActivity extends Activity {
 
         log("Launching " + exePath + " via WineRunner (glibc-native, gamescope="
                 + gamescope + ", proton=" + useProton + ")…");
-        try {
-            String[] extraArgs = gamescope ? new String[]{"--gamescope"} : new String[0];
-            // Use GameLaunchTracer instead of WineRunner.execWine directly.
-            // The tracer calls WineRunner internally but ALSO captures:
-            //   - all file existence checks
-            //   - exact env vars Wine will receive
-            //   - bridge + wine stdout/stderr line-by-line
-            //   - 30s process monitor (alive? exit code? socket state?)
-            //   - writes everything to /storage/emulated/0/Download/WayLandIE/logs/launch-trace-*.txt
-            // One trace file = everything I need to diagnose without ADB.
-            io.waylandie.display.runtime.environment.GameLaunchTracer tracer =
-                    new io.waylandie.display.runtime.environment.GameLaunchTracer(this);
-            Process p = tracer.launchAndTrace(exePath, extraArgs, useProton);
-            runningWineProcess = p;
-            winePid = (int) getPid(p);
-            log("Wine process started (pid=" + winePid + ")");
-        } catch (IOException error) {
-            log("Launch failed: " + error.getMessage());
-            toast("Launch failed: " + error.getMessage());
-        }
+
+        // CRITICAL: Run the launch on a BACKGROUND THREAD.
+        //
+        // We just called startDisplay() which fires startForegroundService().
+        // Android 14+ gives the service 5 SECONDS from that call to call
+        // startForeground(). The service's onCreate() runs on the MAIN thread,
+        // so if we do heavy work on the main thread right after startDisplay()
+        // (WineRunner does: file checks, adrenotools sync, bridge spawn +
+        // 2s socket wait, Wine spawn), the service's onCreate() is blocked
+        // from running → 5s window expires → ForegroundServiceDidNotStartInTimeException.
+        //
+        // Moving launch to a background thread lets the service's onCreate()
+        // run immediately and call startForeground() within milliseconds.
+        final String exePathFinal = exePath;
+        final boolean gamescopeFinal = gamescope;
+        final boolean useProtonFinal = useProton;
+        new Thread(() -> {
+            try {
+                String[] extraArgs = gamescopeFinal ? new String[]{"--gamescope"} : new String[0];
+                io.waylandie.display.runtime.environment.GameLaunchTracer tracer =
+                        new io.waylandie.display.runtime.environment.GameLaunchTracer(HomeActivity.this);
+                Process p = tracer.launchAndTrace(exePathFinal, extraArgs, useProtonFinal);
+                runningWineProcess = p;
+                winePid = (int) getPid(p);
+                runOnUiThread(() -> log("Wine process started (pid=" + winePid + ")"));
+            } catch (IOException error) {
+                runOnUiThread(() -> {
+                    log("Launch failed: " + error.getMessage());
+                    toast("Launch failed: " + error.getMessage());
+                });
+            } catch (Exception error) {
+                runOnUiThread(() -> {
+                    log("Launch failed (unexpected): " + error.getClass().getSimpleName()
+                            + ": " + error.getMessage());
+                    toast("Launch failed: " + error.getMessage());
+                });
+            }
+        }, "wl-game-launch").start();
     }
 
     private String copyToDownloadsThenReturn() {
