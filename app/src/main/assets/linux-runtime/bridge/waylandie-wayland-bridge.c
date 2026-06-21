@@ -3992,7 +3992,7 @@ int main(int argc, char **argv) {
             || wl_global_create(state.display, &wl_shm_interface, 1, NULL, bind_shm) == NULL
              || wl_global_create(state.display, &wl_output_interface, 4, &state, bind_output) == NULL
              || wl_global_create(state.display, &xdg_wm_base_interface, 5, NULL, bind_xdg_wm_base) == NULL
-            || wl_global_create(state.display, &wp_presentation_interface, 2, NULL, bind_presentation) == NULL
+            || wl_global_create(state.display, &wp_presentation_interface, 1, NULL, bind_presentation) == NULL
             || wl_global_create(state.display, &wp_viewporter_interface, 1, NULL, bind_viewporter) == NULL
             || wl_global_create(state.display, &zwp_relative_pointer_manager_v1_interface, 1, NULL, bind_relative_pointer_manager) == NULL
             || wl_global_create(state.display, &zwp_pointer_constraints_v1_interface, 1, NULL, bind_pointer_constraints) == NULL
