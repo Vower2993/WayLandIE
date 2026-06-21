@@ -162,11 +162,36 @@ public final class WineRunner {
     /**
      * Native launch via glibc linker from nativeLibraryDir.
      * Zero syscall overhead — runs at full native speed.
+     *
+     * <p>For GLIBC Wine: uses libld_glibc.so linker trick (the glibc linker
+     * is in nativeLibraryDir where SELinux allows exec, then it loads Wine
+     * from getFilesDir() — the linker's mmap doesn't trigger W^X).
+     *
+     * <p>For BIONIC Wine: cannot exec directly from getFilesDir() — Android's
+     * W^X enforcement (targetSdk >= 29) blocks execve() of binaries in app
+     * data directories. Instead, route through PRoot (libproot.so in
+     * nativeLibraryDir) which uses ptrace to intercept the child's execve()
+     * and bypass the W^X check. PRoot has syscall translation overhead but
+     * is the only way to exec bionic binaries from getFilesDir() on
+     * Android 10+ with targetSdk >= 29. This is exactly how Winlator and
+     * Termux handle the same problem.
      */
     private Process launchNative(File rootDir, String nativeLibDir,
             File wineBin, String exePath, String[] extraArgs,
             boolean isArm64ec, boolean fexCoreInstalled, File protonDir)
             throws IOException {
+
+        // BIONIC Wine detection — must use PRoot path to bypass W^X
+        boolean bionicWine = isBionicWine(wineBin);
+        Log.i(TAG, "Wine variant: " + (bionicWine ? "BIONIC" : "GLIBC"));
+        if (bionicWine) {
+            Log.i(TAG, "Bionic Wine detected — routing through PRoot to bypass W^X "
+                    + "(Android 10+ blocks execve of binaries in getFilesDir for "
+                    + "targetSdk >= 29; PRoot's ptrace intercepts the exec and "
+                    + "bypasses the check)");
+            return launchViaProot(rootDir, wineBin, exePath, extraArgs,
+                    isArm64ec, fexCoreInstalled);
+        }
 
         File linker = new File(nativeLibDir, "libld_glibc.so");
 
@@ -292,16 +317,7 @@ public final class WineRunner {
             }
         }
 
-        // Build Wine command.
-        //
-        // BIONIC Wine (e.g. Armec Proton): launch DIRECTLY via ProcessBuilder.
-        //   - Wine's ELF interpreter is /system/bin/linker64 (Android's bionic linker)
-        //   - linker64 honors LD_LIBRARY_PATH for finding libwine.so etc.
-        //   - Using libld_glibc.so here would fail with exit 127 — the glibc
-        //     linker can't load bionic binaries.
-        //
-        // GLIBC Wine (legacy, compiled for Ubuntu rootfs): launch via the
-        // libld_glibc.so linker trick:
+        // Build Wine command — GLIBC path only (bionic was routed to PRoot above).
         //   libld_glibc.so --library-path <rootfs-libs> wine exePath
         //   - Wine's ELF interpreter is /lib/ld-linux-aarch64.so.1 (glibc)
         //   - We can't exec it directly because Android SELinux blocks execve
@@ -309,26 +325,17 @@ public final class WineRunner {
         //   - So we launch the glibc linker (packaged as libld_glibc.so in
         //     nativeLibraryDir, where SELinux allows execve) and pass it
         //     --library-path + the wine binary path
-        boolean bionicWine = isBionicWine(wineBin);
-        Log.i(TAG, "Wine variant: " + (bionicWine ? "BIONIC (direct launch)" : "GLIBC (via libld_glibc.so)"));
-
         List<String> cmd = new ArrayList<>();
-        if (bionicWine) {
-            // Bionic Wine: direct launch (no linker, no --library-path)
-            cmd.add(wineBin.getAbsolutePath());
-        } else {
-            // Glibc Wine: launch via libld_glibc.so
-            cmd.add(linker.getAbsolutePath());
-            cmd.add("--library-path");
-            cmd.add(libPath);
-            cmd.add(wineBin.getAbsolutePath());
-        }
+        cmd.add(linker.getAbsolutePath());
+        cmd.add("--library-path");
+        cmd.add(libPath);
+        cmd.add(wineBin.getAbsolutePath());
         cmd.add(exePath);
         if (extraArgs != null) {
             for (String arg : extraArgs) cmd.add(arg);
         }
 
-        Log.i(TAG, "Native launch command: " + String.join(" ", cmd));
+        Log.i(TAG, "Native launch command (glibc): " + String.join(" ", cmd));
 
         ProcessBuilder pb = new ProcessBuilder(cmd);
         pb.directory(rootDir);
@@ -336,11 +343,7 @@ public final class WineRunner {
 
         Map<String, String> env = pb.environment();
         env.clear();
-        // For bionic Wine, skip the glibc-specific env vars (LD_PRELOAD shim,
-        // GLIBC_TUNABLES) — they're glibc-only and would crash a bionic binary.
-        // Reuse the useBionicBridge flag in setupEnvironment — it controls
-        // exactly the same env vars.
-        setupEnvironment(env, rootDir, protonDir, isArm64ec, fexCoreInstalled, bionicWine);
+        setupEnvironment(env, rootDir, protonDir, isArm64ec, fexCoreInstalled);
 
         // Override WAYLAND_DISPLAY with the actual socket name the bridge
         // created (e.g. "wayland-0") — setupEnvironment() sets it to the
