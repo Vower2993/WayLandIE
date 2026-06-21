@@ -615,19 +615,33 @@ public final class WineRunner {
     }
 
     private static long getPid(Process p) {
-        // Java 9+ Process.pid() — supported on Android API 26+
+        // Android's Process class doesn't expose pid() / toHandle() until
+        // API 35, even though Java 9+ defines them. Try multiple approaches:
+        //   1. Java 9+ Process.pid() via reflection (works on Android 15+)
+        //   2. Java 9+ Process.toHandle().pid() via reflection
+        //   3. Direct field reflection ("pid", "mPid")
+        //   4. Give up, return -1 (the caller only uses this for logging)
         try {
-            return p.pid();
+            java.lang.reflect.Method pidMethod = p.getClass().getMethod("pid");
+            pidMethod.setAccessible(true);
+            return (long) pidMethod.invoke(p);
         } catch (Exception ignored) {
-            // Fall back to reflection for very old runtimes (unlikely on Android 16)
         }
         try {
-            java.lang.reflect.Field pidField = p.getClass().getDeclaredField("pid");
-            pidField.setAccessible(true);
-            return pidField.getLong(p);
-        } catch (Exception e) {
-            return -1;
+            java.lang.reflect.Method toHandle = p.getClass().getMethod("toHandle");
+            java.lang.reflect.Method pidOf = toHandle.invoke(p).getClass().getMethod("pid");
+            return (long) pidOf.invoke(toHandle.invoke(p));
+        } catch (Exception ignored) {
         }
+        for (String fieldName : new String[]{"pid", "mPid", "id"}) {
+            try {
+                java.lang.reflect.Field pidField = p.getClass().getDeclaredField(fieldName);
+                pidField.setAccessible(true);
+                return pidField.getLong(p);
+            } catch (Exception ignored) {
+            }
+        }
+        return -1;
     }
 
     private static boolean isArm64ecWine(File wineBin) {

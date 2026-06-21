@@ -8,6 +8,7 @@ import android.content.Intent;
 import android.database.Cursor;
 import android.net.LocalSocket;
 import android.net.LocalSocketAddress;
+import android.net.LocalServerSocket;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -279,7 +280,17 @@ public final class HomeActivity extends Activity {
                 + gamescope + ", proton=" + useProton + ")…");
         try {
             String[] extraArgs = gamescope ? new String[]{"--gamescope"} : new String[0];
-            Process p = wineRunner.execWine(exePath, extraArgs, useProton);
+            // Use GameLaunchTracer instead of WineRunner.execWine directly.
+            // The tracer calls WineRunner internally but ALSO captures:
+            //   - all file existence checks
+            //   - exact env vars Wine will receive
+            //   - bridge + wine stdout/stderr line-by-line
+            //   - 30s process monitor (alive? exit code? socket state?)
+            //   - writes everything to /storage/emulated/0/Download/WayLandIE/logs/launch-trace-*.txt
+            // One trace file = everything I need to diagnose without ADB.
+            io.waylandie.display.runtime.environment.GameLaunchTracer tracer =
+                    new io.waylandie.display.runtime.environment.GameLaunchTracer(this);
+            Process p = tracer.launchAndTrace(exePath, extraArgs, useProton);
             runningWineProcess = p;
             winePid = (int) getPid(p);
             log("Wine process started (pid=" + winePid + ")");
@@ -929,6 +940,115 @@ public final class HomeActivity extends Activity {
                 failed++;
             } finally {
                 if (tcpProbe != null) try { tcpProbe.close(); } catch (IOException ignored) {}
+            }
+
+            // === 9b. ANDROID BRIDGE ABSTRACT SOCKET DEEP DIAGNOSTIC ===
+            // The Android-side LocalServerSocket "waylandie.display.bridge.v1"
+            // is what the Linux bridge connects to. If it can't bind, NOTHING
+            // will display even if Wine + Linux bridge are working perfectly.
+            // Previous logs showed "BindException: Address already in use" —
+            // this section diagnoses exactly why.
+            results.append("\n--- ANDROID BRIDGE ABSTRACT SOCKET (deep) ---\n");
+            final String ABSTRACT_SOCKET = "waylandie.display.bridge.v1";
+            try {
+                // 1. Try to CONNECT as a client — if it succeeds, a server IS
+                //    listening (good or stale — we'll find out next).
+                LocalSocket probeClient = null;
+                boolean serverIsListening = false;
+                try {
+                    probeClient = new LocalSocket();
+                    probeClient.connect(new LocalSocketAddress(ABSTRACT_SOCKET,
+                            LocalSocketAddress.Namespace.ABSTRACT));
+                    serverIsListening = true;
+                } catch (IOException notListening) {
+                    results.append("  Connect probe: ✗ no server listening ("
+                            + notListening.getMessage() + ")\n");
+                } finally {
+                    if (probeClient != null) try { probeClient.close(); } catch (IOException ignored) {}
+                }
+                if (serverIsListening) {
+                    results.append("  Connect probe: ✓ a server IS listening on \""
+                            + ABSTRACT_SOCKET + "\"\n");
+                    // 2. Try to BIND a NEW server socket — if this fails with
+                    //    BindException, the existing server is holding it.
+                    //    If the existing server is OURS (from this app), this
+                    //    is normal. If it's STALE (from a crashed/killed
+                    //    previous instance), this is the bug.
+                    LocalServerSocket bindTest = null;
+                    try {
+                        bindTest = new LocalServerSocket(ABSTRACT_SOCKET);
+                        // If we get here, no one was holding it — but our
+                        // connect probe said someone WAS listening. That's a
+                        // race; treat as success.
+                        results.append("  Bind probe: ✓ new bind succeeded (no holder)\n");
+                        results.append("  → Socket state: HEALTHY (was temporarily free)\n");
+                        passed++;
+                    } catch (IOException bindErr) {
+                        results.append("  Bind probe: ✗ new bind FAILED ("
+                                + bindErr.getClass().getSimpleName() + ": "
+                                + bindErr.getMessage() + ")\n");
+                        results.append("  → Socket state: HELD by an existing server\n");
+                        // 3. Read /proc/net/unix to find what process holds it.
+                        //    Android usually blocks this (the existing diagnostic
+                        //    shows "grep: /proc/net/unix: Permission denied"),
+                        //    but try anyway — some Android versions allow it.
+                        try (java.io.BufferedReader br = new java.io.BufferedReader(
+                                new java.io.InputStreamReader(
+                                    new java.io.FileInputStream("/proc/net/unix")))) {
+                            String line;
+                            int matches = 0;
+                            while ((line = br.readLine()) != null && matches < 5) {
+                                if (line.contains(ABSTRACT_SOCKET)) {
+                                    results.append("  /proc/net/unix match: " + line.trim() + "\n");
+                                    matches++;
+                                }
+                            }
+                            if (matches == 0) {
+                                results.append("  /proc/net/unix: no matches (file readable but socket not listed)\n");
+                            }
+                        } catch (IOException | SecurityException procErr) {
+                            results.append("  /proc/net/unix: ✗ not readable ("
+                                    + procErr.getClass().getSimpleName() + ") — needs root\n");
+                        }
+                        // 4. Check if our own app process is the holder
+                        int myPid = android.os.Process.myPid();
+                        results.append("  This app PID: " + myPid + "\n");
+                        results.append("  → If a previous app instance was force-killed, the socket\n");
+                        results.append("    may be held by a zombie thread. Force-stop the app from\n");
+                        results.append("    Android Settings → Apps → WayLandIE → Force stop, then\n");
+                        results.append("    relaunch. If that fixes it, the bug is in our lifecycle\n");
+                        results.append("    cleanup (BridgeLocalServer.stop() may not be killing the\n");
+                        results.append("    accept thread before the new instance tries to bind).\n");
+                        failed++;
+                    } finally {
+                        if (bindTest != null) try { bindTest.close(); } catch (IOException ignored) {}
+                    }
+                } else {
+                    // No server listening — that's OK for pre-launch, but
+                    // it means MainActivity hasn't started its bridge yet.
+                    results.append("  → Socket state: NOT BOUND (start display first)\n");
+                    // Verify we CAN bind (i.e., no stale holder)
+                    LocalServerSocket bindTest = null;
+                    try {
+                        bindTest = new LocalServerSocket(ABSTRACT_SOCKET);
+                        results.append("  Bind probe: ✓ new bind succeeded (no stale holder)\n");
+                        passed++;
+                    } catch (IOException bindErr) {
+                        results.append("  Bind probe: ✗ new bind FAILED ("
+                                + bindErr.getMessage() + ")\n");
+                        results.append("  → STALE HOLDER: socket is held but no server is accepting.\n");
+                        results.append("    This is the worst case — a zombie process holds the socket\n");
+                        results.append("    but won't accept connections. Force-stop the app from\n");
+                        results.append("    Android Settings, then relaunch.\n");
+                        failed++;
+                    } finally {
+                        if (bindTest != null) try { bindTest.close(); } catch (IOException ignored) {}
+                    }
+                }
+            } catch (Exception socketDiagErr) {
+                results.append("  Socket diagnostic failed: "
+                        + socketDiagErr.getClass().getSimpleName() + ": "
+                        + socketDiagErr.getMessage() + "\n");
             }
 
             // === 10. PROOT FALLBACK ===
