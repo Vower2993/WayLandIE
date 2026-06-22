@@ -987,6 +987,172 @@ public final class WineRunner {
         preLaunchDiagnostics.append("===== END DIAGNOSTICS =====\n");
         preLaunchDiagnostics.append("[diag] ===== END DIAGNOSTICS =====\n");
 
+        // =================================================================
+        // PRE-FLIGHT VALIDATION — check all conditions that MUST be true
+        // before Wine is launched. If any fail, log a clear error but
+        // don't abort (let Wine try anyway, the log will help diagnose).
+        // =================================================================
+        preLaunchDiagnostics.append("\n===== PRE-FLIGHT VALIDATION =====\n");
+        int preflightFailures = 0;
+
+        // Check 1: GraphicsDriver must be set in system.reg
+        try {
+            File winePrefixDir = new File(rootDir, "home/xuser/.wine");
+            File regFile = new File(winePrefixDir, "system.reg");
+            if (regFile.exists()) {
+                String regContent = new String(java.nio.file.Files.readAllBytes(regFile.toPath()));
+                if (!regContent.contains("\"GraphicsDriver\"=\"winewayland.drv\"")) {
+                    preLaunchDiagnostics.append("[preflight] FAIL: GraphicsDriver not set to winewayland.drv in system.reg\n");
+                    preflightFailures++;
+                } else {
+                    preLaunchDiagnostics.append("[preflight] PASS: GraphicsDriver=winewayland.drv in system.reg\n");
+                }
+            } else {
+                preLaunchDiagnostics.append("[preflight] FAIL: system.reg not found at " + regFile + "\n");
+                preflightFailures++;
+            }
+        } catch (Exception e) {
+            preLaunchDiagnostics.append("[preflight] FAIL: could not read system.reg: " + e.getMessage() + "\n");
+            preflightFailures++;
+        }
+
+        // Check 2: WAYLAND_DISPLAY must be set in env
+        String waylandDisplay = env.get("WAYLAND_DISPLAY");
+        if (waylandDisplay == null || waylandDisplay.isEmpty()) {
+            preLaunchDiagnostics.append("[preflight] FAIL: WAYLAND_DISPLAY not set in env\n");
+            preflightFailures++;
+        } else {
+            preLaunchDiagnostics.append("[preflight] PASS: WAYLAND_DISPLAY=" + waylandDisplay + "\n");
+        }
+
+        // Check 3: DISPLAY must NOT be set (we don't use X11)
+        String display = env.get("DISPLAY");
+        if (display != null && !display.isEmpty()) {
+            preLaunchDiagnostics.append("[preflight] WARNING: DISPLAY=" + display + " is set — Wine may try X11 instead of Wayland\n");
+        } else {
+            preLaunchDiagnostics.append("[preflight] PASS: DISPLAY not set (correct for Wayland-only)\n");
+        }
+
+        // Check 4: WINEDLLOVERRIDES must enable winewayland.drv
+        String dllOverrides = env.get("WINEDLLOVERRIDES");
+        if (dllOverrides == null || !dllOverrides.contains("winewayland.drv=b,native")) {
+            preLaunchDiagnostics.append("[preflight] FAIL: WINEDLLOVERRIDES doesn't enable winewayland.drv: " + dllOverrides + "\n");
+            preflightFailures++;
+        } else {
+            preLaunchDiagnostics.append("[preflight] PASS: WINEDLLOVERRIDES enables winewayland.drv\n");
+        }
+
+        // Check 5: WINEDLLOVERRIDES must disable winex11.drv
+        if (dllOverrides == null || !dllOverrides.contains("winex11.drv=d")) {
+            preLaunchDiagnostics.append("[preflight] FAIL: WINEDLLOVERRIDES doesn't disable winex11.drv: " + dllOverrides + "\n");
+            preflightFailures++;
+        } else {
+            preLaunchDiagnostics.append("[preflight] PASS: WINEDLLOVERRIDES disables winex11.drv\n");
+        }
+
+        // Check 6: Bridge process must be running (check via socket)
+        try {
+            android.net.LocalSocket probe = new android.net.LocalSocket();
+            probe.connect(new android.net.LocalSocketAddress(
+                    "waylandie.display.bridge.v1",
+                    android.net.LocalSocketAddress.Namespace.ABSTRACT));
+            probe.close();
+            preLaunchDiagnostics.append("[preflight] PASS: Android bridge socket is listening\n");
+        } catch (Exception e) {
+            preLaunchDiagnostics.append("[preflight] FAIL: Android bridge socket not listening: " + e.getMessage() + "\n");
+            preflightFailures++;
+        }
+
+        // Check 7: Wayland socket file must exist
+        String xdgRuntime = env.get("XDG_RUNTIME_DIR");
+        if (xdgRuntime != null && waylandDisplay != null) {
+            File waylandSock = new File(xdgRuntime, waylandDisplay);
+            if (waylandSock.exists()) {
+                preLaunchDiagnostics.append("[preflight] PASS: Wayland socket exists at " + waylandSock + "\n");
+            } else {
+                preLaunchDiagnostics.append("[preflight] WARNING: Wayland socket not found at " + waylandSock + " (may be created later)\n");
+            }
+        }
+
+        // Check 8: Wine binary must be executable
+        if (!wineBin.canExecute()) {
+            preLaunchDiagnostics.append("[preflight] FAIL: Wine binary not executable: " + wineBin + "\n");
+            preflightFailures++;
+        } else {
+            preLaunchDiagnostics.append("[preflight] PASS: Wine binary is executable\n");
+        }
+
+        // Check 9: WINEPREFIX must exist and be a directory
+        String wineprefix = env.get("WINEPREFIX");
+        if (wineprefix != null) {
+            File prefixDir = new File(wineprefix);
+            if (!prefixDir.isDirectory()) {
+                preLaunchDiagnostics.append("[preflight] FAIL: WINEPREFIX not a directory: " + wineprefix + "\n");
+                preflightFailures++;
+            } else {
+                preLaunchDiagnostics.append("[preflight] PASS: WINEPREFIX exists: " + wineprefix + "\n");
+                // Check for system.reg inside prefix
+                File systemReg = new File(prefixDir, "system.reg");
+                if (!systemReg.exists()) {
+                    preLaunchDiagnostics.append("[preflight] WARNING: system.reg not found in WINEPREFIX (first run?)\n");
+                }
+            }
+        }
+
+        // Check 10: winewayland.drv must exist in proton lib
+        try {
+            File drvFile = new File(protonDir, "lib/wine/aarch64-windows/winewayland.drv");
+            if (!drvFile.exists()) {
+                preLaunchDiagnostics.append("[preflight] FAIL: winewayland.drv not found at " + drvFile + "\n");
+                preflightFailures++;
+            } else {
+                preLaunchDiagnostics.append("[preflight] PASS: winewayland.drv exists (" + drvFile.length() + " bytes)\n");
+            }
+        } catch (Exception e) {
+            preLaunchDiagnostics.append("[preflight] FAIL: could not check winewayland.drv: " + e.getMessage() + "\n");
+            preflightFailures++;
+        }
+
+        // Check 11: winewayland.so (Unix part) must exist
+        try {
+            File soFile = new File(protonDir, "lib/wine/aarch64-unix/winewayland.so");
+            if (!soFile.exists()) {
+                preLaunchDiagnostics.append("[preflight] FAIL: winewayland.so not found at " + soFile + "\n");
+                preflightFailures++;
+            } else {
+                preLaunchDiagnostics.append("[preflight] PASS: winewayland.so exists (" + soFile.length() + " bytes)\n");
+            }
+        } catch (Exception e) {
+            preLaunchDiagnostics.append("[preflight] FAIL: could not check winewayland.so: " + e.getMessage() + "\n");
+            preflightFailures++;
+        }
+
+        // Check 12: libwayland-client.so must be findable
+        boolean foundWaylandClient = false;
+        String preflightLdPath = env.get("LD_LIBRARY_PATH");
+        if (preflightLdPath != null) {
+            for (String dir : preflightLdPath.split(":")) {
+                File libFile = new File(dir, "libwayland-client.so");
+                if (libFile.exists()) {
+                    foundWaylandClient = true;
+                    preLaunchDiagnostics.append("[preflight] PASS: libwayland-client.so found at " + libFile + "\n");
+                    break;
+                }
+            }
+        }
+        if (!foundWaylandClient) {
+            preLaunchDiagnostics.append("[preflight] FAIL: libwayland-client.so not found in LD_LIBRARY_PATH\n");
+            preflightFailures++;
+        }
+
+        // Summary
+        if (preflightFailures == 0) {
+            preLaunchDiagnostics.append("[preflight] ALL 12 CHECKS PASSED\n");
+        } else {
+            preLaunchDiagnostics.append("[preflight] " + preflightFailures + " CHECK(S) FAILED — Wine may not work correctly\n");
+        }
+        preLaunchDiagnostics.append("===== END PRE-FLIGHT VALIDATION =====\n\n");
+
         Process p = pb.start();
         // =================================================================
         // =================================================================

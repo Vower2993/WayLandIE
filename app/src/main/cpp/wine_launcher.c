@@ -64,6 +64,68 @@ int main(int argc, char *argv[]) {
     const char *wineBinary = argv[1];
     const char *exePath    = argv[2];
 
+    /* ===== PRE-FLIGHT VALIDATION =====
+     * Check all conditions that MUST be true before execve. Log failures
+     * to both logcat and stderr (so they appear in the trace file).
+     * We don't abort on failure — Wine might still work, and the log
+     * helps diagnose why it doesn't. */
+    #define LAUNCH_VALIDATE(cond, msg, ...) do { \
+        if (!(cond)) { \
+            LOGE("[launcher] VALIDATION FAIL: " msg, ##__VA_ARGS__); \
+            fprintf(stderr, "[launcher] VALIDATION FAIL: " msg "\n", ##__VA_ARGS__); \
+            fflush(stderr); \
+        } \
+    } while (0)
+
+    /* Validate wine binary */
+    LAUNCH_VALIDATE(wineBinary != NULL && wineBinary[0] == '/',
+                    "wine binary path is NULL or not absolute: %s",
+                    wineBinary ? wineBinary : "(null)");
+    if (wineBinary && wineBinary[0] == '/') {
+        if (access(wineBinary, X_OK) != 0) {
+            LAUNCH_VALIDATE(0, "wine binary not executable: %s (errno=%d %s)",
+                            wineBinary, errno, strerror(errno));
+        }
+    }
+
+    /* Validate exe path */
+    LAUNCH_VALIDATE(exePath != NULL && exePath[0] != '\0',
+                    "exe path is NULL or empty");
+    if (exePath && exePath[0] != '\0') {
+        if (access(exePath, R_OK) != 0) {
+            LAUNCH_VALIDATE(0, "exe path not readable: %s (errno=%d %s)",
+                            exePath, errno, strerror(errno));
+        }
+    }
+
+    /* Validate critical env vars */
+    const char *home = getenv("HOME");
+    LAUNCH_VALIDATE(home != NULL && home[0] == '/',
+                    "HOME not set or not absolute: %s", home ? home : "(null)");
+    const char *winepref = getenv("WINEPREFIX");
+    LAUNCH_VALIDATE(winepref != NULL && winepref[0] == '/',
+                    "WINEPREFIX not set or not absolute: %s",
+                    winepref ? winepref : "(null)");
+    const char *ldpath = getenv("LD_LIBRARY_PATH");
+    LAUNCH_VALIDATE(ldpath != NULL && ldpath[0] != '\0',
+                    "LD_LIBRARY_PATH not set");
+    const char *waylandDisp = getenv("WAYLAND_DISPLAY");
+    LAUNCH_VALIDATE(waylandDisp != NULL && waylandDisp[0] != '\0',
+                    "WAYLAND_DISPLAY not set — Wine will fail to connect to Wayland");
+    const char *xdgRuntime = getenv("XDG_RUNTIME_DIR");
+    LAUNCH_VALIDATE(xdgRuntime != NULL && xdgRuntime[0] == '/',
+                    "XDG_RUNTIME_DIR not set or not absolute: %s",
+                    xdgRuntime ? xdgRuntime : "(null)");
+    const char *wineDll = getenv("WINEDLLOVERRIDES");
+    LAUNCH_VALIDATE(wineDll != NULL && strstr(wineDll, "winewayland.drv") != NULL,
+                    "WINEDLLOVERRIDES missing winewayland.drv: %s",
+                    wineDll ? wineDll : "(null)");
+
+    /* Log validation complete */
+    LOGI("[launcher] pre-flight validation complete");
+    fprintf(stderr, "[launcher] pre-flight validation complete\n");
+    fflush(stderr);
+
     /* IMPORTANT: We log EVERYTHING to BOTH __android_log_print (logcat) AND
      * stderr. The logcat output is for live debugging via adb logcat. The
      * stderr output is captured by Java's ProcessBuilder (which redirects
@@ -94,21 +156,19 @@ int main(int argc, char *argv[]) {
         LAUNCH_LOG("    argv[%d] = %s", i, argv[i]);
     }
 
-    /* Log key env vars for debugging (Java sets these before calling us) */
+    /* Log key env vars for debugging (Java sets these before calling us).
+     * NOTE: home, winepref, waylandDisp, xdgRuntime, wineDll were already
+     * declared in the validation section above — reuse them. */
     const char *ldLibPath = getenv("LD_LIBRARY_PATH");
-    const char *home      = getenv("HOME");
-    const char *winepref  = getenv("WINEPREFIX");
     const char *path      = getenv("PATH");
     const char *display   = getenv("DISPLAY");
-    const char *wlDisplay = getenv("WAYLAND_DISPLAY");
-    const char *winedll   = getenv("WINEDLLOVERRIDES");
     LAUNCH_LOG("  LD_LIBRARY_PATH=%s", ldLibPath ? ldLibPath : "(unset)");
     LAUNCH_LOG("  HOME=%s",            home      ? home      : "(unset)");
     LAUNCH_LOG("  WINEPREFIX=%s",      winepref  ? winepref  : "(unset)");
     LAUNCH_LOG("  PATH=%s",            path      ? path      : "(unset)");
     LAUNCH_LOG("  DISPLAY=%s",         display   ? display   : "(unset)");
-    LAUNCH_LOG("  WAYLAND_DISPLAY=%s", wlDisplay ? wlDisplay : "(unset)");
-    LAUNCH_LOG("  WINEDLLOVERRIDES=%s", winedll  ? winedll   : "(unset)");
+    LAUNCH_LOG("  WAYLAND_DISPLAY=%s", waylandDisp ? waylandDisp : "(unset)");
+    LAUNCH_LOG("  WINEDLLOVERRIDES=%s", wineDll  ? wineDll   : "(unset)");
 
     /* Build new argv for execve.
      * Wine expects: argv[0] = wine binary name, argv[1] = exe path, ...

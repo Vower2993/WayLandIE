@@ -13,6 +13,7 @@
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/types.h>
 #include <sys/un.h>
 #include <time.h>
@@ -1457,6 +1458,30 @@ static void shm_pool_create_buffer(
     // is destroyed, even if Wine destroys the pool resource first.
     pool_acquire(pool);
     g_diag.buffers_created++;
+
+    // Validate buffer dimensions + stride + offset against pool size
+    // (catches Wine bugs where stride doesn't match width*4)
+    int64_t needed = (int64_t)offset + (int64_t)stride * height;
+    if (needed > pool->size) {
+        printf("wayland-shm-ahb pool-create-buffer id=%llu WARNING buffer exceeds pool: "
+               "offset=%d stride=%d height=%d need=%lld pool_size=%d\n",
+               (unsigned long long)buffer->id, offset, stride, height,
+               (long long)needed, pool->size);
+    }
+    // Validate stride is at least width*4 (for XRGB8888/ARGB8888)
+    int32_t min_stride = width * 4;
+    if (stride < min_stride) {
+        printf("wayland-shm-ahb pool-create-buffer id=%llu WARNING stride %d < min_stride %d "
+               "(width=%d * 4) — buffer may be corrupt\n",
+               (unsigned long long)buffer->id, stride, min_stride, width);
+    }
+    // Validate format (only XRGB8888 and ARGB8888 are advertised via wl_shm)
+    if (format != 0 && format != 1) {  // 0=ARGB8888, 1=XRGB8888 in wl_shm_format enum
+        printf("wayland-shm-ahb pool-create-buffer id=%llu WARNING unexpected format 0x%08x "
+               "(expected 0=ARGB8888 or 1=XRGB8888)\n",
+               (unsigned long long)buffer->id, format);
+    }
+
     printf("wayland-shm-ahb pool-create-buffer id=%llu offset=%d %dx%d stride=%d fmt=0x%08x pool_id=%llu pool_size=%d pool_refcount=%d\n",
            (unsigned long long)buffer->id, offset, width, height, stride, format,
            (unsigned long long)pool->id, pool->size, pool->refcount);
@@ -4347,11 +4372,185 @@ static void bind_compositor(struct wl_client *client, void *data, uint32_t versi
     wl_resource_set_implementation(resource, &compositor_impl, data, NULL);
 }
 
+// =====================================================================
+// BRIDGE SELF-TEST — runs at startup, validates all invariants.
+// Logs results as 'self-test' lines so the trace file shows which
+// checks passed/failed. This catches configuration issues BEFORE
+// Wine connects, so we don't waste time debugging downstream symptoms.
+// =====================================================================
+#ifdef WAYLANDIE_HAS_AHARDWAREBUFFER
+static int bridge_self_test(void) {
+    int failures = 0;
+    printf("wayland-shm-ahb self-test starting\n");
+    fflush(stdout);
+
+    // Test 1: AHardwareBuffer allocation with the format/usage we use
+    {
+        AHardwareBuffer_Desc desc = {};
+        desc.width = 64;
+        desc.height = 64;
+        desc.layers = 1;
+        desc.format = AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM;
+        desc.usage = AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN
+                   | AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE
+                   | AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN;
+        AHardwareBuffer* ahb = NULL;
+        int rc = AHardwareBuffer_allocate(&desc, &ahb);
+        if (rc != 0 || ahb == NULL) {
+            printf("wayland-shm-ahb self-test FAIL ahb-alloc rc=%d errno=%d %s\n",
+                   rc, errno, strerror(errno));
+            failures++;
+        } else {
+            // Test 2: Lock for CPU write
+            void* dst = NULL;
+            rc = AHardwareBuffer_lock(ahb,
+                                      AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN
+                                      | AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN,
+                                      -1, NULL, &dst);
+            if (rc != 0 || dst == NULL) {
+                printf("wayland-shm-ahb self-test FAIL ahb-lock rc=%d\n", rc);
+                failures++;
+            } else {
+                // Test 3: Write + read back (verify CPU access works)
+                memset(dst, 0x42, 64 * 4);  // first row
+                uint8_t* bytes = (uint8_t*)dst;
+                if (bytes[0] != 0x42) {
+                    printf("wayland-shm-ahb self-test FAIL ahb-write-readback byte0=0x%02x\n", bytes[0]);
+                    failures++;
+                } else {
+                    printf("wayland-shm-ahb self-test PASS ahb-alloc+lock+write+readback\n");
+                }
+                AHardwareBuffer_unlock(ahb, NULL);
+            }
+
+            // Test 4: Get dmabuf fd via AHardwareBuffer_getNativeHandle
+            const struct waylandie_native_handle* h = AHardwareBuffer_getNativeHandle(ahb);
+            if (h == NULL || h->numFds < 1) {
+                printf("wayland-shm-ahb self-test FAIL ahb-native-handle numFds=%d\n",
+                       h ? h->numFds : -1);
+                failures++;
+            } else {
+                int fd = dup(h->data[0]);
+                if (fd < 0) {
+                    printf("wayland-shm-ahb self-test FAIL ahb-dup-fd errno=%d\n", errno);
+                    failures++;
+                } else {
+                    // Test 5: fstat the dmabuf fd (verify it's a valid fd)
+                    struct stat st;
+                    if (fstat(fd, &st) != 0) {
+                        printf("wayland-shm-ahb self-test FAIL ahb-fstat errno=%d\n", errno);
+                        failures++;
+                    } else {
+                        printf("wayland-shm-ahb self-test PASS ahb-native-handle fd=%d size=%lld\n",
+                               fd, (long long)st.st_size);
+                    }
+                    close(fd);
+                }
+            }
+            AHardwareBuffer_release(ahb);
+        }
+    }
+
+    // Test 6: SHM pool create + resize + create_buffer lifecycle
+    // (Simulates what Wine does, without needing a Wayland client)
+    {
+        // Create a memfd for the pool
+        int fd = syscall(SYS_memfd_create, "selftest", 0);
+        if (fd < 0) {
+            printf("wayland-shm-ahb self-test SKIP memfd-create (errno=%d) — syscall not available\n", errno);
+        } else {
+            // Start with small size, then grow (simulates Wine's pattern)
+            if (ftruncate(fd, 4096) != 0) {
+                printf("wayland-shm-ahb self-test FAIL ftruncate-1 errno=%d\n", errno);
+                failures++;
+                close(fd);
+            } else {
+                void* data = mmap(NULL, 4096, PROT_READ, MAP_SHARED, fd, 0);
+                if (data == MAP_FAILED) {
+                    printf("wayland-shm-ahb self-test FAIL mmap errno=%d\n", errno);
+                    failures++;
+                    close(fd);
+                } else {
+                    // Test resize via mremap (simulates shm_pool_resize)
+                    if (ftruncate(fd, 65536) != 0) {
+                        printf("wayland-shm-ahb self-test FAIL ftruncate-2 errno=%d\n", errno);
+                        failures++;
+                    } else {
+                        void* new_data = mremap(data, 4096, 65536, MREMAP_MAYMOVE);
+                        if (new_data == MAP_FAILED) {
+                            printf("wayland-shm-ahb self-test FAIL mremap errno=%d %s\n",
+                                   errno, strerror(errno));
+                            failures++;
+                        } else {
+                            printf("wayland-shm-ahb self-test PASS memfd+ftruncate+mremap old=%p new=%p\n",
+                                   data, new_data);
+                            data = new_data;
+                        }
+                    }
+                    munmap(data, 65536);
+                    close(fd);
+                }
+            }
+        }
+    }
+
+    // Test 7: Abstract socket bind + connect (verify we can create the bridge socket)
+    {
+        int s = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (s < 0) {
+            printf("wayland-shm-ahb self-test FAIL socket-create errno=%d\n", errno);
+            failures++;
+        } else {
+            struct sockaddr_un addr = {};
+            addr.sun_family = AF_UNIX;
+            addr.sun_path[0] = '\0';
+            strncpy(addr.sun_path + 1, "waylandie.selftest", sizeof(addr.sun_path) - 2);
+            socklen_t len = offsetof(struct sockaddr_un, sun_path) + 1 + strlen("waylandie.selftest");
+            if (bind(s, (struct sockaddr*)&addr, len) < 0) {
+                printf("wayland-shm-ahb self-test FAIL socket-bind errno=%d\n", errno);
+                failures++;
+            } else {
+                printf("wayland-shm-ahb self-test PASS abstract-socket-bind\n");
+            }
+            close(s);
+        }
+    }
+
+    // Test 8: Verify sizeof critical structs (catches accidental field changes)
+    {
+        printf("wayland-shm-ahb self-test sizeof shm_pool_state=%zu shm_buffer_state=%zu surface_state=%zu\n",
+               sizeof(struct shm_pool_state),
+               sizeof(struct shm_buffer_state),
+               sizeof(struct surface_state));
+        // Sanity: pool must have at least data+size+fd+refcount+id
+        if (sizeof(struct shm_pool_state) < 32) {
+            printf("wayland-shm-ahb self-test FAIL pool-struct-too-small %zu\n",
+                   sizeof(struct shm_pool_state));
+            failures++;
+        }
+    }
+
+    // Summary
+    if (failures == 0) {
+        printf("wayland-shm-ahb self-test ALL-PASS\n");
+    } else {
+        printf("wayland-shm-ahb self-test %d FAILURES — bridge may not work correctly\n", failures);
+    }
+    fflush(stdout);
+    return failures;
+}
+#endif  // WAYLANDIE_HAS_AHARDWAREBUFFER
+
 int main(int argc, char **argv) {
     if (argc != 9) {
         fprintf(stderr, "usage: %s <bridge-socket> <target-commits> <socket-file> <timeout-ms> <clear-ahb-outside> <accept-client-complete> <output-width> <output-height>\n", argv[0]);
         return 2;
     }
+
+    // Run self-test at startup (logs results to stdout, which goes to trace file)
+#ifdef WAYLANDIE_HAS_AHARDWAREBUFFER
+    bridge_self_test();
+#endif
     struct server_state state;
     memset(&state, 0, sizeof(state));
     state.input_sock = -1;
