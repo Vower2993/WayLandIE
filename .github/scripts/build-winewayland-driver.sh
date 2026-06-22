@@ -17,7 +17,7 @@ echo "=== [1/9] Install build deps ==="
 sudo apt-get install -y -qq \
   autoconf automake libtool bison flex gettext \
   pkg-config python3 python3-pip libffi-dev libexpat1-dev \
-  libxml2-dev libxkbcommon-dev wayland-protocols libwayland-bin libxkbregistry-dev
+  libxml2-dev libxml2 libxkbcommon-dev wayland-protocols libwayland-bin libxkbregistry-dev
 pip3 install --user meson ninja 2>&1 | tail -3
 export PATH="$HOME/.local/bin:$PATH"
 
@@ -143,15 +143,37 @@ pkg-config --variable=wayland_scanner wayland-scanner
 echo "=== [4c/9] Build xkbcommon + xkbregistry for bionic ==="
 mkdir -p /tmp/xkb-build
 # Write meson cross-file for aarch64 bionic
+# Native (build) file - uses system gcc + system pkg-config
+cat > /tmp/xkb-native.txt << XEOF
+[binaries]
+c = '/usr/bin/gcc'
+cpp = '/usr/bin/g++'
+ar = '/usr/bin/ar'
+strip = '/usr/bin/strip'
+pkgconfig = '/usr/bin/pkg-config'
+
+[built-in options]
+c_args = ['-O2']
+cpp_args = ['-O2']
+
+[build_machine]
+system = 'linux'
+cpu_family = 'x86_64'
+cpu = 'x86_64'
+endian = 'little'
+XEOF
+
+# Cross (host) file - uses NDK clang, no pkg-config (we provide deps manually)
 cat > /tmp/xkb-cross.txt << XEOF
 [binaries]
 c = '$CC'
 cpp = '$CXX'
 ar = '$AR'
 strip = '$STRIP'
+# No pkgconfig for cross - we provide libs via env vars
 
 [built-in options]
-c_args = ['-fPIC', '--sysroot=$SYSROOT', '-I$SYSROOT/usr/include', '-I$BIONIC_LIBS/include']
+c_args = ['-fPIC', '--sysroot=$SYSROOT', '-I$SYSROOT/usr/include', '-I$BIONIC_LIBS/include', '-I/usr/include/libxml2']
 c_link_args = ['--sysroot=$SYSROOT', '-L$BIONIC_LIBS/lib']
 
 [host_machine]
@@ -165,6 +187,7 @@ cd /tmp/xkb-build
 git clone --depth=1 https://github.com/xkbcommon/libxkbcommon.git
 mkdir -p libxkbcommon/build && cd libxkbcommon/build
 meson setup .. \
+  --native-file=/tmp/xkb-native.txt \
   --cross-file=/tmp/xkb-cross.txt \
   --prefix=/usr/local \
   --default-library=static \
@@ -175,7 +198,8 @@ meson setup .. \
   -Denable-docs=false \
   -Denable-x11=false \
   -Denable-tools=false \
-  2>&1 | tail -15
+  -Dxkb-config-root=/usr/share/X11/xkb \
+  2>&1 | tail -20
 ninja 2>&1 | tail -5
 DESTDIR="$BIONIC_LIBS" ninja install
 
@@ -183,6 +207,7 @@ cd /tmp/xkb-build
 git clone --depth=1 https://github.com/xkbcommon/libxkbregistry.git
 mkdir -p libxkbregistry/build && cd libxkbregistry/build
 meson setup .. \
+  --native-file=/tmp/xkb-native.txt \
   --cross-file=/tmp/xkb-cross.txt \
   --prefix=/usr/local \
   --default-library=static \
@@ -190,7 +215,7 @@ meson setup .. \
   --libdir=lib \
   --includedir=include \
   -Denable-docs=false \
-  2>&1 | tail -10
+  2>&1 | tail -15
 ninja 2>&1 | tail -5
 DESTDIR="$BIONIC_LIBS" ninja install
 
