@@ -165,7 +165,7 @@ public final class GameLaunchTracer {
             env.put("LD_PRELOAD", shimFile.getAbsolutePath());
         }
         env.put("WINEPREFIX", winePrefix.getAbsolutePath());
-        env.put("WINEDLLOVERRIDES", "d3d9,d3d10core,d3d11,dxgi=native,winex11.drv=d,winewayland.drv=b,native");
+        env.put("WINEDLLOVERRIDES", "d3d9,d3d10core,d3d11,dxgi=native;winex11.drv=d;winewayland.drv=b,native");
         env.put("MESA_VK_WSI_PRESENT_MODE", "immediate");
         env.put("WINE_NO_DUPLICATE_EXPLORER", "1");
         env.put("FONTCONFIG_PATH", new File(rootDir, "usr/etc/fonts").getAbsolutePath());
