@@ -285,11 +285,18 @@ export WAYLAND_EGL_LIBS="-L$BIONIC_LIBS/lib -lwayland-egl"
 
 export WAYLAND_SCANNER="$(which wayland-scanner)"
 
+# Pre-seed Vulkan soname cache so vulkan_update_surfaces gets compiled
+# (win32u/window.c calls it unconditionally; if SONAME_LIBVULKAN is undefined,
+# the function is #ifdef'd out in vulkan.c, causing a link error)
+# NDK provides libvulkan.so at sysroot/usr/lib/aarch64-linux-android/28/
+export ac_cv_lib_soname_vulkan=libvulkan.so
+export ac_cv_lib_vulkan_vkGetInstanceProcAddr=yes
+
 ./configure \
   --host=aarch64-linux-android \
   --prefix=/usr/local \
   --with-wine-tools=/tmp/proton-wine-tools-build \
-  --without-x --without-opengl --without-vulkan \
+  --without-x --without-opengl \
   --without-alsa --without-oss --without-pulse --without-cups \
   --without-sane --without-usb --without-sdl --without-gstreamer \
   --without-freetype --without-fontconfig --without-v4l2 \
