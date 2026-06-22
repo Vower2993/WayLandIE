@@ -160,6 +160,7 @@ struct server_state {
     int present_failures;
     int abort_requested;
     int clear_ahb_outside;
+    int accept_client_complete;
     int client_seen;
     int completed_after_client_exit;
     int android_windows;
