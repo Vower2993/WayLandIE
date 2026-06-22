@@ -33,16 +33,6 @@ public final class NativeContentIO {
 
     private NativeContentIO() {}
 
-    /**
-     * Extracts an archive FILE to a destination directory using native C++ code.
-     * Supports XZ and ZSTD formats.
-     *
-     * @param type TYPE_XZ or TYPE_ZSTD
-     * @param source the archive file to extract
-     * @param destination the directory to extract into
-     * @param listener optional progress listener (may be null)
-     * @return true if extraction succeeded, false if native not available or failed
-     */
     public static boolean extractArchive(int type, File source, File destination,
                                          OnExtractFileListener listener) {
         if (!nativeLoaded || source == null || destination == null || !source.isFile()) return false;
@@ -50,17 +40,6 @@ public final class NativeContentIO {
                 destination.getAbsolutePath(), listener);
     }
 
-    /**
-     * Extracts an APK ASSET directly to a destination directory using native C++.
-     * This is the fastest path — no temp file copy needed.
-     *
-     * @param type TYPE_XZ or TYPE_ZSTD
-     * @param assetManager the Android AssetManager
-     * @param assetFile the asset path (e.g. "imagefs/imagefs.tar.zst")
-     * @param destination the directory to extract into
-     * @param listener optional progress listener (may be null)
-     * @return true if extraction succeeded, false if native not available or failed
-     */
     public static boolean extractAsset(int type, AssetManager assetManager,
                                        String assetFile, File destination,
                                        OnExtractFileListener listener) {
@@ -72,17 +51,14 @@ public final class NativeContentIO {
                 destination.getAbsolutePath(), listener);
     }
 
-    /**
-     * Check if the native library is loaded and available.
-     */
     public static boolean isAvailable() {
         return nativeLoaded;
     }
 
     private static native boolean nativeExtractArchive(
-            int type, String sourcePath, String destinationPath, Object listener);
+            int type, String sourcePath, String destinationPath, OnExtractFileListener listener);
 
     private static native boolean nativeExtractAsset(
             int type, AssetManager assetManager, String assetFile,
-            String destinationPath, Object listener);
+            String destinationPath, OnExtractFileListener listener);
 }

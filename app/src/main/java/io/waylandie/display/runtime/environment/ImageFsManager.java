@@ -4,6 +4,7 @@ import android.content.Context;
 import android.util.Log;
 
 import io.waylandie.display.shared.io.TarCompressorUtils;
+import io.waylandie.display.shared.io.OnExtractFileListener;
 
 import java.io.File;
 import java.io.IOException;
@@ -249,8 +250,8 @@ public final class ImageFsManager {
             Log.i(TAG, "Falling back to Java extraction (slower)");
             if (listener != null) listener.onProgress(5);
             AtomicLong totalBytes = new AtomicLong(0);
-            TarCompressorUtils.OnExtractFileListener extractListener =
-                    new TarCompressorUtils.OnExtractFileListener() {
+            OnExtractFileListener extractListener =
+                    new OnExtractFileListener() {
                         @Override
                         public File onExtractFile(File file, long size) { return file; }
                         @Override

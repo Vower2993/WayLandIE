@@ -46,13 +46,8 @@ public final class TarCompressorUtils {
         ZSTD     // .tar.zst / .tzst / .wcp (Winlator Container Package)
     }
 
-    public interface OnExtractFileListener {
-        File onExtractFile(File file, long size);
-        void onExtractFileProgress(File file, long size);
-        default boolean mapsExtractedFiles() { return false; }
-        default boolean reportsExtractedBytesOnly() { return false; }
-        default void onExtractedBytes(long size) {}
-    }
+    // OnExtractFileListener is now a standalone class in the same package.
+    // See OnExtractFileListener.java
 
     private TarCompressorUtils() {}
 

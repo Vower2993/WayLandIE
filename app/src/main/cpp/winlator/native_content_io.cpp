@@ -438,7 +438,7 @@ class JavaExtractListener {
 public:
     JavaExtractListener(JNIEnv* env, jobject listener) : env_(env), listener_(listener) {
         if (!listener_) return;
-        jclass listener_cls = env_->FindClass("com/winlator/cmod/shared/util/OnExtractFileListener");
+        jclass listener_cls = env_->FindClass("io/waylandie/display/shared/io/OnExtractFileListener");
         on_extract_ =
             env_->GetMethodID(listener_cls, "onExtractFile", "(Ljava/io/File;J)Ljava/io/File;");
         on_progress_ =
