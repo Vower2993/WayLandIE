@@ -140,6 +140,69 @@ pkg-config --cflags --libs wayland-client
 pkg-config --cflags --libs xkbcommon
 pkg-config --variable=wayland_scanner wayland-scanner
 
+echo "=== [4c/9] Build xkbcommon + xkbregistry for bionic ==="
+mkdir -p /tmp/xkb-build
+# Write meson cross-file for aarch64 bionic
+cat > /tmp/xkb-cross.txt << XEOF
+[binaries]
+c = '$CC'
+cpp = '$CXX'
+ar = '$AR'
+strip = '$STRIP'
+
+[built-in options]
+c_args = ['-fPIC', '--sysroot=$SYSROOT', '-I$SYSROOT/usr/include', '-I$BIONIC_LIBS/include']
+c_link_args = ['--sysroot=$SYSROOT', '-L$BIONIC_LIBS/lib']
+
+[host_machine]
+system = 'android'
+cpu_family = 'aarch64'
+cpu = 'aarch64'
+endian = 'little'
+XEOF
+
+cd /tmp/xkb-build
+git clone --depth=1 https://github.com/xkbcommon/libxkbcommon.git
+mkdir -p libxkbcommon/build && cd libxkbcommon/build
+meson setup .. \
+  --cross-file=/tmp/xkb-cross.txt \
+  --prefix=/usr/local \
+  --default-library=static \
+  --bindir=bin \
+  --libdir=lib \
+  --includedir=include \
+  -Denable-wayland=false \
+  -Denable-docs=false \
+  -Denable-x11=false \
+  -Denable-tools=false \
+  2>&1 | tail -15
+ninja 2>&1 | tail -5
+DESTDIR="$BIONIC_LIBS" ninja install
+
+cd /tmp/xkb-build
+git clone --depth=1 https://github.com/xkbcommon/libxkbregistry.git
+mkdir -p libxkbregistry/build && cd libxkbregistry/build
+meson setup .. \
+  --cross-file=/tmp/xkb-cross.txt \
+  --prefix=/usr/local \
+  --default-library=static \
+  --bindir=bin \
+  --libdir=lib \
+  --includedir=include \
+  -Denable-docs=false \
+  2>&1 | tail -10
+ninja 2>&1 | tail -5
+DESTDIR="$BIONIC_LIBS" ninja install
+
+echo "=== bionic-libs after xkbcommon build ==="
+ls "$BIONIC_LIBS/lib/" | grep xkb || echo "  no xkb libs found!"
+ls "$BIONIC_LIBS/include/xkbcommon/" 2>/dev/null || echo "  no xkbcommon headers!"
+
+export XKBCOMMON_CFLAGS="-I$BIONIC_LIBS/include"
+export XKBCOMMON_LIBS="-L$BIONIC_LIBS/lib -lxkbcommon"
+export XKBREGISTRY_CFLAGS="-I$BIONIC_LIBS/include"
+export XKBREGISTRY_LIBS="-L$BIONIC_LIBS/lib -lxkbregistry"
+
 echo "=== [5/9] Apply GameNative patches (common + arm64ec) ==="
 cd /tmp/proton-wine
 apply_patches() {
@@ -226,40 +289,7 @@ export WAYLAND_SERVER_CFLAGS="-I$BIONIC_LIBS/include -D__ANDROID__ -DHAVE_SHM_UT
 export WAYLAND_SERVER_LIBS="-L$BIONIC_LIBS/lib -lwayland-server -lffi -landroid-sysvshm"
 export WAYLAND_EGL_CFLAGS="-I$BIONIC_LIBS/include"
 export WAYLAND_EGL_LIBS="-L$BIONIC_LIBS/lib -lwayland-egl"
-# Build xkbcommon + xkbregistry for bionic (avoid x86_64 system headers polluting include path)
-echo "=== [4c/9] Build xkbcommon + xkbregistry for bionic ==="
-mkdir -p /tmp/xkb-build && cd /tmp/xkb-build
-git clone --depth=1 https://github.com/xkbcommon/libxkbcommon.git
-mkdir -p libxkbcommon/build && cd libxkbcommon/build
-export PATH="$HOME/.local/bin:$PATH"
-meson setup .. \
-  --prefix=/usr/local \
-  --default-library=static \
-  -Denable-wayland=false \
-  -Denable-docs=false \
-  -Denable-x11=false \
-  2>&1 | tail -10
-ninja 2>&1 | tail -5
-DESTDIR="$BIONIC_LIBS" ninja install
-# Also build xkbregistry (same repo, enables registry feature)
-cd /tmp/xkb-build
-git clone --depth=1 https://github.com/xkbcommon/libxkbregistry.git
-mkdir -p libxkbregistry/build && cd libxkbregistry/build
-meson setup .. \
-  --prefix=/usr/local \
-  --default-library=static \
-  -Denable-docs=false \
-  2>&1 | tail -10
-ninja 2>&1 | tail -5
-DESTDIR="$BIONIC_LIBS" ninja install
-echo "=== bionic-libs after xkbcommon build ==="
-ls "$BIONIC_LIBS/lib/" | grep xkb
-ls "$BIONIC_LIBS/include/xkbcommon/" 2>/dev/null
 
-export XKBCOMMON_CFLAGS="-I$BIONIC_LIBS/include"
-export XKBCOMMON_LIBS="-L$BIONIC_LIBS/lib -lxkbcommon"
-export XKBREGISTRY_CFLAGS="-I$BIONIC_LIBS/include"
-export XKBREGISTRY_LIBS="-L$BIONIC_LIBS/lib -lxkbregistry"
 export WAYLAND_SCANNER="$(which wayland-scanner)"
 
 ./configure \
