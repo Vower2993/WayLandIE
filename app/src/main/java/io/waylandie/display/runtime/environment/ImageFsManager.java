@@ -265,7 +265,7 @@ public final class ImageFsManager {
                     };
 
             ok = TarCompressorUtils.extractSync(
-                    TarCompressorUtils.Type.XZ,
+                    null,  // auto-detect format (XZ or ZSTD)
                     context,
                     IMAGEFS_ARCHIVE,
                     rootDir,

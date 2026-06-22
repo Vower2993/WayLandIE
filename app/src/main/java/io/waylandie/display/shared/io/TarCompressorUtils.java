@@ -106,6 +106,36 @@ public final class TarCompressorUtils {
         return null;
     }
 
+    /**
+     * Detects the archive type from an APK asset's magic bytes.
+     * Reads the first 6 bytes of the asset to determine the format.
+     */
+    public static Type detectAssetType(Context context, String assetName) {
+        if (context == null || assetName == null) return null;
+        try (InputStream in = new BufferedInputStream(
+                context.getAssets().open(assetName), 64)) {
+            byte[] magic = new byte[6];
+            int read = in.read(magic);
+            if (read < 4) return null;
+            // gzip: 1f 8b
+            if ((magic[0] & 0xFF) == 0x1f && (magic[1] & 0xFF) == 0x8b) return Type.GZIP;
+            // xz: fd 37 7a 58 5a
+            if ((magic[0] & 0xFF) == 0xfd && (magic[1] & 0xFF) == 0x37
+                    && (magic[2] & 0xFF) == 0x7a && (magic[3] & 0xFF) == 0x58
+                    && (magic[4] & 0xFF) == 0x5a) return Type.XZ;
+            // zstd: 28 b5 2f fd
+            if ((magic[0] & 0xFF) == 0x28 && (magic[1] & 0xFF) == 0xb5
+                    && (magic[2] & 0xFF) == 0x2f && (magic[3] & 0xFF) == 0xfd) return Type.ZSTD;
+            // zip: 50 4b 03 04
+            if ((magic[0] & 0xFF) == 0x50 && (magic[1] & 0xFF) == 0x4b
+                    && (magic[2] & 0xFF) == 0x03 && (magic[3] & 0xFF) == 0x04) return Type.ZIP;
+            return Type.TAR; // assume plain tar as fallback
+        } catch (IOException e) {
+            Log.e(TAG, "detectAssetType failed for " + assetName, e);
+            return null;
+        }
+    }
+
     // ------------------------------------------------------------------
     // File-based extraction (for user-picked driver archives).
     // These are the pure-Java equivalents of the shell script's
@@ -511,6 +541,15 @@ public final class TarCompressorUtils {
 
     public static boolean extractSync(Type type, Context context, String assetName,
                                       File outDir, OnExtractFileListener listener) {
+        // Auto-detect format from asset magic bytes if type is null
+        if (type == null) {
+            type = detectAssetType(context, assetName);
+            if (type == null) {
+                Log.e(TAG, "Could not detect archive type for " + assetName);
+                return false;
+            }
+            Log.i(TAG, "Auto-detected archive type: " + type + " for " + assetName);
+        }
         // Try fast extraction first (Apache Commons Compress — no temp file)
         if (type == Type.XZ || type == Type.GZIP || type == Type.ZSTD) {
             Log.i(TAG, "Using fast extraction (Apache Commons Compress) for " + assetName);
