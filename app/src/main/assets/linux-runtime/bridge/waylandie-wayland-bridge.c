@@ -160,7 +160,6 @@ struct server_state {
     int present_failures;
     int abort_requested;
     int clear_ahb_outside;
-    int accept_client_complete;
     int client_seen;
     int completed_after_client_exit;
     int android_windows;
@@ -574,7 +573,6 @@ static void xtest_type_text_hex(struct server_state *state, const char *hex) {
         int high = hex_value(hex[i]);
         int low = hex_value(hex[i + 1]);
         if (high < 0 || low < 0) {
-//             break;
         }
         unsigned char byte = (unsigned char)((high << 4) | low);
         if (byte < 0x80U) {
@@ -3952,7 +3950,6 @@ int main(int argc, char **argv) {
     const char *socket_file = argv[3];
     double timeout_ms = atof(argv[4]);
     state.clear_ahb_outside = atoi(argv[5]) != 0;
-    int accept_client_complete;
     state.accept_client_complete = atoi(argv[6]) != 0;
     state.output_width = argc > 7 ? atoi(argv[7]) : 2688;
     state.output_height = argc > 8 ? atoi(argv[8]) : 1216;
@@ -4032,8 +4029,7 @@ int main(int argc, char **argv) {
             state.target_commits,
             timeout_ms,
             state.clear_ahb_outside,
-    int accept_client_complete;
-//             state.accept_client_complete,
+            state.accept_client_complete,
             state.bridge_reconnect_frames,
             state.pass_log_interval,
             state.android_windows,
@@ -4060,18 +4056,9 @@ int main(int argc, char **argv) {
     }
     double start_ms = now_ms();
     while (!state.abort_requested
-//             && state.commit_count < state.target_commits
-            /* no timeout — run until abort */ 1) {
+            && (now_ms() - start_ms) < 3600000.0) {  /* 1 hour timeout */
         wl_event_loop_dispatch(loop, 20);
         wl_display_flush_clients(state.display);
-    int accept_client_complete;
-//         if (state.accept_client_complete
-//                 && state.client_seen
-//                 && state.commit_count > 0
-//                 && wl_list_empty(wl_display_get_client_list(state.display))) {
-//             state.completed_after_client_exit = 1;
-//             break;
-        }
     }
     if (state.input_source != NULL) {
         wl_event_source_remove(state.input_source);
