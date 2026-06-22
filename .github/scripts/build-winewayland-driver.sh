@@ -39,7 +39,11 @@ echo "Using NDK: $NDK_DIR"
 [ -d "$NDK_DIR" ] || { echo "FATAL: no NDK found"; exit 1; }
 
 TOOLCHAIN="$NDK_DIR/toolchains/llvm/prebuilt/linux-x86_64"
-API=28
+# Use API 33 to match the bionic-libs cache (built with android33-clang).
+# This ensures symbols like memfd_create (API 30+) are available at link time.
+# The APK's targetSdk=28 (for W^X bypass) is separate from this compile API.
+# Runtime: S24 runs Android 14 (API 34+), so all API 33 functions are available.
+API=33
 export CC="$TOOLCHAIN/bin/aarch64-linux-android${API}-clang"
 export CXX="$TOOLCHAIN/bin/aarch64-linux-android${API}-clang++"
 export AR="$TOOLCHAIN/bin/llvm-ar"
