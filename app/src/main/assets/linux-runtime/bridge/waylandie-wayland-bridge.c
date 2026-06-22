@@ -233,6 +233,12 @@ struct server_state {
 struct shm_pool_state {
     void *data;
     int32_t size;
+    int fd;  // Original memfd/anonymous fd from wl_shm.create_pool.
+             // Kept open so wl_shm_pool.resize can mremap to a larger size.
+             // Wine's winewayland.drv creates a small pool (e.g. 22 bytes
+             // for the initial header) and then resizes it to the full
+             // buffer size (e.g. 19MB for a 3200x1536 framebuffer).
+             // Closed in destroy_pool_resource when the pool is destroyed.
 };
 
 struct shm_buffer_state {
@@ -1278,6 +1284,10 @@ static void destroy_pool_resource(struct wl_resource *resource) {
         if (pool->data != NULL && pool->size > 0) {
             munmap(pool->data, (size_t)pool->size);
         }
+        if (pool->fd >= 0) {
+            close(pool->fd);
+            pool->fd = -1;
+        }
         free(pool);
     }
 }
@@ -1321,8 +1331,58 @@ static void shm_pool_destroy(struct wl_client *client, struct wl_resource *resou
     wl_resource_destroy(resource);
 }
 
+// Resize the SHM pool. Wine's winewayland.drv creates a pool with a small
+// initial size (e.g. 22 bytes for the header) and then resizes it to the
+// full buffer size (e.g. 19MB for a 3200x1536 framebuffer).
+//
+// We use mremap() to grow the mapping in place. This works because the
+// underlying fd is a memfd/anonymous file (created by Wine via memfd_create
+// or similar), and mremap(MREMAP_MAYMOVE) handles the address change
+// transparently. The fd must be kept open for this to work — we store it
+// in shm_pool_state.fd.
+//
+// Without this, the bridge would see a 22-byte pool and reject the
+// 19MB buffer with "shm-pool-overflow", making the Wine desktop invisible.
 static void shm_pool_resize(struct wl_client *client, struct wl_resource *resource, int32_t size) {
-    (void)client; (void)resource; (void)size;
+    (void)client;
+    struct shm_pool_state *pool = wl_resource_get_user_data(resource);
+    if (pool == NULL || size <= 0) {
+        return;
+    }
+    if (size == pool->size) {
+        return;  // No-op
+    }
+    if (pool->fd < 0) {
+        printf("wayland-shm-ahb pool-resize failed: no fd (pool was created without keeping fd)\n");
+        fflush(stdout);
+        return;
+    }
+    int32_t old_size = pool->size;
+    // First, ftruncate the fd to the new size so the kernel knows the
+    // backing file is larger. Without this, mremap may succeed but reads
+    // beyond the old size would SIGBUS.
+    if (ftruncate(pool->fd, (off_t)size) != 0) {
+        printf("wayland-shm-ahb pool-resize ftruncate failed: errno=%d (%s) old=%d new=%d\n",
+               errno, strerror(errno), old_size, size);
+        fflush(stdout);
+        // Continue anyway — some fds (e.g. regular files) don't need ftruncate
+    }
+    // mremap with MREMAP_MAYMOVE so the kernel can relocate the mapping
+    // if it can't grow in place. Linux-only; bionic supports this.
+    void *new_data = mremap(pool->data, (size_t)old_size, (size_t)size, MREMAP_MAYMOVE);
+    if (new_data == MAP_FAILED) {
+        printf("wayland-shm-ahb pool-resize mremap failed: errno=%d (%s) old=%d new=%d\n",
+               errno, strerror(errno), old_size, size);
+        fflush(stdout);
+        // Don't update pool->size — leave the pool at its old size so the
+        // caller's subsequent operations don't read past the mapping.
+        return;
+    }
+    pool->data = new_data;
+    pool->size = size;
+    printf("wayland-shm-ahb pool-resize ok old=%d new=%d data=%p\n",
+           old_size, size, new_data);
+    fflush(stdout);
 }
 
 static const struct wl_shm_pool_interface shm_pool_impl = {
@@ -1353,8 +1413,10 @@ static void shm_create_pool(
     }
     pool->data = mmap(NULL, (size_t)size, PROT_READ, MAP_SHARED, fd, 0);
     pool->size = size;
-    close(fd);
+    pool->fd = fd;  // Keep fd open so shm_pool_resize can mremap.
     if (pool->data == MAP_FAILED) {
+        close(fd);
+        pool->fd = -1;
         free(pool);
         wl_resource_post_error(resource, WL_SHM_ERROR_INVALID_FD, "mmap failed");
         return;

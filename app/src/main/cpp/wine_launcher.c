@@ -73,10 +73,17 @@ int main(int argc, char *argv[]) {
      * actually did, which makes debugging impossible.
      *
      * The "[launcher]" prefix lets the trace file distinguish launcher
-     * output from Wine's own stdout/stderr. */
+     * output from Wine's own stdout/stderr.
+     *
+     * We fflush(stderr) after each write because stderr is line-buffered
+     * by default in glibc, but bionic libc may fully-buffer it when not
+     * attached to a tty (which is our case — ProcessBuilder uses a pipe).
+     * Without the flush, the writes may sit in the buffer and never reach
+     * Java before execve() replaces the process image. */
     #define LAUNCH_LOG(fmt, ...) do { \
         LOGI(fmt, ##__VA_ARGS__); \
         fprintf(stderr, "[launcher] " fmt "\n", ##__VA_ARGS__); \
+        fflush(stderr); \
     } while (0)
 
     LAUNCH_LOG("Wine launcher starting");
@@ -122,6 +129,7 @@ int main(int argc, char *argv[]) {
 
     LOGI("Calling execve(%s, ...)", wineBinary);
     fprintf(stderr, "[launcher] Calling execve(%s, ...)\n", wineBinary);
+    fflush(stderr);
 
     /* execve replaces this process with wine. If it returns, it failed. */
     execve(wineBinary, newArgv, environ);
@@ -131,6 +139,7 @@ int main(int argc, char *argv[]) {
     fprintf(stderr, "[launcher] execve FAILED: %s (errno=%d)\n",
             strerror(errno), errno);
     fprintf(stderr, "[launcher] (errno %d = %s)\n", errno, strerror(errno));
+    fflush(stderr);
 
     free(newArgv);
     return 127;  /* 127 = "command not found" — matches shell convention */
