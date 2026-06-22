@@ -371,6 +371,7 @@ PATCHES=(
   "server_fsync.c.patch"
   "server_inproc_sync.c.patch"
   "server_main.c.patch"
+  "server_protocol.def.patch"
   "server_thread.c.patch"
   "server_unicode.c.patch"
   "dlls_ntdll_unix_esync.c.patch"
