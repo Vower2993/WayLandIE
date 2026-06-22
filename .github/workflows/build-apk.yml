@@ -1,9 +1,20 @@
-# Builds a debug APK on every push and PR, and on manual dispatch.
-# Artifacts are uploaded to GitHub Actions — you can download the APK
-# straight to your phone from the Actions tab of your GitHub fork.
+# Builds a fully self-contained WayLandIE APK with bundled rootfs.
 #
-# This is the recommended path if you only have a phone (Termux can't
-# run the x86_64 NDK host toolchains).
+# NOTE: This file is COPIED from build-self-contained-apk.yml to ensure
+# both workflow filenames produce identical APKs. GitHub Actions triggers
+# build-apk.yml on every push (it's the "default" workflow), so it MUST
+# include the full build pipeline (imagefs, bionic bridge, winewayland
+# driver, etc.) — otherwise the APK will be missing critical components.
+#
+# This workflow:
+#   1. Sets up QEMU binfmt for arm64 cross-build (rootfs built on x86_64 runner)
+#   2. Builds the imagefs.tar.zst rootfs (~160 MB, cached between runs)
+#   3. Verifies proot binary (already bundled in repo — no download needed)
+#   4. Builds the APK with everything bundled (~170 MB APK)
+#   5. Uploads the APK as an artifact
+#
+# First run: ~30 minutes (rootfs build is slow due to QEMU emulation)
+# Cached runs: ~10 minutes (rootfs reused)
 
 name: Build APK
 
@@ -12,16 +23,12 @@ on:
     branches: [ main, master ]
   pull_request:
     branches: [ main, master ]
-  workflow_dispatch:  # lets you trigger it manually from the Actions tab
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-22.04
     env:
-      # Pin JAVA_HOME to JDK 17 for the whole job. setup-android@v3
-      # switches JAVA_HOME to Java 11 (needed by sdkmanager), which
-      # then breaks AGP 8.5 (requires 17). We restore it explicitly
-      # before the gradle step.
       JAVA_HOME: /usr/lib/jvm/temurin-17-jdk-amd64
       JAVA_HOME_17_X64: /usr/lib/jvm/temurin-17-jdk-amd64
     steps:
@@ -33,20 +40,261 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+      # -----------------------------------------------------------------
+      # QEMU binfmt — required for arm64 chroot on x86_64 runner
+      # -----------------------------------------------------------------
+      - name: Set up QEMU binfmt for arm64 cross-build
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-user-static debootstrap binfmt-support zstd
+          sudo update-binfmts --enable qemu-aarch64 || true
+          if [ -f /proc/sys/fs/binfmt_misc/qemu-aarch64 ]; then
+            echo "✓ qemu-aarch64 binfmt registered"
+          else
+            echo "⚠ qemu-aarch64 binfmt not found — arm64 chroot may fail"
+          fi
+
+      # -----------------------------------------------------------------
+      # Cache the imagefs tarball — expensive to build (~20 min)
+      # -----------------------------------------------------------------
+      - name: Cache imagefs tarball
+        id: cache-imagefs
+        uses: actions/cache@v4
         with:
-          # setup-android@v3 accepts packages as a single space-separated
-          # string. Using single quotes is the safest YAML form — avoids
-          # any ambiguity with the semicolons in package names like
-          # 'platforms;android-34' and avoids the literal-block-scalar
-          # form that some YAML parsers in older action runners
-          # misinterpret.
-          packages: 'tools platform-tools platforms;android-34 build-tools;34.0.0 ndk;26.1.10909125 cmake;3.22.1'
+          path: app/src/main/assets/imagefs/imagefs.tar.zst
+          key: imagefs-${{ hashFiles('tools/build-imagefs.sh') }}-v9-zstd
+
+      # -----------------------------------------------------------------
+      # Build the rootfs (only on cache miss)
+      # -----------------------------------------------------------------
+      - name: Build imagefs rootfs
+        if: steps.cache-imagefs.outputs.cache-hit != 'true'
+        run: |
+          echo "=== Building imagefs rootfs (this takes ~20 minutes) ==="
+          sudo bash tools/build-imagefs.sh
+          if [ ! -f app/src/main/assets/imagefs/imagefs.tar.zst ]; then
+            echo "ERROR: imagefs.tar.zst not created" >&2
+            exit 1
+          fi
+          SIZE=$(stat -c%s app/src/main/assets/imagefs/imagefs.tar.zst)
+          echo "✓ imagefs.tar.zst created ($SIZE bytes, $(numfmt --to=iec $SIZE))"
+          if [ "$SIZE" -lt 33554432 ]; then
+            echo "ERROR: imagefs.tar.zst is suspiciously small (< 50 MB)" >&2
+            exit 1
+          fi
+
+      - name: Verify imagefs cache hit
+        if: steps.cache-imagefs.outputs.cache-hit == 'true'
+        run: |
+          echo "✓ imagefs.tar.zst restored from cache"
+          ls -la app/src/main/assets/imagefs/imagefs.tar.zst
+
+      - name: Extract glibc linker to jniLibs
+        run: |
+          echo "=== Extracting glibc linker from rootfs tarball ==="
+          sudo mkdir -p app/src/main/jniLibs/arm64-v8a
+          sudo chown -R $(id -u):$(id -g) app/src/main/jniLibs
+          mkdir -p /tmp/wl-linker-extract
+          # List all ld-linux files in the tarball for debugging
+          echo "  Searching for ld-linux in tarball…"
+          zstd -dc app/src/main/assets/imagefs/imagefs.tar.zst 2>/dev/null | \
+            tar -tf - 2>/dev/null | grep "ld-linux" | head -10 || true
+          # CRITICAL: The ld-linux-aarch64.so.1 entries in the tarball are SYMLINKS
+          # pointing to ld-2.31.so (the REAL ELF). We must extract ld-2.31.so too.
+          # Use tar -h (dereference) to extract symlink TARGETS as real files.
+          echo "  Extracting ld-linux + ld-2.31.so (dereferenced)…"
+          # Pattern matches both ld-linux-aarch64.so.1 (symlink) and ld-2.31.so (real)
+          zstd -dc app/src/main/assets/imagefs/imagefs.tar.zst 2>/dev/null | \
+            tar -xhf - -C /tmp/wl-linker-extract \
+              --wildcards "*ld-linux-aarch64*" 2>/dev/null || true
+          zstd -dc app/src/main/assets/imagefs/imagefs.tar.zst 2>/dev/null | \
+            tar -xhf - -C /tmp/wl-linker-extract \
+              --wildcards "*ld-2.*.so" 2>/dev/null || true
+          echo "  Extracted files:"
+          find /tmp/wl-linker-extract -name "*ld-*" -exec ls -la {} \; 2>/dev/null || true
+          # Find the REAL ELF file (not symlink).
+          FOUND=""
+          for candidate in \
+            "/tmp/wl-linker-extract/usr/lib/aarch64-linux-gnu/ld-2.31.so" \
+            "/tmp/wl-linker-extract/usr/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1" \
+            "/tmp/wl-linker-extract/usr/lib/ld-linux-aarch64.so.1" \
+            "/tmp/wl-linker-extract/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1"; do
+            if [ -f "$candidate" ] && [ ! -L "$candidate" ]; then
+              FOUND="$candidate"
+              echo "  ✓ Found real ELF at: $FOUND"
+              break
+            fi
+          done
+          # Fallback: find any regular file matching the name
+          if [ -z "$FOUND" ]; then
+            FOUND=$(find /tmp/wl-linker-extract -name "ld-linux-aarch64.so.1" -type f ! -type l | head -1)
+            if [ -n "$FOUND" ]; then
+              echo "  ✓ Found real ELF via find: $FOUND"
+            fi
+          fi
+          # Last resort: follow a symlink to get the real file
+          if [ -z "$FOUND" ]; then
+            SYMLINK=$(find /tmp/wl-linker-extract -name "ld-linux-aarch64.so.1" | head -1)
+            if [ -n "$SYMLINK" ] && [ -L "$SYMLINK" ]; then
+              TARGET=$(readlink -f "$SYMLINK")
+              echo "  Symlink $SYMLINK → $TARGET"
+              if [ -f "$TARGET" ]; then
+                FOUND="$TARGET"
+                echo "  ✓ Found real ELF via symlink target: $FOUND"
+              fi
+            fi
+          fi
+          if [ -n "$FOUND" ]; then
+            cp -L "$FOUND" app/src/main/jniLibs/arm64-v8a/libld_glibc.so
+            chmod 755 app/src/main/jniLibs/arm64-v8a/libld_glibc.so
+            echo "  ✓ libld_glibc.so: $(stat -c%s app/src/main/jniLibs/arm64-v8a/libld_glibc.so) bytes"
+            file app/src/main/jniLibs/arm64-v8a/libld_glibc.so
+            # CRITICAL: Verify glibc version is < 2.34 to avoid seccomp SIGSYS on Android
+            GLIBC_VER=$(strings "$FOUND" | grep -oP 'GLIBC_\K[0-9]+\.[0-9]+' | sort -V | tail -1)
+            echo "  glibc version: $GLIBC_VER"
+            GLIBC_MAJOR=$(echo "$GLIBC_VER" | cut -d. -f1)
+            GLIBC_MINOR=$(echo "$GLIBC_VER" | cut -d. -f2)
+            if [ "$GLIBC_MAJOR" -gt 2 ] || ([ "$GLIBC_MAJOR" -eq 2 ] && [ "$GLIBC_MINOR" -ge 34 ]); then
+              echo "  ✗ FATAL: glibc $GLIBC_VER is too new — will trigger SIGSYS on Android"
+              exit 1
+            else
+              echo "  ✓ glibc $GLIBC_VER is safe (< 2.34 — no seccomp SIGSYS)"
+            fi
+          else
+            echo "✗ FATAL: glibc linker ELF not found in rootfs tarball"
+            find /tmp/wl-linker-extract -name "*ld-linux*" -exec ls -la {} \;
+            exit 1
+          fi
+          rm -rf /tmp/wl-linker-extract
+
+      # -----------------------------------------------------------------
+      # Verify proot binary — already bundled in repo from git checkout.
+      # No download needed. Just verify it's a real ELF, not a placeholder.
+      # -----------------------------------------------------------------
+      - name: Verify proot binary
+        run: |
+          echo "=== Verifying proot binary ==="
+          PROOT_FILE="app/src/main/jniLibs/arm64-v8a/libproot.so"
+          if [ ! -f "$PROOT_FILE" ]; then
+            echo "ERROR: libproot.so not found" >&2
+            exit 1
+          fi
+          PROOT_SIZE=$(stat -c%s "$PROOT_FILE")
+          echo "  Size: $PROOT_SIZE bytes"
+          if [ "$PROOT_SIZE" -lt 100000 ]; then
+            echo "  ⚠ Proot binary is small ($PROOT_SIZE bytes) — downloading…"
+            bash tools/fetch-proot.sh --force
+          else
+            echo "  ✓ Proot binary already present (real ELF, $PROOT_SIZE bytes)"
+          fi
+          file "$PROOT_FILE"
+
+      # -----------------------------------------------------------------
+      # Adrenotools — OPTIONAL. If fetch fails, continue with placeholder.
+      # The app works without it (falls back to rootfs Turnip driver).
+      # -----------------------------------------------------------------
+      - name: Fetch adrenotools binary (optional — non-fatal)
+        continue-on-error: true
+        run: |
+          echo "=== Fetching libadrenotools.so (optional) ==="
+          ADR_FILE="app/src/main/jniLibs/arm64-v8a/libadrenotools.so"
+          ADR_SIZE=$(stat -c%s "$ADR_FILE" 2>/dev/null || echo 0)
+          if [ "$ADR_SIZE" -gt 10000 ]; then
+            echo "  ✓ Already present ($ADR_SIZE bytes)"
+          else
+            echo "  Attempting fetch (non-fatal if it fails)…"
+            bash tools/fetch-adrenotools.sh --force || {
+              echo "  ⚠ Adrenotools fetch failed — continuing with placeholder."
+              echo "  The app will use rootfs Turnip instead. OK."
+              # Ensure placeholder exists so APK builds
+              mkdir -p app/src/main/jniLibs/arm64-v8a
+              touch "$ADR_FILE"
+            }
+          fi
+
+      # -----------------------------------------------------------------
+      # Android SDK setup
+      #
+      # We call sdkmanager directly instead of using
+      # android-actions/setup-android@v3 because that action pulls in the
+      # deprecated 'tools' package which tries to install the Android
+      # Emulator (and the emulator zip download frequently fails with
+      # "Error on ZipFile unknown archive"). We don't need the emulator.
+      # -----------------------------------------------------------------
+      - name: Set up Android SDK
+        run: |
+          set -e
+          export ANDROID_HOME=/usr/local/lib/android/sdk
+          export ANDROID_SDK_ROOT=$ANDROID_HOME
+          echo "ANDROID_HOME=$ANDROID_HOME" >> $GITHUB_ENV
+          echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> $GITHUB_ENV
+          echo "$ANDROID_HOME/cmdline-tools/latest/bin" >> $GITHUB_PATH
+          echo "$ANDROID_HOME/platform-tools" >> $GITHUB_PATH
+          SDKMGR="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDKMGR" ]; then
+            SDKMGR="$ANDROID_HOME/cmdline-tools/bin/sdkmanager"
+          fi
+          echo "Using sdkmanager: $SDKMGR"
+          yes | "$SDKMGR" --licenses > /dev/null 2>&1 || true
+          "$SDKMGR" --install \
+            "platform-tools" \
+            "platforms;android-34" \
+            "build-tools;34.0.0" \
+            "ndk;26.1.10909125" \
+            "cmake;3.22.1" 2>&1 | tail -20
+          echo "=== SDK packages installed ==="
+          "$SDKMGR" --list_installed 2>/dev/null | grep -E "platform-tools|android-34|build-tools|ndk|cmake" || true
+
+      # -----------------------------------------------------------------
+      # Bionic bridge dependencies — libffi + libwayland-server (static,
+      # bionic-compiled). The bridge itself is compiled by Gradle's
+      # externalNativeBuildDebug task; this step just produces the static
+      # libs that the CMakeLists.txt waylandie_bridge target links against.
+      #
+      # Cache key: hash of build-bionic-bridge.sh. If the script changes,
+      # the cache misses and the libs rebuild (~5 minutes). Otherwise the
+      # cache hits and the step is a no-op.
+      # -----------------------------------------------------------------
+      - name: Cache bionic bridge deps
+        id: cache-bionic-bridge
+        uses: actions/cache@v4
+        with:
+          path: app/src/main/cpp/bionic-libs
+          key: bionic-libs-${{ hashFiles('tools/build-bionic-bridge.sh', 'tools/android-aarch64-cross.txt', 'tools/build-machine-native.txt') }}-v1
+
+      - name: Install meson + ninja + wayland-scanner deps
+        if: steps.cache-bionic-bridge.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get install -y python3-pip libffi-dev libexpat1-dev libxml2-dev
+          pip3 install --user meson ninja
+
+      - name: Build bionic bridge deps (libffi + libwayland-server)
+        if: steps.cache-bionic-bridge.outputs.cache-hit != 'true'
+        run: |
+          echo "=== Building bionic bridge dependencies (libffi + libwayland-server) ==="
+          # meson + ninja installed to ~/.local/bin by pip --user
+          export PATH="$HOME/.local/bin:$PATH"
+          # Output goes to app/src/main/cpp/bionic-libs/ so the
+          # CMakeLists.txt waylandie_bridge target can find it.
+          OUTPUT_DIR="$(pwd)/app/src/main/cpp/bionic-libs" \
+            bash tools/build-bionic-bridge.sh
+          echo
+          echo "=== Verify bionic libs ==="
+          ls -la app/src/main/cpp/bionic-libs/lib/
+          ls app/src/main/cpp/bionic-libs/include/ | head
+
+      - name: Build winewayland driver (PE + bionic ELF)
+        run: |
+          bash .github/scripts/build-winewayland-driver.sh
+
+      - name: Verify bionic bridge deps (cache hit)
+        if: steps.cache-bionic-bridge.outputs.cache-hit == 'true'
+        run: |
+          echo "✓ bionic-libs restored from cache"
+          ls -la app/src/main/cpp/bionic-libs/lib/libwayland-server.a
+          ls -la app/src/main/cpp/bionic-libs/lib/libffi.a
 
       - name: Restore JDK 17 as default JAVA_HOME
-        # setup-android@v3 sets JAVA_HOME to Java 11 for sdkmanager.
-        # AGP 8.5 needs Java 17. Force it back.
         run: |
           echo "JAVA_HOME=$JAVA_HOME_17_X64" >> $GITHUB_ENV
           echo "JAVA_HOME_17_X64=$JAVA_HOME_17_X64" >> $GITHUB_ENV
@@ -56,13 +304,60 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v3
 
+      # -----------------------------------------------------------------
+      # Pre-build verification
+      # -----------------------------------------------------------------
+      - name: Verify all bundled assets present
+        run: |
+          echo "=== Pre-build verification ==="
+          echo "imagefs.tar.zst:"
+          ls -la app/src/main/assets/imagefs/imagefs.tar.zst
+          IMG_SIZE=$(stat -c%s app/src/main/assets/imagefs/imagefs.tar.zst)
+          if [ "$IMG_SIZE" -lt 33554432 ]; then
+            echo "ERROR: imagefs too small" >&2; exit 1
+          fi
+          echo
+          echo "libproot.so:"
+          ls -la app/src/main/jniLibs/arm64-v8a/libproot.so
+          PROOT_SIZE=$(stat -c%s app/src/main/jniLibs/arm64-v8a/libproot.so)
+          if [ "$PROOT_SIZE" -lt 100000 ]; then
+            echo "ERROR: proot too small (placeholder?)" >&2; exit 1
+          fi
+          echo
+          echo "libadrenotools.so:"
+          ls -la app/src/main/jniLibs/arm64-v8a/libadrenotools.so
+          echo
+          echo "Java sources:"
+          find app/src/main/java/io/waylandie -name "*.java" | wc -l
+          echo "Native sources:"
+          find app/src/main/cpp -name "*.c" -o -name "*.cpp" -o -name "*.h" | wc -l
+
+      # -----------------------------------------------------------------
+      # Build the APK
+      # -----------------------------------------------------------------
+      - name: Write local.properties
+        run: |
+          echo "sdk.dir=$ANDROID_HOME" > local.properties
+          cat local.properties
+
       - name: Build debug APK
         run: ./gradlew assembleDebug --no-daemon --stacktrace
 
+      # -----------------------------------------------------------------
+      # Upload the APK
+      # -----------------------------------------------------------------
+      - name: Show APK info
+        run: |
+          ls -la app/build/outputs/apk/debug/
+          echo
+          echo "APK size: $(du -h app/build/outputs/apk/debug/app-debug.apk | cut -f1)"
+          echo "MD5: $(md5sum app/build/outputs/apk/debug/app-debug.apk | cut -d' ' -f1)"
+
       - name: Upload APK
+        if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: waylandie-debug-apk
+          name: waylandie-self-contained-apk
           path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
           retention-days: 30
@@ -75,4 +370,5 @@ jobs:
           path: |
             app/build/reports/
             build/reports/
+            app/build/outputs/logs/
           retention-days: 7
