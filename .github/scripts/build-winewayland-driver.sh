@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Two-stage Wine cross-build with GameNative android patches
-set -euo pipefail
+set -eu
+set +o pipefail  # ls|head can SIGPIPE; we handle errors explicitly
 
 WORKSPACE="${GITHUB_WORKSPACE:-$(pwd)}"
 OUTDIR="/tmp/winewayland-build"
@@ -27,7 +28,7 @@ if [ ! -d "$LLVM_MINGW_DIR" ]; then
   mkdir -p "$LLVM_MINGW_DIR"
   tar -xf /tmp/llvm-mingw.tar.xz -C "$LLVM_MINGW_DIR" --strip-components=1
   echo "llvm-mingw installed at $LLVM_MINGW_DIR"
-  ls "$LLVM_MINGW_DIR/bin/" | head -5
+  ls "$LLVM_MINGW_DIR/bin/" 2>/dev/null | grep -E "^(aarch64-w64-mingw32-(clang|gcc)|x86_64-w64-mingw32-)" | head -5 || true
 fi
 export PATH="$LLVM_MINGW_DIR/bin:$PATH"
 
@@ -46,7 +47,7 @@ export STRIP="$TOOLCHAIN/bin/llvm-strip"
 export SYSROOT="$TOOLCHAIN/sysroot"
 
 BIONIC_LIBS="$WORKSPACE/app/src/main/cpp/bionic-libs"
-ls "$BIONIC_LIBS/lib/" 2>/dev/null | head -20
+ls "$BIONIC_LIBS/lib/" 2>/dev/null | head -20 || true
 
 echo "=== [3/9] Clone proton-wine ==="
 cd /tmp
