@@ -175,7 +175,7 @@ export AR="$TOOLCHAIN/bin/llvm-ar"
 export STRIP="$TOOLCHAIN/bin/llvm-strip"
 export CFLAGS="-fPIC --sysroot=$SYSROOT -I$SYSROOT/usr/include -I$BIONIC_LIBS/include -I/tmp/proton-wine/include -I/usr/include -D__ANDROID_API__=$API -D__ANDROID__"
 export CXXFLAGS="$CFLAGS"
-export LDFLAGS="--sysroot=$SYSROOT -L$BIONIC_LIBS/lib -L/usr/lib/x86_64-linux-gnu -landroid-sysvshm -lffi -lxkbcommon -lxkbregistry"
+export LDFLAGS="--sysroot=$SYSROOT -L$BIONIC_LIBS/lib -landroid-sysvshm -lffi"
 export PKG_CONFIG_PATH="$BIONIC_LIBS/lib/pkgconfig"
 export PKG_CONFIG_LIBDIR="$BIONIC_LIBS/lib/pkgconfig"
 unset PKG_CONFIG_SYSROOT_DIR
