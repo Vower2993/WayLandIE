@@ -49,10 +49,12 @@ public final class WaylandDriverInstaller {
             return false;
         }
 
-        // Check if already installed (idempotent)
+        // Check if already installed (idempotent) — verify BOTH .drv and .so
         File drvCheck = new File(prefix, "lib/wine/aarch64-windows/winewayland.drv");
-        if (drvCheck.exists() && drvCheck.length() > 1000) {
-            log("  already installed: " + drvCheck + " (" + drvCheck.length() + " bytes)");
+        File soCheck = new File(prefix, "lib/wine/aarch64-unix/winewayland.so");
+        if (drvCheck.exists() && drvCheck.length() > 1000
+                && soCheck.exists() && soCheck.length() > 1000) {
+            log("  already installed: drv=" + drvCheck.length() + " bytes, so=" + soCheck.length() + " bytes");
             return true;
         }
 
@@ -108,10 +110,17 @@ public final class WaylandDriverInstaller {
 
     private static File safePath(File prefix, String name) {
         if (name == null || name.isEmpty() || name.startsWith("/")) return null;
+        // Reject entries containing .. (path traversal)
+        if (name.contains("..")) return null;
         File f = new File(prefix, name);
-        String p = f.getAbsolutePath();
-        String pp = prefix.getAbsolutePath();
-        if (!p.equals(pp) && !p.startsWith(pp + File.separator)) return null;
+        // Use getCanonicalPath() to resolve any remaining .. or symlinks
+        try {
+            String p = f.getCanonicalPath();
+            String pp = prefix.getCanonicalPath();
+            if (!p.equals(pp) && !p.startsWith(pp + File.separator)) return null;
+        } catch (IOException e) {
+            return null;
+        }
         return f;
     }
 }
