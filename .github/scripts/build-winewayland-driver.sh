@@ -168,6 +168,7 @@ apply_patches() {
 }
 apply_patches /tmp/proton-wine/android/patches/common
 apply_patches /tmp/proton-wine/android/patches/arm64ec
+apply_patches /tmp/proton-wine/android/patches/test-bylaws
 
 echo "=== [6/9] Stage A: Native x86_64 tools build ==="
 mkdir -p /tmp/proton-wine-tools-build
@@ -316,6 +317,14 @@ if [ "$DRV_SIZE" -lt 1000 ]; then
   grep -B2 -A10 "checking for wayland" /tmp/proton-wine/config.log 2>/dev/null | head -50 || true
   echo "=== Makefile for winewayland.drv ==="
   cat /tmp/proton-wine/dlls/winewayland.drv/Makefile 2>/dev/null | head -50 || true
+  exit 1
+fi
+
+if [ "$SO_SIZE" -lt 1000 ]; then
+  echo "FATAL: winewayland.so missing or too small"
+  echo "=== winewayland.so build output (last 80 lines) ==="
+  # The make output was truncated earlier; re-run with verbose to see errors
+  make -j1 dlls/winewayland.drv/winewayland.so V=1 2>&1 | tail -80 || true
   exit 1
 fi
 
