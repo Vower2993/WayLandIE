@@ -23,7 +23,7 @@ export PATH="$HOME/.local/bin:$PATH"
 echo "=== [1b/9] Download llvm-mingw toolchain (arm64ec PE support) ==="
 LLVM_MINGW_DIR="$HOME/llvm-mingw"
 if [ ! -d "$LLVM_MINGW_DIR" ]; then
-  wget -q "https://github.com/mstorsjo/llvm-mingw/releases/download/20250920/llvm-mingw-20250920-ucrt-ubuntu-22.04-x86_64.tar.xz" -O /tmp/llvm-mingw.tar.xz
+  wget -q "https://github.com/mstorsjo/llvm-mingw/releases/download/20260616/llvm-mingw-20260616-ucrt-ubuntu-22.04-x86_64.tar.xz" -O /tmp/llvm-mingw.tar.xz
   mkdir -p "$LLVM_MINGW_DIR"
   tar -xf /tmp/llvm-mingw.tar.xz -C "$LLVM_MINGW_DIR" --strip-components=1
   echo "llvm-mingw installed at $LLVM_MINGW_DIR"
