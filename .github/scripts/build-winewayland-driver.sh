@@ -187,6 +187,20 @@ export ac_cv_prog_wayland_scanner=$(which wayland-scanner)
 export ac_cv_func_shm_open=yes
 export ac_cv_search_shm_open="none required"
 
+# CRITICAL: set Wine detection vars directly so configure does NOT call pkg-config
+# (configure.ac's pkg-config invocation is broken — runs "--cflags" as a command)
+export WAYLAND_CLIENT_CFLAGS="-I$BIONIC_LIBS/include -D__ANDROID__ -DHAVE_SHM_UTILS"
+export WAYLAND_CLIENT_LIBS="-L$BIONIC_LIBS/lib -lwayland-client -lffi -landroid-sysvshm"
+export WAYLAND_SERVER_CFLAGS="-I$BIONIC_LIBS/include -D__ANDROID__ -DHAVE_SHM_UTILS"
+export WAYLAND_SERVER_LIBS="-L$BIONIC_LIBS/lib -lwayland-server -lffi -landroid-sysvshm"
+export WAYLAND_EGL_CFLAGS="-I$BIONIC_LIBS/include"
+export WAYLAND_EGL_LIBS="-L$BIONIC_LIBS/lib -lwayland-egl"
+export XKBCOMMON_CFLAGS="-I$BIONIC_LIBS/include"
+export XKBCOMMON_LIBS="-L$BIONIC_LIBS/lib -lxkbcommon"
+export XKBREGISTRY_CFLAGS="-I$BIONIC_LIBS/include"
+export XKBREGISTRY_LIBS="-L$BIONIC_LIBS/lib -lxkbregistry"
+export WAYLAND_SCANNER="$(which wayland-scanner)"
+
 ./configure \
   --host=aarch64-linux-android \
   --prefix=/usr/local \
