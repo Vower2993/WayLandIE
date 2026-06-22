@@ -208,11 +208,36 @@ jobs:
 
       # -----------------------------------------------------------------
       # Android SDK setup
+      #
+      # We call sdkmanager directly instead of using
+      # android-actions/setup-android@v3 because that action pulls in the
+      # deprecated 'tools' package which tries to install the Android
+      # Emulator (and the emulator zip download frequently fails with
+      # "Error on ZipFile unknown archive"). We don't need the emulator.
       # -----------------------------------------------------------------
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-        with:
-          packages: 'tools platform-tools platforms;android-34 build-tools;34.0.0 ndk;26.1.10909125 cmake;3.22.1'
+        run: |
+          set -e
+          export ANDROID_HOME=/usr/local/lib/android/sdk
+          export ANDROID_SDK_ROOT=$ANDROID_HOME
+          echo "ANDROID_HOME=$ANDROID_HOME" >> $GITHUB_ENV
+          echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> $GITHUB_ENV
+          echo "$ANDROID_HOME/cmdline-tools/latest/bin" >> $GITHUB_PATH
+          echo "$ANDROID_HOME/platform-tools" >> $GITHUB_PATH
+          SDKMGR="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDKMGR" ]; then
+            SDKMGR="$ANDROID_HOME/cmdline-tools/bin/sdkmanager"
+          fi
+          echo "Using sdkmanager: $SDKMGR"
+          yes | "$SDKMGR" --licenses > /dev/null 2>&1 || true
+          "$SDKMGR" --install \
+            "platform-tools" \
+            "platforms;android-34" \
+            "build-tools;34.0.0" \
+            "ndk;26.1.10909125" \
+            "cmake;3.22.1" 2>&1 | tail -20
+          echo "=== SDK packages installed ==="
+          "$SDKMGR" --list_installed 2>/dev/null | grep -E "platform-tools|android-34|build-tools|ndk|cmake" || true
 
       # -----------------------------------------------------------------
       # Bionic bridge dependencies — libffi + libwayland-server (static,
@@ -304,6 +329,11 @@ jobs:
       # -----------------------------------------------------------------
       # Build the APK
       # -----------------------------------------------------------------
+      - name: Write local.properties
+        run: |
+          echo "sdk.dir=$ANDROID_HOME" > local.properties
+          cat local.properties
+
       - name: Build debug APK
         run: ./gradlew assembleDebug --no-daemon --stacktrace
 
