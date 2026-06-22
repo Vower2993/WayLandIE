@@ -2,7 +2,7 @@
 #
 # This workflow:
 #   1. Sets up QEMU binfmt for arm64 cross-build (rootfs built on x86_64 runner)
-#   2. Builds the imagefs.tar.xz rootfs (~160 MB, cached between runs)
+#   2. Builds the imagefs.tar.zst rootfs (~160 MB, cached between runs)
 #   3. Verifies proot binary (already bundled in repo — no download needed)
 #   4. Builds the APK with everything bundled (~170 MB APK)
 #   5. Uploads the APK as an artifact
@@ -55,8 +55,8 @@ jobs:
         id: cache-imagefs
         uses: actions/cache@v4
         with:
-          path: app/src/main/assets/imagefs/imagefs.tar.xz
-          key: imagefs-${{ hashFiles('tools/build-imagefs.sh') }}-v8
+          path: app/src/main/assets/imagefs/imagefs.tar.zst
+          key: imagefs-${{ hashFiles('tools/build-imagefs.sh') }}-v9-zstd
 
       # -----------------------------------------------------------------
       # Build the rootfs (only on cache miss)
@@ -66,42 +66,42 @@ jobs:
         run: |
           echo "=== Building imagefs rootfs (this takes ~20 minutes) ==="
           sudo bash tools/build-imagefs.sh
-          if [ ! -f app/src/main/assets/imagefs/imagefs.tar.xz ]; then
-            echo "ERROR: imagefs.tar.xz not created" >&2
+          if [ ! -f app/src/main/assets/imagefs/imagefs.tar.zst ]; then
+            echo "ERROR: imagefs.tar.zst not created" >&2
             exit 1
           fi
-          SIZE=$(stat -c%s app/src/main/assets/imagefs/imagefs.tar.xz)
-          echo "✓ imagefs.tar.xz created ($SIZE bytes, $(numfmt --to=iec $SIZE))"
+          SIZE=$(stat -c%s app/src/main/assets/imagefs/imagefs.tar.zst)
+          echo "✓ imagefs.tar.zst created ($SIZE bytes, $(numfmt --to=iec $SIZE))"
           if [ "$SIZE" -lt 33554432 ]; then
-            echo "ERROR: imagefs.tar.xz is suspiciously small (< 50 MB)" >&2
+            echo "ERROR: imagefs.tar.zst is suspiciously small (< 50 MB)" >&2
             exit 1
           fi
 
       - name: Verify imagefs cache hit
         if: steps.cache-imagefs.outputs.cache-hit == 'true'
         run: |
-          echo "✓ imagefs.tar.xz restored from cache"
-          ls -la app/src/main/assets/imagefs/imagefs.tar.xz
+          echo "✓ imagefs.tar.zst restored from cache"
+          ls -la app/src/main/assets/imagefs/imagefs.tar.zst
 
       - name: Extract glibc linker to jniLibs
         run: |
           echo "=== Extracting glibc linker from rootfs tarball ==="
-          sudo mkdir -p app/src/main/jniLibs/arm64-v8a
+          sudo mkdir -p app/src/main/jniLibs/arm64-v9-zstda
           sudo chown -R $(id -u):$(id -g) app/src/main/jniLibs
           mkdir -p /tmp/wl-linker-extract
           # List all ld-linux files in the tarball for debugging
           echo "  Searching for ld-linux in tarball…"
-          xz -dc app/src/main/assets/imagefs/imagefs.tar.xz 2>/dev/null | \
+          zstd -dc app/src/main/assets/imagefs/imagefs.tar.zst 2>/dev/null | \
             tar -tf - 2>/dev/null | grep "ld-linux" | head -10 || true
           # CRITICAL: The ld-linux-aarch64.so.1 entries in the tarball are SYMLINKS
           # pointing to ld-2.31.so (the REAL ELF). We must extract ld-2.31.so too.
           # Use tar -h (dereference) to extract symlink TARGETS as real files.
           echo "  Extracting ld-linux + ld-2.31.so (dereferenced)…"
           # Pattern matches both ld-linux-aarch64.so.1 (symlink) and ld-2.31.so (real)
-          xz -dc app/src/main/assets/imagefs/imagefs.tar.xz 2>/dev/null | \
+          zstd -dc app/src/main/assets/imagefs/imagefs.tar.zst 2>/dev/null | \
             tar -xhf - -C /tmp/wl-linker-extract \
               --wildcards "*ld-linux-aarch64*" 2>/dev/null || true
-          xz -dc app/src/main/assets/imagefs/imagefs.tar.xz 2>/dev/null | \
+          zstd -dc app/src/main/assets/imagefs/imagefs.tar.zst 2>/dev/null | \
             tar -xhf - -C /tmp/wl-linker-extract \
               --wildcards "*ld-2.*.so" 2>/dev/null || true
           echo "  Extracted files:"
@@ -139,10 +139,10 @@ jobs:
             fi
           fi
           if [ -n "$FOUND" ]; then
-            cp -L "$FOUND" app/src/main/jniLibs/arm64-v8a/libld_glibc.so
-            chmod 755 app/src/main/jniLibs/arm64-v8a/libld_glibc.so
-            echo "  ✓ libld_glibc.so: $(stat -c%s app/src/main/jniLibs/arm64-v8a/libld_glibc.so) bytes"
-            file app/src/main/jniLibs/arm64-v8a/libld_glibc.so
+            cp -L "$FOUND" app/src/main/jniLibs/arm64-v9-zstda/libld_glibc.so
+            chmod 755 app/src/main/jniLibs/arm64-v9-zstda/libld_glibc.so
+            echo "  ✓ libld_glibc.so: $(stat -c%s app/src/main/jniLibs/arm64-v9-zstda/libld_glibc.so) bytes"
+            file app/src/main/jniLibs/arm64-v9-zstda/libld_glibc.so
             # CRITICAL: Verify glibc version is < 2.34 to avoid seccomp SIGSYS on Android
             GLIBC_VER=$(strings "$FOUND" | grep -oP 'GLIBC_\K[0-9]+\.[0-9]+' | sort -V | tail -1)
             echo "  glibc version: $GLIBC_VER"
@@ -168,7 +168,7 @@ jobs:
       - name: Verify proot binary
         run: |
           echo "=== Verifying proot binary ==="
-          PROOT_FILE="app/src/main/jniLibs/arm64-v8a/libproot.so"
+          PROOT_FILE="app/src/main/jniLibs/arm64-v9-zstda/libproot.so"
           if [ ! -f "$PROOT_FILE" ]; then
             echo "ERROR: libproot.so not found" >&2
             exit 1
@@ -191,7 +191,7 @@ jobs:
         continue-on-error: true
         run: |
           echo "=== Fetching libadrenotools.so (optional) ==="
-          ADR_FILE="app/src/main/jniLibs/arm64-v8a/libadrenotools.so"
+          ADR_FILE="app/src/main/jniLibs/arm64-v9-zstda/libadrenotools.so"
           ADR_SIZE=$(stat -c%s "$ADR_FILE" 2>/dev/null || echo 0)
           if [ "$ADR_SIZE" -gt 10000 ]; then
             echo "  ✓ Already present ($ADR_SIZE bytes)"
@@ -201,7 +201,7 @@ jobs:
               echo "  ⚠ Adrenotools fetch failed — continuing with placeholder."
               echo "  The app will use rootfs Turnip instead. OK."
               # Ensure placeholder exists so APK builds
-              mkdir -p app/src/main/jniLibs/arm64-v8a
+              mkdir -p app/src/main/jniLibs/arm64-v9-zstda
               touch "$ADR_FILE"
             }
           fi
@@ -279,22 +279,22 @@ jobs:
       - name: Verify all bundled assets present
         run: |
           echo "=== Pre-build verification ==="
-          echo "imagefs.tar.xz:"
-          ls -la app/src/main/assets/imagefs/imagefs.tar.xz
-          IMG_SIZE=$(stat -c%s app/src/main/assets/imagefs/imagefs.tar.xz)
+          echo "imagefs.tar.zst:"
+          ls -la app/src/main/assets/imagefs/imagefs.tar.zst
+          IMG_SIZE=$(stat -c%s app/src/main/assets/imagefs/imagefs.tar.zst)
           if [ "$IMG_SIZE" -lt 33554432 ]; then
             echo "ERROR: imagefs too small" >&2; exit 1
           fi
           echo
           echo "libproot.so:"
-          ls -la app/src/main/jniLibs/arm64-v8a/libproot.so
-          PROOT_SIZE=$(stat -c%s app/src/main/jniLibs/arm64-v8a/libproot.so)
+          ls -la app/src/main/jniLibs/arm64-v9-zstda/libproot.so
+          PROOT_SIZE=$(stat -c%s app/src/main/jniLibs/arm64-v9-zstda/libproot.so)
           if [ "$PROOT_SIZE" -lt 100000 ]; then
             echo "ERROR: proot too small (placeholder?)" >&2; exit 1
           fi
           echo
           echo "libadrenotools.so:"
-          ls -la app/src/main/jniLibs/arm64-v8a/libadrenotools.so
+          ls -la app/src/main/jniLibs/arm64-v9-zstda/libadrenotools.so
           echo
           echo "Java sources:"
           find app/src/main/java/io/waylandie -name "*.java" | wc -l
