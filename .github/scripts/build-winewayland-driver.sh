@@ -164,9 +164,12 @@ export CXXFLAGS="-O2"
   --enable-win64 \
   --disable-tests \
   2>&1 | tail -10
-make -j$(nproc) -C tools 2>&1 | tail -20
+# Build makedep first (top-level make needs it), then the tool subdirs
+make -j$(nproc) -C tools makedep 2>&1 | tail -10
+# Now build all the tool binaries from the top level
+make -j$(nproc) winebuild wmc wrc widl 2>&1 | tail -30
 echo "=== built tools ==="
-ls -la tools/winebuild/winebuild tools/wrc/wrc tools/wmc/wmc 2>&1 || \
+ls -la tools/winebuild/winebuild tools/wrc/wrc tools/wmc/wmc tools/widl/widl 2>&1 || \
   { echo "FATAL: tools not built"; find tools -maxdepth 2 -type f -executable | head -20; exit 1; }
 
 echo "=== [7/9] Stage B: Cross-compile configure ==="
