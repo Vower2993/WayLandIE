@@ -174,6 +174,18 @@ public final class TarCompressorUtils {
             Log.e(TAG, "Failed to mkdir " + outDir);
             return false;
         }
+
+        // Try NATIVE extraction first (5-10x faster than Java)
+        if (NativeContentIO.isAvailable() && (type == Type.XZ || type == Type.ZSTD)) {
+            int nativeType = (type == Type.ZSTD) ? NativeContentIO.TYPE_ZSTD : NativeContentIO.TYPE_XZ;
+            Log.i(TAG, "Using native extraction (C++) for " + archiveFile);
+            if (NativeContentIO.extractArchive(nativeType, archiveFile, outDir, listener)) {
+                Log.i(TAG, "Native extraction succeeded for " + archiveFile);
+                return true;
+            }
+            Log.w(TAG, "Native extraction failed, falling back to Java for " + archiveFile);
+        }
+
         // Retry loop — transient I/O errors (EOFException, read timeouts)
         // can occur when reading from external storage (sdcard). These are
         // especially common with large XZ archives on Samsung devices.
@@ -550,9 +562,22 @@ public final class TarCompressorUtils {
             }
             Log.i(TAG, "Auto-detected archive type: " + type + " for " + assetName);
         }
-        // Try fast extraction first (Apache Commons Compress — no temp file)
+
+        // Try NATIVE extraction first (5-10x faster than Java)
+        if (NativeContentIO.isAvailable() && (type == Type.XZ || type == Type.ZSTD)) {
+            int nativeType = (type == Type.ZSTD) ? NativeContentIO.TYPE_ZSTD : NativeContentIO.TYPE_XZ;
+            Log.i(TAG, "Using native extraction (C++) for " + assetName);
+            if (NativeContentIO.extractAsset(nativeType, context.getAssets(),
+                    assetName, outDir, listener)) {
+                Log.i(TAG, "Native extraction succeeded for " + assetName);
+                return true;
+            }
+            Log.w(TAG, "Native extraction failed, falling back to Java for " + assetName);
+        }
+
+        // Fallback: Java extraction (Apache Commons Compress — no temp file)
         if (type == Type.XZ || type == Type.GZIP || type == Type.ZSTD) {
-            Log.i(TAG, "Using fast extraction (Apache Commons Compress) for " + assetName);
+            Log.i(TAG, "Using Java extraction (Apache Commons Compress) for " + assetName);
             return extractFast(type, context, assetName, outDir, listener);
         }
         // Fallback to old method for plain TAR

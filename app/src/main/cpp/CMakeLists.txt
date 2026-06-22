@@ -262,3 +262,50 @@ if(CMAKE_BUILD_TYPE STREQUAL "Release")
 endif()
 
 message(STATUS "wine_launcher: target enabled (libwine_launcher.so)")
+
+# ----------------------------------------------------------------------
+# Native Content IO — fast native C++ extraction for XZ and ZSTD archives.
+# Provides 5-10x speedup over Java extraction for large rootfs/driver tarballs.
+# Based on WinNative's native_content_io.cpp (MIT licensed).
+# ----------------------------------------------------------------------
+include(FetchContent)
+
+# ZSTD — needed for .tar.zst decompression
+FetchContent_Declare(
+    zstd
+    GIT_REPOSITORY https://github.com/facebook/zstd.git
+    GIT_TAG v1.5.6
+    GIT_SHALLOW TRUE
+)
+FetchContent_MakeAvailable(zstd)
+
+add_library(waylandie_native_io SHARED
+    winlator/native_content_io.cpp
+    xz/xz_embedded/xz_crc32.c
+    xz/xz_embedded/xz_crc64.c
+    xz/xz_embedded/xz_dec_bcj.c
+    xz/xz_embedded/xz_dec_lzma2.c
+    xz/xz_embedded/xz_dec_stream.c
+)
+
+target_include_directories(waylandie_native_io PRIVATE
+    xz/xz_embedded
+    ${zstd_SOURCE_DIR}/lib
+    ${zstd_SOURCE_DIR}/lib/common
+)
+
+target_link_libraries(waylandie_native_io
+    android
+    log
+    libzstd_static
+)
+
+# Strip in release
+if(CMAKE_BUILD_TYPE STREQUAL "Release")
+    add_custom_command(TARGET waylandie_native_io POST_BUILD
+        COMMAND ${CMAKE_STRIP} --strip-unneeded
+                $<TARGET_FILE:waylandie_native_io>
+        COMMENT "Stripping libwaylandie_native_io.so")
+endif()
+
+message(STATUS "waylandie_native_io: target enabled (libwaylandie_native_io.so)")
