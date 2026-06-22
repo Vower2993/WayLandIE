@@ -1534,15 +1534,15 @@ static void bind_output(struct wl_client *client, void *data, uint32_t version, 
         }
     }
     uint32_t bind_version = version > 4 ? 4 : version;
+    fprintf(stderr, "[Bridge] bind_output: client=%p version=%u id=%u, output %dx%d @ %d mHz\n",
+            (void*)client, version, id, width, height, refresh_millihz);
     struct wl_resource *resource = wl_resource_create(client, &wl_output_interface, bind_version, id);
-    __android_log_print(ANDROID_LOG_INFO, "WayLandIE/Bridge", "bind_output: client=%p version=%u id=%u, output %dx%d", client, version, id, width, height);
     if (resource == NULL) {
         wl_client_post_no_memory(client);
         return;
     }
     wl_resource_set_implementation(resource, &output_impl, NULL, NULL);
     wl_output_send_geometry(
-    __android_log_print(ANDROID_LOG_INFO, "WayLandIE/Bridge", "Sent wl_output_send_geometry %dx%d", width, height);
             resource,
             0,
             0,
@@ -1552,23 +1552,24 @@ static void bind_output(struct wl_client *client, void *data, uint32_t version, 
             "WayLandIE",
             "Android SurfaceControl",
             WL_OUTPUT_TRANSFORM_NORMAL);
+    fprintf(stderr, "[Bridge] Sent wl_output_send_geometry %dx%d\n", width, height);
     wl_output_send_mode(
-    __android_log_print(ANDROID_LOG_INFO, "WayLandIE/Bridge", "Sent wl_output_send_mode %dx%d @ %d", width, height, refresh_millihz);
             resource,
             WL_OUTPUT_MODE_CURRENT | WL_OUTPUT_MODE_PREFERRED,
             width,
             height,
             refresh_millihz);
+    fprintf(stderr, "[Bridge] Sent wl_output_send_mode %dx%d @ %d mHz\n", width, height, refresh_millihz);
     /* wl_output_send_done() was introduced in version 2.
      * Wine's driver binds version 2, so we must send done for >= 2.
      * Without the done event, the driver never finalizes the output
-     * → current_mode stays NULL → lock_display_devices fails. */
+     * -> current_mode stays NULL -> lock_display_devices fails. */
     if (bind_version >= 2) {
         if (bind_version >= 3) {
             wl_output_send_scale(resource, 1);
         }
         wl_output_send_done(resource);
-    __android_log_print(ANDROID_LOG_INFO, "WayLandIE/Bridge", "Sent wl_output_send_done (version=%d)", bind_version);
+        fprintf(stderr, "[Bridge] Sent wl_output_send_done (version=%d)\n", bind_version);
     }
 }
 
