@@ -279,6 +279,28 @@ public final class GameLaunchTracer {
         log("");
 
         // ---------------------------------------------------------------
+        // 4c. Dump any bridge output captured so far.
+        // The bridgeOutput buffer is filled asynchronously by WineRunner's
+        // wl-bridge-output thread. We dump what's accumulated by the time
+        // we reach this point. More may accumulate during the process
+        // monitor below — we'll dump the final buffer at the end.
+        // ---------------------------------------------------------------
+        String bridgeOutInitial = io.waylandie.display.runtime.environment.WineRunner.bridgeOutput.toString();
+        if (bridgeOutInitial != null && !bridgeOutInitial.isEmpty()) {
+            logSection("BRIDGE OUTPUT (initial — captured before Wine stdout)");
+            for (String line : bridgeOutInitial.split("\n")) {
+                if (!line.isEmpty()) {
+                    log("  [bridge] " + line);
+                }
+            }
+            log("");
+        } else {
+            logSection("BRIDGE OUTPUT (initial)");
+            log("  (empty — bridge may not have produced output yet, or wl-bridge-output thread failed)");
+            log("");
+        }
+
+        // ---------------------------------------------------------------
         // 5. Capture Wine stdout/stderr line-by-line with timestamps
         // ---------------------------------------------------------------
         logSection("WINE STDOUT/STDERR");
@@ -386,6 +408,35 @@ public final class GameLaunchTracer {
         logSection("ANDROID BRIDGE SOCKET STATE (post-launch)");
         checkAbstractSocket("waylandie.display.bridge.v1");
         checkTcpPort(57391, "Android display bridge");
+        log("");
+
+        // ---------------------------------------------------------------
+        // 8b. Dump FULL bridge output (everything accumulated by now)
+        // ---------------------------------------------------------------
+        // The bridgeOutput buffer has been filling asynchronously throughout
+        // the monitoring period. Dump the full content here so we see ALL
+        // bridge events (wayland-shm-ahb present events, errors, etc.),
+        // not just the initial burst.
+        String bridgeOutFinal = io.waylandie.display.runtime.environment.WineRunner.bridgeOutput.toString();
+        logSection("BRIDGE OUTPUT (full — captured during entire run)");
+        if (bridgeOutFinal != null && !bridgeOutFinal.isEmpty()) {
+            int lineCount = 0;
+            for (String line : bridgeOutFinal.split("\n")) {
+                if (!line.isEmpty()) {
+                    log("  [bridge] " + line);
+                    lineCount++;
+                }
+            }
+            log("  (" + lineCount + " lines total)");
+        } else {
+            log("  (empty — bridge produced no stdout/stderr output)");
+            log("  This is suspicious. The bridge should at least log its");
+            log("  startup message. Possible causes:");
+            log("    - Bridge crashed before producing any output");
+            log("    - wl-bridge-output thread failed to start");
+            log("    - Bridge process never started (check [bridge] lines in");
+            log("      WAYLAND DRIVER INSTALLER section above)");
+        }
         log("");
 
         // ---------------------------------------------------------------

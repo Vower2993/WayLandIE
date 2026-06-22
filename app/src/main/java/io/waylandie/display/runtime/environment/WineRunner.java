@@ -46,6 +46,18 @@ public final class WineRunner {
     // reads both buffers and concatenates them.
     public static final StringBuilder installerDiagnostics = new StringBuilder();
 
+    // Buffer for bridge stdout/stderr — captured in real time by the bridge
+    // output thread (wl-bridge-output) and dumped to the trace file by
+    // GameLaunchTracer after Wine exits. This is CRITICAL for debugging:
+    // without it, we can't see wayland-shm-ahb present events, surface_commit
+    // decisions, or any bridge-side errors. Capped at 256KB to avoid OOM
+    // if the bridge floods stdout.
+    public static final StringBuilder bridgeOutput = new StringBuilder();
+    private static final int BRIDGE_OUTPUT_CAP = 256 * 1024;
+    // Set to true once we've appended the truncation marker, so we don't
+    // append it more than once.
+    private static boolean bridgeOutputTruncated = false;
+
     private final Context context;
     private final ImageFsManager imageFs;
 
@@ -108,6 +120,13 @@ public final class WineRunner {
         if (!isReady()) {
             throw new IOException("WineRunner not ready: imagefs invalid. "
                     + imageFs.describeValidity());
+        }
+
+        // Clear the bridge output buffer so each run's trace file shows only
+        // the current run's bridge events (not leftover from a previous run).
+        synchronized (bridgeOutput) {
+            bridgeOutput.setLength(0);
+            bridgeOutputTruncated = false;
         }
 
         File rootDir = imageFs.getRootDir();
@@ -358,6 +377,11 @@ public final class WineRunner {
                 Process bridgeProcess = pbBridge.start();
                 Log.i(TAG, "Bridge translator started (pid=" + getPid(bridgeProcess)
                         + ", variant=" + (useBionicBridge ? "bionic" : "glibc") + ")");
+                installerDiagnostics.append("[bridge] Bridge translator started (pid=")
+                    .append(getPid(bridgeProcess))
+                    .append(", variant=")
+                    .append(useBionicBridge ? "bionic" : "glibc")
+                    .append(")\n");
 
                 // Capture bridge output — if the bridge crashes we need to see why
                 new Thread(() -> {
@@ -367,9 +391,28 @@ public final class WineRunner {
                         while ((line = reader.readLine()) != null) {
                             Log.i("WayLandIE/Bridge", line);
                             io.waylandie.display.shared.util.LogRingBuffer.append("[bridge] " + line);
+                            // Also append to the static bridgeOutput buffer so
+                            // GameLaunchTracer can dump it to the trace file.
+                            // This is CRITICAL for debugging — without it the
+                            // trace file shows no bridge events at all.
+                            synchronized (bridgeOutput) {
+                                if (bridgeOutput.length() + line.length() + 1 < BRIDGE_OUTPUT_CAP) {
+                                    bridgeOutput.append(line).append('\n');
+                                } else if (!bridgeOutputTruncated) {
+                                    bridgeOutput.append("\n[truncated at ")
+                                        .append(BRIDGE_OUTPUT_CAP)
+                                        .append(" bytes — bridge produced more output than we can capture]\n");
+                                    bridgeOutputTruncated = true;
+                                }
+                            }
                         }
                     } catch (java.io.IOException e) {
                         Log.w(TAG, "Bridge output stream closed: " + e.getMessage());
+                        synchronized (bridgeOutput) {
+                            bridgeOutput.append("[bridge] <output stream closed: ")
+                                .append(e.getMessage())
+                                .append(">\n");
+                        }
                     }
                 }, "wl-bridge-output").start();
                 // Give the bridge 2s to create the Wayland socket
@@ -526,6 +569,9 @@ public final class WineRunner {
                 Process bridgeProcess = pbBridge.start();
                 Log.i(TAG, "Bridge translator started (pid=" + getPid(bridgeProcess)
                         + ", variant=bionic)");
+                installerDiagnostics.append("[bridge] Bridge translator started (pid=")
+                    .append(getPid(bridgeProcess))
+                    .append(", variant=bionic)\n");
 
                 new Thread(() -> {
                     try (java.io.BufferedReader reader = new java.io.BufferedReader(
@@ -534,17 +580,37 @@ public final class WineRunner {
                         while ((line = reader.readLine()) != null) {
                             Log.i("WayLandIE/Bridge", line);
                             io.waylandie.display.shared.util.LogRingBuffer.append("[bridge] " + line);
+                            // Mirror to bridgeOutput for trace file dumping.
+                            synchronized (bridgeOutput) {
+                                if (bridgeOutput.length() + line.length() + 1 < BRIDGE_OUTPUT_CAP) {
+                                    bridgeOutput.append(line).append('\n');
+                                } else if (!bridgeOutputTruncated) {
+                                    bridgeOutput.append("\n[truncated at ")
+                                        .append(BRIDGE_OUTPUT_CAP)
+                                        .append(" bytes — bridge produced more output than we can capture]\n");
+                                    bridgeOutputTruncated = true;
+                                }
+                            }
                         }
                     } catch (java.io.IOException e) {
                         Log.w(TAG, "Bridge output stream closed: " + e.getMessage());
+                        synchronized (bridgeOutput) {
+                            bridgeOutput.append("[bridge] <output stream closed: ")
+                                .append(e.getMessage())
+                                .append(">\n");
+                        }
                     }
                 }, "wl-bridge-output").start();
                 try { Thread.sleep(2000); } catch (InterruptedException ignored) {}
             } catch (IOException e) {
                 Log.w(TAG, "Bridge failed to start: " + e.getMessage());
+                installerDiagnostics.append("[bridge] FAILED to start: ")
+                    .append(e.getMessage()).append('\n');
             }
         } else {
             Log.w(TAG, "Bionic bridge not found at " + bionicBridge);
+            installerDiagnostics.append("[bridge] NOT FOUND at ")
+                .append(bionicBridge).append('\n');
         }
 
         // Read the socket name the bridge created

@@ -64,12 +64,27 @@ int main(int argc, char *argv[]) {
     const char *wineBinary = argv[1];
     const char *exePath    = argv[2];
 
-    LOGI("Wine launcher starting");
-    LOGI("  wine binary: %s", wineBinary);
-    LOGI("  exe path:    %s", exePath);
-    LOGI("  extra args:  %d", argc - 3);
+    /* IMPORTANT: We log EVERYTHING to BOTH __android_log_print (logcat) AND
+     * stderr. The logcat output is for live debugging via adb logcat. The
+     * stderr output is captured by Java's ProcessBuilder (which redirects
+     * stderr→stdout via redirectErrorStream(true)), and ends up in the
+     * GameLaunchTracer's trace file via the wl-wine-output thread. Without
+     * the stderr copy, the trace file has no record of what the launcher
+     * actually did, which makes debugging impossible.
+     *
+     * The "[launcher]" prefix lets the trace file distinguish launcher
+     * output from Wine's own stdout/stderr. */
+    #define LAUNCH_LOG(fmt, ...) do { \
+        LOGI(fmt, ##__VA_ARGS__); \
+        fprintf(stderr, "[launcher] " fmt "\n", ##__VA_ARGS__); \
+    } while (0)
+
+    LAUNCH_LOG("Wine launcher starting");
+    LAUNCH_LOG("  wine binary: %s", wineBinary);
+    LAUNCH_LOG("  exe path:    %s", exePath);
+    LAUNCH_LOG("  extra args:  %d", argc - 3);
     for (int i = 3; i < argc; i++) {
-        LOGI("    argv[%d] = %s", i, argv[i]);
+        LAUNCH_LOG("    argv[%d] = %s", i, argv[i]);
     }
 
     /* Log key env vars for debugging (Java sets these before calling us) */
@@ -77,10 +92,16 @@ int main(int argc, char *argv[]) {
     const char *home      = getenv("HOME");
     const char *winepref  = getenv("WINEPREFIX");
     const char *path      = getenv("PATH");
-    LOGI("  LD_LIBRARY_PATH=%s", ldLibPath ? ldLibPath : "(unset)");
-    LOGI("  HOME=%s",            home      ? home      : "(unset)");
-    LOGI("  WINEPREFIX=%s",      winepref  ? winepref  : "(unset)");
-    LOGI("  PATH=%s",            path      ? path      : "(unset)");
+    const char *display   = getenv("DISPLAY");
+    const char *wlDisplay = getenv("WAYLAND_DISPLAY");
+    const char *winedll   = getenv("WINEDLLOVERRIDES");
+    LAUNCH_LOG("  LD_LIBRARY_PATH=%s", ldLibPath ? ldLibPath : "(unset)");
+    LAUNCH_LOG("  HOME=%s",            home      ? home      : "(unset)");
+    LAUNCH_LOG("  WINEPREFIX=%s",      winepref  ? winepref  : "(unset)");
+    LAUNCH_LOG("  PATH=%s",            path      ? path      : "(unset)");
+    LAUNCH_LOG("  DISPLAY=%s",         display   ? display   : "(unset)");
+    LAUNCH_LOG("  WAYLAND_DISPLAY=%s", wlDisplay ? wlDisplay : "(unset)");
+    LAUNCH_LOG("  WINEDLLOVERRIDES=%s", winedll  ? winedll   : "(unset)");
 
     /* Build new argv for execve.
      * Wine expects: argv[0] = wine binary name, argv[1] = exe path, ...
@@ -100,15 +121,16 @@ int main(int argc, char *argv[]) {
     /* last element is NULL (calloc zeroed it) — execve expects NULL-terminated argv */
 
     LOGI("Calling execve(%s, ...)", wineBinary);
+    fprintf(stderr, "[launcher] Calling execve(%s, ...)\n", wineBinary);
 
     /* execve replaces this process with wine. If it returns, it failed. */
     execve(wineBinary, newArgv, environ);
 
     /* If we get here, execve failed. Log the error and exit. */
     LOGE("execve FAILED: %s (errno=%d)", strerror(errno), errno);
-    fprintf(stderr, "wine_launcher: execve(%s) failed: %s\n",
-            wineBinary, strerror(errno));
-    perror("execve");
+    fprintf(stderr, "[launcher] execve FAILED: %s (errno=%d)\n",
+            strerror(errno), errno);
+    fprintf(stderr, "[launcher] (errno %d = %s)\n", errno, strerror(errno));
 
     free(newArgv);
     return 127;  /* 127 = "command not found" — matches shell convention */
