@@ -286,6 +286,7 @@ add_library(waylandie_native_io SHARED
     xz/xz_embedded/xz_dec_bcj.c
     xz/xz_embedded/xz_dec_lzma2.c
     xz/xz_embedded/xz_dec_stream.c
+    xz/xz_embedded/xzminidec.c
 )
 
 target_include_directories(waylandie_native_io PRIVATE
