@@ -1556,8 +1556,14 @@ static void bind_output(struct wl_client *client, void *data, uint32_t version, 
             width,
             height,
             refresh_millihz);
-    if (bind_version >= 4) {
-        wl_output_send_scale(resource, 1);
+    /* wl_output_send_done() was introduced in version 2.
+     * Wine's driver binds version 2, so we must send done for >= 2.
+     * Without the done event, the driver never finalizes the output
+     * → current_mode stays NULL → lock_display_devices fails. */
+    if (bind_version >= 2) {
+        if (bind_version >= 3) {
+            wl_output_send_scale(resource, 1);
+        }
         wl_output_send_done(resource);
     }
 }
