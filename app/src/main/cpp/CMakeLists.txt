@@ -315,3 +315,53 @@ if(CMAKE_BUILD_TYPE STREQUAL "Release")
 endif()
 
 message(STATUS "waylandie_native_io: target enabled (libwaylandie_native_io.so)")
+
+# ----------------------------------------------------------------------
+# waylandie_xserver — minimal in-process X server.
+#
+# WHY: Wine's winex11.drv is far more mature than winewayland.drv
+# (which we've been fighting for weeks). By running Wine with
+# winex11.drv against THIS custom X server, we get the proven X11
+# rendering path for explorer.exe + the desktop. The root window's
+# framebuffer is an AHardwareBuffer (which on Android IS a dmabuf),
+# and after every damage event we pass the dmabuf fd to the existing
+# Wayland bridge via the same Unix socket it already uses.
+#
+# This means: SAME display path as before (bridge → Vulkan → Surface),
+# but a much more stable producer (X11 + winex11.drv instead of
+# winewayland.drv).
+#
+# The X server runs as a separate thread inside the app process
+# (started by XServerController.java via JNI). It listens on
+# /tmp/.X11-unix/X0. Wine connects to it with DISPLAY=:0 set in env.
+#
+# Source layout:
+#   xserver/x11_protocol.h     - X11 wire protocol constants & types
+#   xserver/xserver_state.h    - server state (windows, pixmaps, GCs)
+#   xserver/xserver_main.cpp   - main implementation + request handlers
+#   xserver/xserver_jni.cpp    - JNI bindings
+# ----------------------------------------------------------------------
+add_library(waylandie_xserver SHARED
+    xserver/xserver_main.cpp
+    xserver/xserver_jni.cpp
+)
+
+target_include_directories(waylandie_xserver PRIVATE
+    xserver
+)
+
+target_link_libraries(waylandie_xserver
+    android
+    log
+    dl
+)
+
+# Strip in release for size
+if(CMAKE_BUILD_TYPE STREQUAL "Release")
+    add_custom_command(TARGET waylandie_xserver POST_BUILD
+        COMMAND ${CMAKE_STRIP} --strip-unneeded
+                $<TARGET_FILE:waylandie_xserver>
+        COMMENT "Stripping libwaylandie_xserver.so")
+endif()
+
+message(STATUS "waylandie_xserver: target enabled (libwaylandie_xserver.so)")

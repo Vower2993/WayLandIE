@@ -126,22 +126,36 @@ public final class WineRunner {
                 .append(": ").append(e.getMessage()).append('\n');
         }
 
-        // Set GraphicsDriver=winewayland.drv in system.reg BEFORE launching Wine.
-        // This must happen before pb.start() so the wineserver reads the value
-        // when it loads system.reg at startup. Wine 10/11 reads GraphicsDriver
-        // from HKLM\System\CurrentControlSet\Control\Video\{GUID}\0000.
+        // Set GraphicsDriver=winex11.drv in system.reg BEFORE launching Wine.
+        //
+        // ARCHITECTURE PIVOT (2026-06-22): We switched from winewayland.drv
+        // to winex11.drv + a custom in-process X server. Wine's X11 driver
+        // is far more mature (15+ years of development), is what explorer.exe
+        // was designed for, and is what every other Wine-on-Android project
+        // (Winlator, Mobox, etc.) uses. The custom X server's root window
+        // framebuffer is an AHardwareBuffer (which IS a dmabuf on Android),
+        // and after every damage event we pass the dmabuf fd to the existing
+        // Wayland bridge — so we get the SAME zero-copy display path as
+        // before, but with a much more stable X11 producer.
+        //
+        // Wine 10/11 reads GraphicsDriver from
+        // HKLM\System\CurrentControlSet\Control\Video\{GUID}\0000.
         // The value must include .drv extension (LdrLoadDll appends .dll otherwise).
         try {
             File winePrefixDir = new File(rootDir, "home/xuser/.wine");
             String videoKey = "[System\\\\CurrentControlSet\\\\Control\\\\Video\\\\{00000000-0000-0000-0000-000000000000}\\\\0000]";
-            String graphicsValue = "\"GraphicsDriver\"=\"winewayland.drv\"";
+            String graphicsValue = "\"GraphicsDriver\"=\"winex11.drv\"";
             File regFile = new File(winePrefixDir, "system.reg");
             if (!regFile.exists()) regFile.createNewFile();
             String regContent = new String(java.nio.file.Files.readAllBytes(regFile.toPath()));
 
-            // Remove old/stale entries to prevent duplicates
+            // Remove old/stale entries to prevent duplicates (catch both
+            // winewayland.drv from the previous architecture and any
+            // pre-existing winex11.drv entries)
             regContent = regContent.replaceAll(
                 "\"GraphicsDriver\"=\"winewayland[^\"]*\"\n?", "");
+            regContent = regContent.replaceAll(
+                "\"GraphicsDriver\"=\"winex11[^\"]*\"\n?", "");
             regContent = regContent.replaceAll(
                 "\"Graphics\"=\"winewayland[^\"]*\"\n?", "");
             regContent = regContent.replaceAll(
@@ -155,11 +169,11 @@ public final class WineRunner {
                     regContent = regContent + "\n" + videoKey + "\n" + graphicsValue + "\n";
                 }
                 java.nio.file.Files.write(regFile.toPath(), regContent.getBytes());
-                Log.i(TAG, "Set system.reg: GraphicsDriver=winewayland.drv");
-                installerDiagnostics.append("[wayland-installer] Registry system.reg: GraphicsDriver=winewayland.drv SET\n");
+                Log.i(TAG, "Set system.reg: GraphicsDriver=winex11.drv");
+                installerDiagnostics.append("[xserver-installer] Registry system.reg: GraphicsDriver=winex11.drv SET\n");
             } else {
-                Log.i(TAG, "system.reg already has GraphicsDriver=winewayland.drv");
-                installerDiagnostics.append("[wayland-installer] Registry system.reg: GraphicsDriver already set\n");
+                Log.i(TAG, "system.reg already has GraphicsDriver=winex11.drv");
+                installerDiagnostics.append("[xserver-installer] Registry system.reg: GraphicsDriver already set\n");
             }
 
             // Clean up old Graphics= entries from user.reg
@@ -176,8 +190,51 @@ public final class WineRunner {
                 }
             }
         } catch (Exception e) {
-            Log.w(TAG, "Failed to set GraphicsDriver=winewayland.drv: " + e.getMessage());
-            installerDiagnostics.append("[wayland-installer] Registry FAILED: " + e.getMessage() + "\n");
+            Log.w(TAG, "Failed to set GraphicsDriver=winex11.drv: " + e.getMessage());
+            installerDiagnostics.append("[xserver-installer] Registry FAILED: " + e.getMessage() + "\n");
+        }
+
+        // Start the in-process X server BEFORE launching Wine.
+        //
+        // The X server (libwaylandie_xserver.so) listens on /tmp/.X11-unix/X0
+        // and provides the root window framebuffer as an AHardwareBuffer.
+        // After every damage event, it sends the dmabuf fd to the Wayland
+        // bridge, which displays it on the Android SurfaceView.
+        //
+        // We start it BEFORE the bridge so that when the bridge connects,
+        // the X server is already listening. If the bridge isn't up yet,
+        // the X server runs anyway (Wine can still connect and render —
+        // it just won't be displayed until the bridge connects).
+        try {
+            String[] displaySize = getDisplaySize();
+            int fbWidth = Integer.parseInt(displaySize[0]);
+            int fbHeight = Integer.parseInt(displaySize[1]);
+            // Clamp to reasonable bounds (the AHardwareBuffer allocator
+            // rejects anything > 65536 in either dim, and on Android the
+            // max texture size for the bridge's Vulkan import is typically
+            // 16384 for RGBA8).
+            if (fbWidth < 16) fbWidth = 1280;
+            if (fbHeight < 16) fbHeight = 720;
+            if (fbWidth > 4096) fbWidth = 4096;
+            if (fbHeight > 4096) fbHeight = 4096;
+
+            int xrc = XServerController.start(fbWidth, fbHeight, ":0",
+                    "waylandie.display.bridge.v1");
+            if (xrc == 0) {
+                Log.i(TAG, "X server started: " + fbWidth + "x" + fbHeight);
+                installerDiagnostics.append("[xserver] Started: ")
+                    .append(fbWidth).append("x").append(fbHeight)
+                    .append(" display=:0\n");
+            } else {
+                Log.e(TAG, "X server failed to start (rc=" + xrc + ")");
+                installerDiagnostics.append("[xserver] FAILED to start rc=")
+                    .append(xrc).append('\n');
+            }
+        } catch (Throwable t) {
+            Log.e(TAG, "X server startup threw: " + t.getMessage(), t);
+            installerDiagnostics.append("[xserver] EXCEPTION: ")
+                .append(t.getClass().getSimpleName()).append(": ")
+                .append(t.getMessage()).append('\n');
         }
 
         if (!protonDir.exists()) {
@@ -700,7 +757,7 @@ public final class WineRunner {
 
         // 3. Key environment variables
         String[] envKeys = {"LD_LIBRARY_PATH", "PATH", "HOME", "WINEPREFIX",
-                "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "VK_ICD_FILENAMES",
+                "DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "VK_ICD_FILENAMES",
                 "VK_LAYER_PATH", "WINEDLLOVERRIDES", "HODLL", "PROTONPATH"};
         for (String key : envKeys) {
             String val = env.get(key);
@@ -1204,6 +1261,11 @@ public final class WineRunner {
         env.put("TMPDIR", tmpDir.getAbsolutePath());
         env.put("XDG_RUNTIME_DIR", runtimeDir.getAbsolutePath());
 
+        // X11 DISPLAY — Wine's winex11.drv connects to this display.
+        // Our custom in-process X server (libwaylandie_xserver.so)
+        // listens on /tmp/.X11-unix/X0.
+        env.put("DISPLAY", ":0");
+
         // NOTE: GLIBC_TUNABLES (glibc.pthread.rseq=0) was removed — it's a
         // no-op on glibc 2.31 (our rootfs is Ubuntu 20.04 Focal). glibc 2.35+
         // calls rseq() during __libc_start_main(), but 2.31 doesn't. The
@@ -1221,11 +1283,14 @@ public final class WineRunner {
         File winePrefix = new File(homeDir, ".wine");
         if (!winePrefix.exists()) winePrefix.mkdirs();
         env.put("WINEPREFIX", winePrefix.getAbsolutePath());
-        env.put("WINEDLLOVERRIDES", "d3d9,d3d10core,d3d11,dxgi=native;winex11.drv=d;winewayland.drv=b,native");
+        env.put("WINEDLLOVERRIDES", "d3d9,d3d10core,d3d11,dxgi=native;winex11.drv=b,native;winewayland.drv=d");
+        // ^ ARCHITECTURE PIVOT: winex11.drv is now ENABLED (was disabled with =d).
+        //   winewayland.drv is now DISABLED (=d) since we don't use it anymore.
+        //   The 'b,native' for winex11.drv means: builtin first, then native.
         // CRITICAL: Enable Wine debug channels for display driver + module loading.
         // This tells us EXACTLY which .drv files Wine tries to load and why they
         // fail. The output goes to Wine's stderr (captured by GameLaunchTracer).
-        env.put("WINEDEBUG", "+module,+display,+driver,+sysparams,+waylanddrv");
+        env.put("WINEDEBUG", "+module,+display,+driver,+sysparams,+x11drv");
         env.put("DXVK_STATE_CACHE_PATH", new File(homeDir, ".dxvk-cache").getAbsolutePath());
         env.put("MESA_VK_WSI_PRESENT_MODE", "immediate");
         // Winlator-inspired env vars — Wine needs these for proper operation

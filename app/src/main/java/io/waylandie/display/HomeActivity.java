@@ -176,6 +176,14 @@ public final class HomeActivity extends Activity {
     protected void onDestroy() {
         super.onDestroy();
         if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
+        // Stop the in-process X server when the activity is destroyed.
+        // This prevents the X server from lingering if Wine crashes or
+        // the user navigates away.
+        try {
+            io.waylandie.display.runtime.environment.XServerController.stop();
+        } catch (Throwable t) {
+            android.util.Log.w("HomeActivity", "XServerController.stop() threw: " + t.getMessage());
+        }
     }
 
     // --- File picker ---
