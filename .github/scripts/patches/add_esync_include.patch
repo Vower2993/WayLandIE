@@ -1,0 +1,12 @@
+diff --git a/dlls/ntdll/unix/server.c b/dlls/ntdll/unix/server.c
+index 5d8a59b..d4fc306 100644
+--- a/dlls/ntdll/unix/server.c
++++ b/dlls/ntdll/unix/server.c
+@@ -82,6 +82,7 @@
+ #include "ddk/wdm.h"
+ 
+ #include "fsync.h"
++#include "esync.h"
+ 
+ WINE_DEFAULT_DEBUG_CHANNEL(server);
+ WINE_DECLARE_DEBUG_CHANNEL(syscall);

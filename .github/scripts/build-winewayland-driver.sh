@@ -392,6 +392,14 @@ for patch in "${PATCHES[@]}"; do
 done
 echo "  Applied $count, failed $failed patches"
 
+# Apply our custom patch: add #include "esync.h" to server.c
+# (GameNative's 11.0 server.c patch calls esync_init() but doesn't
+# include esync.h where it's declared. fsync.h IS included, but esync.h
+# was forgotten.)
+echo "=== Applying custom patch: add esync.h include ==="
+git apply "$WORKSPACE/.github/scripts/patches/add_esync_include.patch" 2>&1 || \
+  echo "  WARNING: add_esync_include.patch failed (may already be applied)"
+
 # Regenerate server_protocol.h after patches modified server/protocol.def.
 # autogen.sh ran BEFORE patches, so the generated header is stale.
 # tools/make_requests reads protocol.def and generates:
