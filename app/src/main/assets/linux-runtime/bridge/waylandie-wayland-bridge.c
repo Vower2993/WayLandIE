@@ -1322,6 +1322,9 @@ static void shm_pool_create_buffer(
     buffer->height = height;
     buffer->stride = stride;
     buffer->format = format;
+    printf("wayland-shm-ahb pool-create-buffer offset=%d %dx%d stride=%d fmt=0x%08x pool_size=%d\n",
+           offset, width, height, stride, format, pool ? pool->size : -1);
+    fflush(stdout);
     buffer->dmabuf_fd = -1;
     wl_resource_set_implementation(buffer_resource, &buffer_impl, buffer, destroy_buffer_resource);
 }
@@ -1421,6 +1424,9 @@ static void shm_create_pool(
         wl_resource_post_error(resource, WL_SHM_ERROR_INVALID_FD, "mmap failed");
         return;
     }
+    printf("wayland-shm-ahb pool-create size=%d fd=%d data=%p\n",
+           size, fd, pool->data);
+    fflush(stdout);
     wl_resource_set_implementation(pool_resource, &shm_pool_impl, pool, destroy_pool_resource);
 }
 
