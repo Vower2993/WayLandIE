@@ -204,6 +204,13 @@ ninja -C build 2>&1 | tail -10
 # Install into bionic-libs
 DESTDIR="$BIONIC_LIBS" ninja -C build install 2>&1 | tail -5
 
+# Meson installs to $BIONIC_LIBS/usr/local/{lib,include} because of --prefix=/usr/local
+# But Wine expects libs in $BIONIC_LIBS/lib and headers in $BIONIC_LIBS/include
+# Copy them to the expected locations
+cp -r "$BIONIC_LIBS/usr/local/include/xkbcommon" "$BIONIC_LIBS/include/xkbcommon" 2>/dev/null || true
+cp "$BIONIC_LIBS/usr/local/lib/libxkbcommon.a" "$BIONIC_LIBS/lib/" 2>/dev/null || true
+cp "$BIONIC_LIBS/usr/local/lib/pkgconfig/xkbcommon.pc" "$BIONIC_LIBS/lib/pkgconfig/" 2>/dev/null || true
+
 # Create a stub libxkbregistry.a so Wine's link test passes.
 # We disabled xkbregistry because it requires libxml2 (not available for bionic).
 # Wine only uses xkbregistry for keyboard layout enumeration — not needed for
