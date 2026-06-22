@@ -20,6 +20,17 @@ sudo apt-get install -y -qq \
 pip3 install --user meson ninja 2>&1 | tail -3
 export PATH="$HOME/.local/bin:$PATH"
 
+echo "=== [1b/9] Download llvm-mingw toolchain (arm64ec PE support) ==="
+LLVM_MINGW_DIR="$HOME/llvm-mingw"
+if [ ! -d "$LLVM_MINGW_DIR" ]; then
+  wget -q "https://github.com/mstorsjo/llvm-mingw/releases/download/20250920/llvm-mingw-20250920-ucrt-ubuntu-22.04-x86_64.tar.xz" -O /tmp/llvm-mingw.tar.xz
+  mkdir -p "$LLVM_MINGW_DIR"
+  tar -xf /tmp/llvm-mingw.tar.xz -C "$LLVM_MINGW_DIR" --strip-components=1
+  echo "llvm-mingw installed at $LLVM_MINGW_DIR"
+  ls "$LLVM_MINGW_DIR/bin/" | head -5
+fi
+export PATH="$LLVM_MINGW_DIR/bin:$PATH"
+
 echo "=== [2/9] Locate NDK ==="
 NDK_DIR="$ANDROID_HOME/ndk/26.1.10909125"
 [ -d "$NDK_DIR" ] || NDK_DIR=$(ls -d $ANDROID_HOME/ndk/* 2>/dev/null | head -1)
@@ -182,7 +193,7 @@ export CC="$TOOLCHAIN/bin/aarch64-linux-android${API}-clang"
 export CXX="$TOOLCHAIN/bin/aarch64-linux-android${API}-clang++"
 export AR="$TOOLCHAIN/bin/llvm-ar"
 export STRIP="$TOOLCHAIN/bin/llvm-strip"
-export CFLAGS="-fPIC --sysroot=$SYSROOT -I$SYSROOT/usr/include -I$BIONIC_LIBS/include -I/tmp/proton-wine/include -I/usr/include -D__ANDROID_API__=$API -D__ANDROID__"
+export CFLAGS="-fPIC --sysroot=$SYSROOT -I$SYSROOT/usr/include -I$BIONIC_LIBS/include -I/tmp/proton-wine/include -D__ANDROID_API__=$API -D__ANDROID__"
 export CXXFLAGS="$CFLAGS"
 export LDFLAGS="--sysroot=$SYSROOT -L$BIONIC_LIBS/lib -landroid-sysvshm -lffi"
 export PKG_CONFIG_PATH="$BIONIC_LIBS/lib/pkgconfig"
@@ -214,10 +225,40 @@ export WAYLAND_SERVER_CFLAGS="-I$BIONIC_LIBS/include -D__ANDROID__ -DHAVE_SHM_UT
 export WAYLAND_SERVER_LIBS="-L$BIONIC_LIBS/lib -lwayland-server -lffi -landroid-sysvshm"
 export WAYLAND_EGL_CFLAGS="-I$BIONIC_LIBS/include"
 export WAYLAND_EGL_LIBS="-L$BIONIC_LIBS/lib -lwayland-egl"
-export XKBCOMMON_CFLAGS="-I/usr/include"
-export XKBCOMMON_LIBS="-lxkbcommon"
-export XKBREGISTRY_CFLAGS="-I/usr/include"
-export XKBREGISTRY_LIBS="-lxkbregistry"
+# Build xkbcommon + xkbregistry for bionic (avoid x86_64 system headers polluting include path)
+echo "=== [4c/9] Build xkbcommon + xkbregistry for bionic ==="
+mkdir -p /tmp/xkb-build && cd /tmp/xkb-build
+git clone --depth=1 https://github.com/xkbcommon/libxkbcommon.git
+mkdir -p libxkbcommon/build && cd libxkbcommon/build
+export PATH="$HOME/.local/bin:$PATH"
+meson setup .. \
+  --prefix=/usr/local \
+  --default-library=static \
+  -Denable-wayland=false \
+  -Denable-docs=false \
+  -Denable-x11=false \
+  2>&1 | tail -10
+ninja 2>&1 | tail -5
+DESTDIR="$BIONIC_LIBS" ninja install
+# Also build xkbregistry (same repo, enables registry feature)
+cd /tmp/xkb-build
+git clone --depth=1 https://github.com/xkbcommon/libxkbregistry.git
+mkdir -p libxkbregistry/build && cd libxkbregistry/build
+meson setup .. \
+  --prefix=/usr/local \
+  --default-library=static \
+  -Denable-docs=false \
+  2>&1 | tail -10
+ninja 2>&1 | tail -5
+DESTDIR="$BIONIC_LIBS" ninja install
+echo "=== bionic-libs after xkbcommon build ==="
+ls "$BIONIC_LIBS/lib/" | grep xkb
+ls "$BIONIC_LIBS/include/xkbcommon/" 2>/dev/null
+
+export XKBCOMMON_CFLAGS="-I$BIONIC_LIBS/include"
+export XKBCOMMON_LIBS="-L$BIONIC_LIBS/lib -lxkbcommon"
+export XKBREGISTRY_CFLAGS="-I$BIONIC_LIBS/include"
+export XKBREGISTRY_LIBS="-L$BIONIC_LIBS/lib -lxkbregistry"
 export WAYLAND_SCANNER="$(which wayland-scanner)"
 
 ./configure \
@@ -230,7 +271,7 @@ export WAYLAND_SCANNER="$(which wayland-scanner)"
   --without-freetype --without-fontconfig --without-v4l2 \
   --enable-win64 \
   --enable-archs=arm64ec,aarch64 \
-  --with-mingw=clang \
+  --with-mingw=$LLVM_MINGW_DIR/bin/clang \
   --with-pthread \
   --disable-tests \
   2>&1 | tail -40
