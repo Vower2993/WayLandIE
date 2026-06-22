@@ -3710,11 +3710,12 @@ static void surface_commit(struct wl_client *client, struct wl_resource *resourc
             if (ensure_android_window_for_surface(surface, presentable->pending_buffer) != 0
                     || present_buffer_to_android(surface, presentable->pending_buffer, frame_index) != 0) {
                 surface->server->present_failures++;
-                surface->server->abort_requested = 1;
+                /* Don't abort on SHM buffer present failure — only dmabuf is supported.
+                 * SHM buffers (from Wine desktop/explorer) are skipped. Game buffers
+                 * (via DXVK/Vulkan) use dmabuf and will present correctly. */
                 send_surface_presentation_feedback(presentable, 0);
                 present_failed = 1;
                 fflush(stdout);
-                wl_display_terminate(surface->server->display);
             }
             send_focus_for_presentable(surface, presentable, presentable->pending_buffer);
             if (presentable->pending_buffer->resource != NULL) {
@@ -3781,11 +3782,10 @@ static void surface_commit(struct wl_client *client, struct wl_resource *resourc
     if (ensure_android_window_for_surface(surface, buffer_to_present) != 0
             || present_buffer_to_android(surface, buffer_to_present, frame_index) != 0) {
         surface->server->present_failures++;
-        surface->server->abort_requested = 1;
+        /* Don't abort on SHM buffer present failure — only dmabuf is supported. */
         send_surface_presentation_feedback(presentable, 0);
         present_failed = 1;
         fflush(stdout);
-        wl_display_terminate(surface->server->display);
     }
     if (presentable != surface && surface->pending_buffer != NULL && surface->pending_buffer->resource != NULL) {
         wl_buffer_send_release(surface->pending_buffer->resource);
