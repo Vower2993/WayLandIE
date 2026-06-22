@@ -164,8 +164,10 @@ export CXXFLAGS="-O2"
   --enable-win64 \
   --disable-tests \
   2>&1 | tail -10
-make -j$(nproc) tools 2>&1 | tail -10
-ls tools/winebuild tools/wrc tools/wmc 2>&1
+make -j$(nproc) -C tools 2>&1 | tail -20
+echo "=== built tools ==="
+ls -la tools/winebuild/winebuild tools/wrc/wrc tools/wmc/wmc 2>&1 || \
+  { echo "FATAL: tools not built"; find tools -maxdepth 2 -type f -executable | head -20; exit 1; }
 
 echo "=== [7/9] Stage B: Cross-compile configure ==="
 cd /tmp/proton-wine
@@ -194,6 +196,9 @@ export ac_cv_header_linux_input_h=yes
 export ac_cv_prog_wayland_scanner=$(which wayland-scanner)
 export ac_cv_func_shm_open=yes
 export ac_cv_search_shm_open="none required"
+# Bionic has pthread built into libc — no separate libpthread
+export ac_cv_func_pthread_create=yes
+export ac_cv_lib_pthread_pthread_create=yes
 
 # Direct env-var settings (configure.ac honors these via WINE_PACKAGE_FLAGS)
 export WAYLAND_CLIENT_CFLAGS="-I$BIONIC_LIBS/include -D__ANDROID__ -DHAVE_SHM_UTILS"
@@ -217,6 +222,9 @@ export WAYLAND_SCANNER="$(which wayland-scanner)"
   --without-sane --without-usb --without-sdl --without-gstreamer \
   --without-freetype --without-fontconfig --without-v4l2 \
   --enable-win64 \
+  --enable-archs=arm64ec,aarch64 \
+  --with-mingw=clang \
+  --with-pthread \
   --disable-tests \
   2>&1 | tail -40
 
