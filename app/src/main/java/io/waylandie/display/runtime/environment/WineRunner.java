@@ -872,43 +872,41 @@ public final class WineRunner {
         // =================================================================
         // CRITICAL: Force Wine to use the Wayland display driver.
         // =================================================================
-        // Fix 1: Set Graphics=winewayland in BOTH system.reg AND user.reg.
-        // Wine checks HKEY_CURRENT_USER first (user.reg), then
-        // HKEY_LOCAL_MACHINE (system.reg). We set both to be safe.
-        // The registry key is:
-        //   [HKEY_CURRENT_USER\\Software\\Wine\\Drivers]
-        //   "Graphics"="winewayland"
+        // Wine 10 reads GraphicsDriver from the Video registry key, NOT
+        // the old Graphics value from HKCU\Software\Wine\Drivers.
+        // The key path is:
+        //   HKEY_LOCAL_MACHINE\System\CurrentControlSet\Control\Video\{GUID}\0000
+        // Where GUID is the display device GUID (null GUID if not set).
+        // In Wine .reg files, HKEY_LOCAL_MACHINE maps to system.reg with
+        // key paths starting with [System\\...].
         try {
             File winePrefixDir = new File(rootDir, "home/xuser/.wine");
-            String driversKey = "[HKEY_CURRENT_USER\\\\Software\\\\Wine\\\\Drivers]";
-            String graphicsValue = "\"Graphics\"=\"winewayland\"";
-            // Write to BOTH system.reg AND user.reg
-            for (String regFileName : new String[]{"system.reg", "user.reg"}) {
-                File regFile = new File(winePrefixDir, regFileName);
-                if (!regFile.exists()) {
-                    // Create the file if it does not exist (user.reg may not exist)
-                    regFile.createNewFile();
-                }
-                String regContent = new String(java.nio.file.Files.readAllBytes(regFile.toPath()));
-                if (!regContent.contains(graphicsValue)) {
-                    if (regContent.contains(driversKey)) {
-                        // Section exists — add Graphics value after the section header
-                        regContent = regContent.replace(driversKey + "]",
-                            driversKey + "]\n" + graphicsValue);
-                    } else {
-                        // Section does not exist — append it
-                        regContent = regContent + "\n" + driversKey + "]\n" + graphicsValue + "\n";
-                    }
-                    java.nio.file.Files.write(regFile.toPath(), regContent.getBytes());
-                    Log.i(TAG, "Set " + regFileName + ": Graphics=winewayland");
-                    preLaunchDiagnostics.append("[diag] Registry " + regFileName + ": Graphics=winewayland SET\n");
+            // The registry key for the null display device GUID
+            String videoKey = "[System\\\\CurrentControlSet\\\\Control\\\\Video\\\\{00000000-0000-0000-0000-000000000000}\\\\0000]";
+            String graphicsValue = "\"GraphicsDriver\"=\"winewayland\"";
+            File regFile = new File(winePrefixDir, "system.reg");
+            if (!regFile.exists()) {
+                regFile.createNewFile();
+            }
+            String regContent = new String(java.nio.file.Files.readAllBytes(regFile.toPath()));
+            if (!regContent.contains(graphicsValue)) {
+                if (regContent.contains(videoKey)) {
+                    // Section exists — add GraphicsDriver value after the section header
+                    regContent = regContent.replace(videoKey + "]",
+                        videoKey + "]\n" + graphicsValue);
                 } else {
-                    Log.i(TAG, regFileName + " already has Graphics=winewayland");
-                    preLaunchDiagnostics.append("[diag] Registry " + regFileName + ": already set\n");
+                    // Section does not exist — append it
+                    regContent = regContent + "\n" + videoKey + "]\n" + graphicsValue + "\n";
                 }
+                java.nio.file.Files.write(regFile.toPath(), regContent.getBytes());
+                Log.i(TAG, "Set system.reg: GraphicsDriver=winewayland");
+                preLaunchDiagnostics.append("[diag] Registry system.reg: GraphicsDriver=winewayland SET\n");
+            } else {
+                Log.i(TAG, "system.reg already has GraphicsDriver=winewayland");
+                preLaunchDiagnostics.append("[diag] Registry system.reg: GraphicsDriver already set\n");
             }
         } catch (Exception e) {
-            Log.w(TAG, "Failed to set Graphics=winewayland: " + e.getMessage());
+            Log.w(TAG, "Failed to set GraphicsDriver=winewayland: " + e.getMessage());
             preLaunchDiagnostics.append("[diag] Registry FAILED: " + e.getMessage() + "\n");
         }
 
