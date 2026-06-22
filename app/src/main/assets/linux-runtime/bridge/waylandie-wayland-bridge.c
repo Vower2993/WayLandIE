@@ -230,16 +230,44 @@ struct server_state {
     int accept_scaled_primary;
 };
 
+// Global monotonic ID counters for diagnostic logging. Each pool and buffer
+// gets a unique ID so we can track their lifecycle in the trace file.
+static uint64_t g_pool_id_counter = 1;
+static uint64_t g_buffer_id_counter = 1;
+
+// Global diagnostic counters — dumped at bridge exit for health summary.
+static struct {
+    uint64_t pools_created;
+    uint64_t pools_destroyed;
+    uint64_t buffers_created;
+    uint64_t buffers_destroyed;
+    uint64_t ahb_allocated;
+    uint64_t ahb_released;
+    uint64_t dmabuf_fds_exported;
+    uint64_t dmabuf_fds_closed;
+    uint64_t surfaces_committed;
+    uint64_t surfaces_presented_ok;
+    uint64_t surfaces_presented_fail;
+    uint64_t shm_to_ahb_calls;
+    uint64_t shm_to_ahb_failures;
+    uint64_t bridge_reconnects;
+    uint64_t use_after_free_detected;
+} g_diag;
+
 struct shm_pool_state {
     void *data;
     int32_t size;
     int fd;  // Original memfd/anonymous fd from wl_shm.create_pool.
              // Kept open so shm_pool_resize can mremap (if needed) and
-             // closed in destroy_pool_resource.
-             // NOTE: Wine's winewayland.drv creates pools at FULL size
-             // (e.g. 19MB for a 3200x1536 framebuffer) — it does NOT use
-             // wl_shm_pool.resize. The fd is kept open for potential future
-             // use and for fstat() diagnostics.
+             // closed when the pool is truly freed (refcount=0).
+    int refcount;  // Number of buffers + 1 (for the pool resource itself)
+                   // referencing this pool. The pool's memory (mmap'd data)
+                   // is only munmap'd and the struct only freed when refcount
+                   // reaches 0. This fixes a use-after-free where Wine destroys
+                   // the pool resource BEFORE the bridge finishes using the
+                   // buffer's pixel data (shm_to_ahb reads pool->data after
+                   // the pool was already munmap'd and freed).
+    uint64_t id;  // Monotonically increasing pool ID for diagnostic logging
 };
 
 struct shm_buffer_state {
@@ -254,6 +282,7 @@ struct shm_buffer_state {
     uint32_t flags;
     uint64_t modifier;
     int dmabuf_fd;
+    uint64_t id;  // Monotonically increasing buffer ID for diagnostic logging
 };
 
 struct dmabuf_params_state {
@@ -981,34 +1010,60 @@ static int shm_to_ahb(struct shm_buffer_state *shm, int frame_index,
 
     if (shm == NULL || shm->kind != BUFFER_KIND_SHM) return -1;
 
+    g_diag.shm_to_ahb_calls++;
+
     // Diagnostic: log the pool state BEFORE any checks, so we can see
     // exactly what shm_to_ahb is working with.
-    printf("wayland-shm-ahb frame=%d shm-to-ahb-entry shm=%p pool=%p pool_data=%p pool_size=%d pool_fd=%d "
+    printf("wayland-shm-ahb frame=%d shm-to-ahb-entry buf_id=%llu shm=%p pool=%p pool_id=%llu pool_data=%p pool_size=%d pool_fd=%d pool_refcount=%d "
            "buf=%dx%d stride=%d offset=%d kind=%d\n",
-           frame_index, (void*)shm, (void*)shm->pool,
+           frame_index, (unsigned long long)shm->id, (void*)shm, (void*)shm->pool,
+           shm->pool ? (unsigned long long)shm->pool->id : 0,
            shm->pool ? shm->pool->data : NULL,
            shm->pool ? shm->pool->size : -1,
            shm->pool ? shm->pool->fd : -1,
+           shm->pool ? shm->pool->refcount : -1,
            shm->width, shm->height, shm->stride, shm->offset, shm->kind);
     fflush(stdout);
 
+    // Use-after-free detection: if pool_refcount <= 0, the pool was already
+    // freed and shm->pool is a dangling pointer. This should NEVER happen
+    // with the refcount fix, but if it does, we log it and abort.
+    if (shm->pool != NULL && shm->pool->refcount <= 0) {
+        g_diag.use_after_free_detected++;
+        printf("wayland-shm-ahb frame=%d status=fail reason=USE-AFTER-FREE pool_id=%llu refcount=%d "
+               "pool was freed before shm_to_ahb! buf_id=%llu\n",
+               frame_index,
+               (unsigned long long)shm->pool->id,
+               shm->pool->refcount,
+               (unsigned long long)shm->id);
+        fflush(stdout);
+        return -1;
+    }
+
     if (shm->pool == NULL || shm->pool->data == NULL
             || shm->pool->data == MAP_FAILED) {
-        printf("wayland-shm-ahb frame=%d status=fail reason=shm-no-pool\n", frame_index);
+        printf("wayland-shm-ahb frame=%d status=fail reason=shm-no-pool buf_id=%llu\n",
+               frame_index, (unsigned long long)shm->id);
+        g_diag.shm_to_ahb_failures++;
         return -1;
     }
     if (shm->width <= 0 || shm->height <= 0 || shm->stride <= 0) {
-        printf("wayland-shm-ahb frame=%d status=fail reason=shm-bad-dims %dx%d stride=%d\n",
-               frame_index, shm->width, shm->height, shm->stride);
+        printf("wayland-shm-ahb frame=%d status=fail reason=shm-bad-dims %dx%d stride=%d buf_id=%llu\n",
+               frame_index, shm->width, shm->height, shm->stride,
+               (unsigned long long)shm->id);
+        g_diag.shm_to_ahb_failures++;
         return -1;
     }
     // Sanity-check the SHM pool is large enough for the offset + size
     int64_t needed = (int64_t)shm->offset + (int64_t)shm->stride * shm->height;
     if (needed > shm->pool->size) {
         printf("wayland-shm-ahb frame=%d status=fail reason=shm-pool-overflow need=%lld have=%d "
-               "pool=%p pool_data=%p\n",
+               "pool_id=%llu pool=%p pool_data=%p buf_id=%llu\n",
                frame_index, (long long)needed, shm->pool->size,
-               (void*)shm->pool, shm->pool->data);
+               (unsigned long long)shm->pool->id,
+               (void*)shm->pool, shm->pool->data,
+               (unsigned long long)shm->id);
+        g_diag.shm_to_ahb_failures++;
         return -1;
     }
 
@@ -1026,11 +1081,15 @@ static int shm_to_ahb(struct shm_buffer_state *shm, int frame_index,
 
     int rc = AHardwareBuffer_allocate(&desc, &out->ahb);
     if (rc != 0 || out->ahb == NULL) {
-        printf("wayland-shm-ahb frame=%d status=fail reason=ahb-alloc rc=%d errno=%d\n",
-               frame_index, rc, errno);
+        printf("wayland-shm-ahb frame=%d status=fail reason=ahb-alloc rc=%d errno=%d %s "
+               "buf_id=%llu %dx%d\n",
+               frame_index, rc, errno, strerror(errno),
+               (unsigned long long)shm->id, shm->width, shm->height);
+        g_diag.shm_to_ahb_failures++;
         out->ahb = NULL;
         return -1;
     }
+    g_diag.ahb_allocated++;
 
     // 2. Lock for CPU write
     void* dst = NULL;
@@ -1118,10 +1177,12 @@ static int shm_to_ahb(struct shm_buffer_state *shm, int frame_index,
 static void shm_ahb_release(struct shm_ahb_handle *h) {
     if (h->dmabuf_fd >= 0) {
         close(h->dmabuf_fd);
+        g_diag.dmabuf_fds_closed++;
         h->dmabuf_fd = -1;
     }
     if (h->ahb != NULL) {
         AHardwareBuffer_release(h->ahb);
+        g_diag.ahb_released++;
         h->ahb = NULL;
     }
 }
@@ -1215,6 +1276,9 @@ static int present_buffer_to_android(struct surface_state *surface, struct shm_b
     }
     if (state->bridge_sock < 0) {
         state->bridge_sock = connect_abstract_socket(state->bridge_socket_name);
+        if (state->bridge_sock >= 0) {
+            g_diag.bridge_reconnects++;
+        }
     }
     if (state->bridge_sock < 0) {
         printf("wayland-shm-ahb frame=%d status=fail reason=bridge-connect errno=%d\n", frame_index, errno);
@@ -1271,17 +1335,68 @@ static int present_buffer_to_android(struct surface_state *surface, struct shm_b
     }
     state->bridge_frames_on_socket++;
     status = 0;
+    g_diag.surfaces_presented_ok++;
 
 cleanup:
+    if (status != 0) {
+        g_diag.surfaces_presented_fail++;
+    }
     return status;
+}
+
+// Pool reference counting. The pool's mmap'd memory stays alive until ALL
+// buffers referencing it are destroyed. This fixes the use-after-free where
+// Wine destroys the pool resource BEFORE the bridge finishes reading the
+// buffer's pixel data in shm_to_ahb.
+static void pool_acquire(struct shm_pool_state *pool) {
+    if (pool != NULL) {
+        __atomic_fetch_add(&pool->refcount, 1, __ATOMIC_SEQ_CST);
+    }
+}
+
+static void pool_release(struct shm_pool_state *pool) {
+    if (pool == NULL) return;
+    int new_count = __atomic_fetch_sub(&pool->refcount, 1, __ATOMIC_SEQ_CST) - 1;
+    printf("wayland-shm-ahb pool-release id=%llu refcount=%d→%d size=%d\n",
+           (unsigned long long)pool->id, new_count + 1, new_count, pool->size);
+    fflush(stdout);
+    if (new_count <= 0) {
+        // Last reference — safe to munmap and free
+        printf("wayland-shm-ahb pool-freed id=%llu size=%d fd=%d data=%p\n",
+               (unsigned long long)pool->id, pool->size, pool->fd, pool->data);
+        fflush(stdout);
+        if (pool->data != NULL && pool->size > 0 && pool->data != MAP_FAILED) {
+            munmap(pool->data, (size_t)pool->size);
+        }
+        if (pool->fd >= 0) {
+            close(pool->fd);
+            g_diag.dmabuf_fds_closed++;
+        }
+        g_diag.pools_destroyed++;
+        free(pool);
+    }
 }
 
 static void destroy_buffer_resource(struct wl_resource *resource) {
     struct shm_buffer_state *buffer = wl_resource_get_user_data(resource);
-    if (buffer != NULL && buffer->kind == BUFFER_KIND_DMABUF && buffer->dmabuf_fd >= 0) {
-        close(buffer->dmabuf_fd);
+    if (buffer != NULL) {
+        g_diag.buffers_destroyed++;
+        printf("wayland-shm-ahb buffer-destroy id=%llu kind=%d %dx%d\n",
+               (unsigned long long)buffer->id, buffer->kind,
+               buffer->width, buffer->height);
+        fflush(stdout);
+        if (buffer->kind == BUFFER_KIND_DMABUF && buffer->dmabuf_fd >= 0) {
+            close(buffer->dmabuf_fd);
+            g_diag.dmabuf_fds_closed++;
+        }
+        // Release the pool reference. If this was the last reference,
+        // pool_release will munmap and free the pool.
+        if (buffer->pool != NULL) {
+            pool_release(buffer->pool);
+            buffer->pool = NULL;
+        }
+        free(buffer);
     }
-    free(buffer);
 }
 
 static void buffer_destroy(struct wl_client *client, struct wl_resource *resource) {
@@ -1296,17 +1411,13 @@ static const struct wl_buffer_interface buffer_impl = {
 static void destroy_pool_resource(struct wl_resource *resource) {
     struct shm_pool_state *pool = wl_resource_get_user_data(resource);
     if (pool != NULL) {
-        printf("wayland-shm-ahb pool-destroy size=%d fd=%d data=%p\n",
-               pool->size, pool->fd, pool->data);
+        printf("wayland-shm-ahb pool-destroy id=%llu size=%d fd=%d data=%p refcount=%d\n",
+               (unsigned long long)pool->id, pool->size, pool->fd, pool->data, pool->refcount);
         fflush(stdout);
-        if (pool->data != NULL && pool->size > 0) {
-            munmap(pool->data, (size_t)pool->size);
-        }
-        if (pool->fd >= 0) {
-            close(pool->fd);
-            pool->fd = -1;
-        }
-        free(pool);
+        // Release the pool resource's own reference. If buffers still
+        // reference this pool, pool_release will keep the memory alive
+        // until the last buffer is destroyed.
+        pool_release(pool);
     }
 }
 
@@ -1340,10 +1451,16 @@ static void shm_pool_create_buffer(
     buffer->height = height;
     buffer->stride = stride;
     buffer->format = format;
-    printf("wayland-shm-ahb pool-create-buffer offset=%d %dx%d stride=%d fmt=0x%08x pool_size=%d\n",
-           offset, width, height, stride, format, pool ? pool->size : -1);
-    fflush(stdout);
+    buffer->id = g_buffer_id_counter++;
     buffer->dmabuf_fd = -1;
+    // Acquire a reference to the pool so it stays alive until this buffer
+    // is destroyed, even if Wine destroys the pool resource first.
+    pool_acquire(pool);
+    g_diag.buffers_created++;
+    printf("wayland-shm-ahb pool-create-buffer id=%llu offset=%d %dx%d stride=%d fmt=0x%08x pool_id=%llu pool_size=%d pool_refcount=%d\n",
+           (unsigned long long)buffer->id, offset, width, height, stride, format,
+           (unsigned long long)pool->id, pool->size, pool->refcount);
+    fflush(stdout);
     wl_resource_set_implementation(buffer_resource, &buffer_impl, buffer, destroy_buffer_resource);
 }
 
@@ -1435,6 +1552,9 @@ static void shm_create_pool(
     pool->data = mmap(NULL, (size_t)size, PROT_READ, MAP_SHARED, fd, 0);
     pool->size = size;
     pool->fd = fd;  // Keep fd open so shm_pool_resize can mremap.
+    pool->refcount = 1;  // 1 for the pool resource itself.
+    pool->id = g_pool_id_counter++;
+    g_diag.pools_created++;
     if (pool->data == MAP_FAILED) {
         close(fd);
         pool->fd = -1;
@@ -1442,8 +1562,8 @@ static void shm_create_pool(
         wl_resource_post_error(resource, WL_SHM_ERROR_INVALID_FD, "mmap failed");
         return;
     }
-    printf("wayland-shm-ahb pool-create size=%d fd=%d data=%p\n",
-           size, fd, pool->data);
+    printf("wayland-shm-ahb pool-create id=%llu size=%d fd=%d data=%p refcount=1\n",
+           (unsigned long long)pool->id, size, fd, pool->data);
     fflush(stdout);
     wl_resource_set_implementation(pool_resource, &shm_pool_impl, pool, destroy_pool_resource);
 }
@@ -1555,7 +1675,7 @@ static struct wl_resource *create_dmabuf_wl_buffer(
     }
     buffer->kind = BUFFER_KIND_DMABUF;
     buffer->resource = buffer_resource;
-    buffer->pool = NULL;
+    buffer->pool = NULL;  // dmabuf buffers don't use a pool
     buffer->offset = (int32_t)params->offsets[0];
     buffer->width = width;
     buffer->height = height;
@@ -1564,10 +1684,14 @@ static struct wl_resource *create_dmabuf_wl_buffer(
     buffer->flags = flags;
     buffer->modifier = params->modifiers[0];
     buffer->dmabuf_fd = params->fds[0];
+    buffer->id = g_buffer_id_counter++;
     params->fds[0] = -1;
+    g_diag.buffers_created++;
+    g_diag.dmabuf_fds_exported++;
     wl_resource_set_implementation(buffer_resource, &buffer_impl, buffer, destroy_buffer_resource);
     printf(
-        "wayland-shm-ahb dmabuf-buffer width=%d height=%d stride=%d format=0x%08x modifier=0x%016" PRIx64 " flags=0x%x\n",
+        "wayland-shm-ahb dmabuf-buffer id=%llu width=%d height=%d stride=%d format=0x%08x modifier=0x%016" PRIx64 " flags=0x%x\n",
+        (unsigned long long)buffer->id,
         buffer->width,
         buffer->height,
         buffer->stride,
@@ -3960,6 +4084,7 @@ static void surface_commit(struct wl_client *client, struct wl_resource *resourc
     if (surface == NULL || surface->server == NULL) {
         return;
     }
+    g_diag.surfaces_committed++;
     if (!surface_is_displayable(surface)) {
         printf("wayland-shm-ahb commit=ignored-non-displayable xdg=%d subsurface=%d kind=%d\n",
                 surface->is_xdg_surface,
@@ -4410,6 +4535,59 @@ int main(int argc, char **argv) {
         avg_present,
         avg_app_wait,
         avg_app_slot_wait);
+
+    // === BRIDGE HEALTH SUMMARY ===
+    // Dump all diagnostic counters so the trace file has a complete picture
+    // of what happened during this bridge session. This helps diagnose
+    // current AND future bugs without needing additional builds.
+    printf("\n");
+    printf("=== BRIDGE HEALTH SUMMARY ===\n");
+    printf("wayland-shm-ahb diag pools_created=%llu pools_destroyed=%llu\n",
+           (unsigned long long)g_diag.pools_created,
+           (unsigned long long)g_diag.pools_destroyed);
+    printf("wayland-shm-ahb diag buffers_created=%llu buffers_destroyed=%llu\n",
+           (unsigned long long)g_diag.buffers_created,
+           (unsigned long long)g_diag.buffers_destroyed);
+    printf("wayland-shm-ahb diag ahb_allocated=%llu ahb_released=%llu\n",
+           (unsigned long long)g_diag.ahb_allocated,
+           (unsigned long long)g_diag.ahb_released);
+    printf("wayland-shm-ahb diag dmabuf_fds_exported=%llu dmabuf_fds_closed=%llu\n",
+           (unsigned long long)g_diag.dmabuf_fds_exported,
+           (unsigned long long)g_diag.dmabuf_fds_closed);
+    printf("wayland-shm-ahb diag shm_to_ahb_calls=%llu shm_to_ahb_failures=%llu\n",
+           (unsigned long long)g_diag.shm_to_ahb_calls,
+           (unsigned long long)g_diag.shm_to_ahb_failures);
+    printf("wayland-shm-ahb diag use_after_free_detected=%llu\n",
+           (unsigned long long)g_diag.use_after_free_detected);
+    printf("wayland-shm-ahb diag bridge_reconnects=%llu\n",
+           (unsigned long long)g_diag.bridge_reconnects);
+    // Leak detection: if created != destroyed, something is leaking.
+    if (g_diag.pools_created != g_diag.pools_destroyed) {
+        printf("wayland-shm-ahb diag WARNING pool leak: %llu created but only %llu destroyed\n",
+               (unsigned long long)g_diag.pools_created,
+               (unsigned long long)g_diag.pools_destroyed);
+    }
+    if (g_diag.buffers_created != g_diag.buffers_destroyed) {
+        printf("wayland-shm-ahb diag WARNING buffer leak: %llu created but only %llu destroyed\n",
+               (unsigned long long)g_diag.buffers_created,
+               (unsigned long long)g_diag.buffers_destroyed);
+    }
+    if (g_diag.ahb_allocated != g_diag.ahb_released) {
+        printf("wayland-shm-ahb diag WARNING AHB leak: %llu allocated but only %llu released\n",
+               (unsigned long long)g_diag.ahb_allocated,
+               (unsigned long long)g_diag.ahb_released);
+    }
+    if (g_diag.dmabuf_fds_exported != g_diag.dmabuf_fds_closed) {
+        printf("wayland-shm-ahb diag WARNING fd leak: %llu exported but only %llu closed\n",
+               (unsigned long long)g_diag.dmabuf_fds_exported,
+               (unsigned long long)g_diag.dmabuf_fds_closed);
+    }
+    printf("wayland-shm-ahb diag present_ok=%llu present_fail=%llu\n",
+           (unsigned long long)g_diag.surfaces_presented_ok,
+           (unsigned long long)g_diag.surfaces_presented_fail);
+    printf("=== END BRIDGE HEALTH SUMMARY ===\n");
+    fflush(stdout);
+
     if ((state.commit_count >= state.target_commits || state.completed_after_client_exit)
             && state.present_failures == 0) {
         printf("wayland-shm-ahb verdict=pass\n");
