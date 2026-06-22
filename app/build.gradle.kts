@@ -133,7 +133,7 @@ android {
     // A 164MB .tar.gz being recompressed can corrupt the asset or make it
     // inaccessible via AssetManager.open(). noCompress prevents this.
     androidResources {
-        noCompress += listOf("tar.gz", "tar.xz", "tar.zst", "tzst")
+        noCompress += listOf("tar.gz", "tar.xz", "tar.zst", "tzst", "zip")
     }
 }
 
