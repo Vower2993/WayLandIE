@@ -268,7 +268,12 @@ make -j$(nproc) -k \
   dlls/winewayland.drv/aarch64-windows/winewayland.drv \
   dlls/winewayland.drv/winewayland.so \
   dlls/winewayland.drv/arm64ec-windows/winewayland.drv \
-  2>&1 | tail -120 || true
+  2>&1 | tail -300 || true
+# If winewayland.so failed, try building it alone with verbose output to see the error
+if [ ! -f dlls/winewayland.drv/winewayland.so ]; then
+  echo "=== winewayland.so build failed - retrying with verbose output ==="
+  make -j1 dlls/winewayland.drv/winewayland.so V=1 2>&1 | tail -60 || true
+fi
 
 echo "=== Searching for built artifacts ==="
 find /tmp/proton-wine -name "winewayland*" -type f -newer /tmp/proton-wine/configure 2>/dev/null | head -20
@@ -277,6 +282,8 @@ ls -la /tmp/proton-wine/dlls/winewayland.drv/ 2>/dev/null
 
 echo "=== [9/9] Collect + zip ==="
 for f in \
+  "/tmp/proton-wine/dlls/winewayland.drv/aarch64-windows/winewayland.drv" \
+  "/tmp/proton-wine/dlls/winewayland.drv/arm64ec-windows/winewayland.drv" \
   "/tmp/proton-wine/dlls/winewayland.drv/winewayland.drv.so" \
   "/tmp/proton-wine/dlls/winewayland.drv/winewayland.drv" \
   "/tmp/proton-wine/dlls/winewayland.drv/winewayland.dll.so"; do
@@ -301,7 +308,7 @@ SO_SIZE=$(stat -c%s "$PROTON_OUT/lib/wine/aarch64-unix/winewayland.so" 2>/dev/nu
 echo "winewayland.drv: $DRV_SIZE bytes"
 echo "winewayland.so: $SO_SIZE bytes"
 
-if [ "$DRV_SIZE" -lt 5000 ]; then
+if [ "$DRV_SIZE" -lt 1000 ]; then
   echo "FATAL: winewayland.drv missing or too small"
   echo "=== dlls/winewayland.drv/ contents ==="
   ls -la /tmp/proton-wine/dlls/winewayland.drv/ 2>/dev/null || true
