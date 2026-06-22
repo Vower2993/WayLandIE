@@ -237,8 +237,35 @@ public final class WineRunner {
         io.waylandie.display.runtime.content.AdrenotoolsManager atm =
                 new io.waylandie.display.runtime.content.AdrenotoolsManager(context);
         String activeDriverSo = atm.getActiveDriverSoPath();
+
+        // If no adrenotools driver is active, fall back to the Turnip driver
+        // (which is installed as a user component, not an adrenotools slot).
+        // The Java-side presenter needs the driver at:
+        //   /data/user/0/io.waylandie.display/files/adrenotools-driver/vulkan.waylandie.a8xx.so
+        // Without this, the bridge's dmabuf-present fails with "driver-missing".
+        if (activeDriverSo == null) {
+            File turnipDir = new File(context.getFilesDir(), "contents/turnip/active");
+            File turnipSo = new File(turnipDir, "libvulkan_freedreno.so");
+            if (turnipSo.isFile()) {
+                activeDriverSo = turnipSo.getAbsolutePath();
+                Log.i(TAG, "No adrenotools driver active — falling back to Turnip: " + activeDriverSo);
+                installerDiagnostics.append("[adrenotools] No active driver, using Turnip fallback: ")
+                    .append(activeDriverSo).append('\n');
+            } else {
+                Log.w(TAG, "No adrenotools driver active AND no Turnip fallback found at " + turnipSo);
+                installerDiagnostics.append("[adrenotools] WARNING: No driver available — ")
+                    .append("dmabuf-present will fail with driver-missing\n");
+            }
+        }
+
         if (activeDriverSo != null) {
             syncAdrenotoolsDriverToRootfs(activeDriverSo);
+            // Also sync to the Java-side adrenotools-driver directory.
+            // The Java presenter (waylandie_display_native.c) loads the driver
+            // from here via adrenotools. The driver must be named
+            // "vulkan.waylandie.a8xx.so" (matches DEFAULT_ANDROID_VK_DRIVER
+            // in the bridge).
+            syncDriverToAdrenotoolsDriverDir(activeDriverSo);
         }
 
         // 3. Choose launch method: native linker (fast) or proot (fallback)
@@ -1541,6 +1568,44 @@ public final class WineRunner {
             Log.i(TAG, "Synced adrenotools driver: " + destSo);
         } catch (Exception e) {
             Log.e(TAG, "Failed to sync adrenotools driver", e);
+        }
+    }
+
+    /**
+     * Syncs the Vulkan driver .so to the Java-side adrenotools-driver directory.
+     *
+     * <p>The Java presenter (waylandie_display_native.c) loads the driver from:
+     *   /data/user/0/io.waylandie.display/files/adrenotools-driver/vulkan.waylandie.a8xx.so
+     *
+     * <p>This is SEPARATE from the rootfs copy (syncAdrenotoolsDriverToRootfs)
+     * which is for Wine's Vulkan ICD. The Java presenter uses adrenotools to
+     * hook libvulkan and load this driver for dmabuf import + Surface display.
+     *
+     * <p>Without this, the bridge's dmabuf-present fails with:
+     *   "reason=driver-missing driver=vulkan.waylandie.a8xx.so"
+     *
+     * <p>The driver name MUST be "vulkan.waylandie.a8xx.so" to match
+     * DEFAULT_ANDROID_VK_DRIVER in waylandie-wayland-bridge.c.
+     */
+    private void syncDriverToAdrenotoolsDriverDir(String driverSoHostPath) {
+        try {
+            File srcSo = new File(driverSoHostPath);
+            if (!srcSo.isFile()) {
+                Log.w(TAG, "syncDriverToAdrenotoolsDriverDir: source not found: " + srcSo);
+                return;
+            }
+            File driverDir = new File(context.getFilesDir(), "adrenotools-driver");
+            driverDir.mkdirs();
+            File destSo = new File(driverDir, "vulkan.waylandie.a8xx.so");
+            copyFile(srcSo, destSo);
+            Log.i(TAG, "Synced driver to adrenotools-driver dir: " + destSo
+                    + " (" + destSo.length() + " bytes)");
+            installerDiagnostics.append("[adrenotools] Driver synced to Java presenter: ")
+                .append(destSo).append(" (").append(destSo.length()).append(" bytes)\n");
+        } catch (Exception e) {
+            Log.e(TAG, "Failed to sync driver to adrenotools-driver dir", e);
+            installerDiagnostics.append("[adrenotools] FAILED to sync driver: ")
+                .append(e.getMessage()).append('\n');
         }
     }
 
