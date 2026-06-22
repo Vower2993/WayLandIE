@@ -217,33 +217,52 @@ cp "$BIONIC_LIBS/usr/local/lib/pkgconfig/xkbcommon.pc" "$BIONIC_LIBS/lib/pkgconf
 # the wayland driver to function.
 echo "=== Creating stub xkbregistry header + library ==="
 
-# Stub header — provides the types and function declarations Wine expects
+# Use forward declarations of struct tags (NOT typedefs) — matches what
+# Wine's wayland_keyboard.c expects. Using typedef would cause
+# "redefinition as different kind of symbol" errors.
 mkdir -p "$BIONIC_LIBS/include/xkbcommon"
 cat > "$BIONIC_LIBS/include/xkbcommon/xkbregistry.h" << 'HDR'
 #ifndef _XKBREGISTRY_H_
 #define _XKBREGISTRY_H_
 
+#include <stdbool.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-typedef struct rxkb_context rxkb_context;
-typedef struct rxkb_layout rxkb_layout;
+/* Forward declarations of opaque struct types */
+struct rxkb_context;
+struct rxkb_layout;
+struct rxkb_model;
+struct rxkb_option_group;
+struct rxkb_option;
+struct rxkb_iso639_code;
+struct rxkb_iso3166_code;
 
 enum rxkb_context_flags {
     RXKB_CONTEXT_NO_FLAGS = 0,
-    RXKB_CONTEXT_NO_DEFAULT_INCLUDES = 1
+    RXKB_CONTEXT_NO_DEFAULT_INCLUDES = (1 << 0),
+    RXKB_CONTEXT_NO_ENVIRONMENT = (1 << 1)
 };
 
-rxkb_context *rxkb_context_new(enum rxkb_context_flags flags);
-void rxkb_context_unref(rxkb_context *ctx);
-int rxkb_context_parse_default_ruleset(rxkb_context *ctx);
+enum rxkb_log_level {
+    RXKB_LOG_LEVEL_CRITICAL = 10,
+    RXKB_LOG_LEVEL_ERROR = 20,
+    RXKB_LOG_LEVEL_WARNING = 30,
+    RXKB_LOG_LEVEL_INFO = 40,
+    RXKB_LOG_LEVEL_DEBUG = 50
+};
 
-rxkb_layout *rxkb_layout_first(rxkb_context *ctx);
-rxkb_layout *rxkb_layout_next(rxkb_layout *layout);
-const char *rxkb_layout_get_name(rxkb_layout *layout);
-const char *rxkb_layout_get_description(rxkb_layout *layout);
-const char *rxkb_layout_get_variant(rxkb_layout *layout);
+struct rxkb_context *rxkb_context_new(enum rxkb_context_flags flags);
+void rxkb_context_unref(struct rxkb_context *ctx);
+int rxkb_context_parse_default_ruleset(struct rxkb_context *ctx);
+
+struct rxkb_layout *rxkb_layout_first(struct rxkb_context *ctx);
+struct rxkb_layout *rxkb_layout_next(struct rxkb_layout *layout);
+const char *rxkb_layout_get_name(struct rxkb_layout *layout);
+const char *rxkb_layout_get_description(struct rxkb_layout *layout);
+const char *rxkb_layout_get_variant(struct rxkb_layout *layout);
 
 #ifdef __cplusplus
 }
@@ -255,20 +274,26 @@ HDR
 # Stub library — returns NULL/0 from all functions (keyboard layout enum won't work)
 cat > /tmp/xkbregistry_stub.c << 'STUBEOF'
 #include <stddef.h>
-typedef struct rxkb_context rxkb_context;
-typedef struct rxkb_layout rxkb_layout;
-enum rxkb_context_flags { RXKB_CONTEXT_NO_FLAGS = 0, RXKB_CONTEXT_NO_DEFAULT_INCLUDES = 1 };
 
-rxkb_context *rxkb_context_new(enum rxkb_context_flags flags) { return NULL; }
-void rxkb_context_unref(rxkb_context *ctx) {}
-int rxkb_context_parse_default_ruleset(rxkb_context *ctx) { return 0; }
-rxkb_layout *rxkb_layout_first(rxkb_context *ctx) { return NULL; }
-rxkb_layout *rxkb_layout_next(rxkb_layout *layout) { return NULL; }
-const char *rxkb_layout_get_name(rxkb_layout *layout) { return NULL; }
-const char *rxkb_layout_get_description(rxkb_layout *layout) { return NULL; }
-const char *rxkb_layout_get_variant(rxkb_layout *layout) { return NULL; }
+struct rxkb_context;
+struct rxkb_layout;
+
+enum rxkb_context_flags {
+    RXKB_CONTEXT_NO_FLAGS = 0,
+    RXKB_CONTEXT_NO_DEFAULT_INCLUDES = 1,
+    RXKB_CONTEXT_NO_ENVIRONMENT = 2
+};
+
+struct rxkb_context *rxkb_context_new(enum rxkb_context_flags flags) { return NULL; }
+void rxkb_context_unref(struct rxkb_context *ctx) {}
+int rxkb_context_parse_default_ruleset(struct rxkb_context *ctx) { return 0; }
+struct rxkb_layout *rxkb_layout_first(struct rxkb_context *ctx) { return NULL; }
+struct rxkb_layout *rxkb_layout_next(struct rxkb_layout *layout) { return NULL; }
+const char *rxkb_layout_get_name(struct rxkb_layout *layout) { return NULL; }
+const char *rxkb_layout_get_description(struct rxkb_layout *layout) { return NULL; }
+const char *rxkb_layout_get_variant(struct rxkb_layout *layout) { return NULL; }
 STUBEOF
-$CC -c -fPIC --sysroot=$SYSROOT -I$BIONIC_LIBS/include /tmp/xkbregistry_stub.c -o /tmp/xkbregistry_stub.o
+$CC -c -fPIC --sysroot=$SYSROOT -I$BIONIC_LIBS/include /tmp/xkbregistry_stub.c -o /tmp/xkbregistry_stub.o 2>&1
 $AR rcs "$BIONIC_LIBS/lib/libxkbregistry.a" /tmp/xkbregistry_stub.o
 echo "Created header: $(ls -la $BIONIC_LIBS/include/xkbcommon/xkbregistry.h)"
 echo "Created lib: $(ls -la $BIONIC_LIBS/lib/libxkbregistry.a)"
