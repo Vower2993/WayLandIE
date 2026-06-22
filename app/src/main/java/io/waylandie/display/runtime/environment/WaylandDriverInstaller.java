@@ -7,7 +7,10 @@ import java.util.zip.*;
 
 /**
  * Extracts winewayland-driver.zip from APK assets into the proton tree.
- * Logs to BOTH logcat AND System.err (so GameLaunchTracer captures it).
+ * Logs to THREE places:
+ *   1. logcat (Log.i/Log.w)
+ *   2. WineRunner.preLaunchDiagnostics (captured by GameLaunchTracer)
+ *   3. System.err (captured if running under a stderr-redirecting shell)
  */
 public final class WaylandDriverInstaller {
     private static final String TAG = "WaylandDriverInstaller";
@@ -28,6 +31,14 @@ public final class WaylandDriverInstaller {
                 }
             }
             log("  APK assets listed: " + (assets != null ? assets.length : 0) + " items");
+            if (assets != null && assets.length < 20) {
+                StringBuilder sb = new StringBuilder("  assets: ");
+                for (int i = 0; i < assets.length; i++) {
+                    if (i > 0) sb.append(", ");
+                    sb.append(assets[i]);
+                }
+                log(sb.toString());
+            }
             log("  " + ASSET + " in assets: " + found);
             if (!found) {
                 log("  SKIP: asset not found in APK");
@@ -77,9 +88,21 @@ public final class WaylandDriverInstaller {
         }
     }
 
-    /** Log to both logcat AND System.err (tracer captures System.err). */
+    /**
+     * Log to three places:
+     *   1. logcat (Log.i)
+     *   2. WineRunner.preLaunchDiagnostics (StringBuilder — captured by GameLaunchTracer)
+     *   3. System.err (best-effort)
+     */
     private static void log(String msg) {
         Log.i(TAG, msg);
+        try {
+            // Route to WineRunner's diagnostic buffer so GameLaunchTracer captures it
+            WineRunner.preLaunchDiagnostics.append("[wayland-installer] ")
+                .append(msg).append('\n');
+        } catch (Throwable t) {
+            // Ignore if static init order issues
+        }
         System.err.println("[WaylandDriverInstaller] " + msg);
     }
 
