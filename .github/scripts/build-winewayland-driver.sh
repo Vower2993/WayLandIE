@@ -239,7 +239,13 @@ echo "=== configure Wayland vars ==="
 grep -E "^(WAYLAND|XKB)" /tmp/proton-wine/config.status | head -20 || true
 
 echo "=== [8/9] Build winewayland targets ==="
-make -j$(nproc) dlls/winewayland.drv 2>&1 | tail -80 || true
+# Build the specific output files (not the directory target which is a no-op)
+# -k keeps going past errors so we see ALL failures, not just the first
+make -j$(nproc) -k \
+  dlls/winewayland.drv/aarch64-windows/winewayland.drv \
+  dlls/winewayland.drv/winewayland.so \
+  dlls/winewayland.drv/arm64ec-windows/winewayland.drv \
+  2>&1 | tail -120 || true
 
 echo "=== Searching for built artifacts ==="
 find /tmp/proton-wine -name "winewayland*" -type f -newer /tmp/proton-wine/configure 2>/dev/null | head -20
