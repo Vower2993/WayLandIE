@@ -234,11 +234,12 @@ struct shm_pool_state {
     void *data;
     int32_t size;
     int fd;  // Original memfd/anonymous fd from wl_shm.create_pool.
-             // Kept open so wl_shm_pool.resize can mremap to a larger size.
-             // Wine's winewayland.drv creates a small pool (e.g. 22 bytes
-             // for the initial header) and then resizes it to the full
-             // buffer size (e.g. 19MB for a 3200x1536 framebuffer).
-             // Closed in destroy_pool_resource when the pool is destroyed.
+             // Kept open so shm_pool_resize can mremap (if needed) and
+             // closed in destroy_pool_resource.
+             // NOTE: Wine's winewayland.drv creates pools at FULL size
+             // (e.g. 19MB for a 3200x1536 framebuffer) — it does NOT use
+             // wl_shm_pool.resize. The fd is kept open for potential future
+             // use and for fstat() diagnostics.
 };
 
 struct shm_buffer_state {
@@ -979,6 +980,18 @@ static int shm_to_ahb(struct shm_buffer_state *shm, int frame_index,
     memset(&out->temp_buffer, 0, sizeof(out->temp_buffer));
 
     if (shm == NULL || shm->kind != BUFFER_KIND_SHM) return -1;
+
+    // Diagnostic: log the pool state BEFORE any checks, so we can see
+    // exactly what shm_to_ahb is working with.
+    printf("wayland-shm-ahb frame=%d shm-to-ahb-entry shm=%p pool=%p pool_data=%p pool_size=%d pool_fd=%d "
+           "buf=%dx%d stride=%d offset=%d kind=%d\n",
+           frame_index, (void*)shm, (void*)shm->pool,
+           shm->pool ? shm->pool->data : NULL,
+           shm->pool ? shm->pool->size : -1,
+           shm->pool ? shm->pool->fd : -1,
+           shm->width, shm->height, shm->stride, shm->offset, shm->kind);
+    fflush(stdout);
+
     if (shm->pool == NULL || shm->pool->data == NULL
             || shm->pool->data == MAP_FAILED) {
         printf("wayland-shm-ahb frame=%d status=fail reason=shm-no-pool\n", frame_index);
@@ -992,8 +1005,10 @@ static int shm_to_ahb(struct shm_buffer_state *shm, int frame_index,
     // Sanity-check the SHM pool is large enough for the offset + size
     int64_t needed = (int64_t)shm->offset + (int64_t)shm->stride * shm->height;
     if (needed > shm->pool->size) {
-        printf("wayland-shm-ahb frame=%d status=fail reason=shm-pool-overflow need=%lld have=%d\n",
-               frame_index, (long long)needed, shm->pool->size);
+        printf("wayland-shm-ahb frame=%d status=fail reason=shm-pool-overflow need=%lld have=%d "
+               "pool=%p pool_data=%p\n",
+               frame_index, (long long)needed, shm->pool->size,
+               (void*)shm->pool, shm->pool->data);
         return -1;
     }
 
@@ -1281,6 +1296,9 @@ static const struct wl_buffer_interface buffer_impl = {
 static void destroy_pool_resource(struct wl_resource *resource) {
     struct shm_pool_state *pool = wl_resource_get_user_data(resource);
     if (pool != NULL) {
+        printf("wayland-shm-ahb pool-destroy size=%d fd=%d data=%p\n",
+               pool->size, pool->fd, pool->data);
+        fflush(stdout);
         if (pool->data != NULL && pool->size > 0) {
             munmap(pool->data, (size_t)pool->size);
         }
