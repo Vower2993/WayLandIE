@@ -322,6 +322,15 @@ fi
 cd "$OUTDIR"
 mkdir -p "$WORKSPACE/app/src/main/assets"
 rm -f "$WORKSPACE/app/src/main/assets/winewayland-driver.zip"
-zip -r "$WORKSPACE/app/src/main/assets/winewayland-driver.zip" proton/ rootfs/
+
+# Create zip with FLAT structure (no proton/ or rootfs/ prefix).
+# The installer extracts into protonDir, so entries must be relative
+# to that dir. Both .drv and .so go into protonDir/lib/ which is in
+# LD_LIBRARY_PATH (proton/active/lib is in the Wine process's search path).
+cp "$ROOTFS_OUT/usr/local/lib/libandroid-sysvshm.so" "$PROTON_OUT/lib/"
+( cd "$PROTON_OUT" && zip -r "$WORKSPACE/app/src/main/assets/winewayland-driver.zip" lib/ )
+
+echo "=== zip contents ==="
+unzip -l "$WORKSPACE/app/src/main/assets/winewayland-driver.zip"
 ls -la "$WORKSPACE/app/src/main/assets/winewayland-driver.zip"
 echo "winewayland-driver.zip built"
