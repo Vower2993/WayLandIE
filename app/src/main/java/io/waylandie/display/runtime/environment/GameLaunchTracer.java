@@ -252,6 +252,19 @@ public final class GameLaunchTracer {
         // env vars, symlinks, etc.) and stored them in a static buffer.
         // Write them to the trace file here so they're visible alongside
         // Wine's stdout.
+
+        // First: dump installer diagnostics (separate buffer, not cleared)
+        String installerDiag = io.waylandie.display.runtime.environment.WineRunner.installerDiagnostics.toString();
+        if (installerDiag != null && !installerDiag.isEmpty()) {
+            logSection("WAYLAND DRIVER INSTALLER");
+            for (String line : installerDiag.split("\n")) {
+                if (!line.isEmpty()) {
+                    log("  " + line);
+                }
+            }
+            log("");
+        }
+
         logSection("WINE RUNNER DIAGNOSTICS (pre-launch)");
         String diag = io.waylandie.display.runtime.environment.WineRunner.preLaunchDiagnostics.toString();
         if (diag != null && !diag.isEmpty()) {

@@ -91,14 +91,14 @@ public final class WaylandDriverInstaller {
     /**
      * Log to three places:
      *   1. logcat (Log.i)
-     *   2. WineRunner.preLaunchDiagnostics (StringBuilder — captured by GameLaunchTracer)
+     *   2. WineRunner.installerDiagnostics (separate from preLaunchDiagnostics,
+     *      which gets cleared by the diagnostics section)
      *   3. System.err (best-effort)
      */
     private static void log(String msg) {
         Log.i(TAG, msg);
         try {
-            // Route to WineRunner's diagnostic buffer so GameLaunchTracer captures it
-            WineRunner.preLaunchDiagnostics.append("[wayland-installer] ")
+            WineRunner.installerDiagnostics.append("[wayland-installer] ")
                 .append(msg).append('\n');
         } catch (Throwable t) {
             // Ignore if static init order issues

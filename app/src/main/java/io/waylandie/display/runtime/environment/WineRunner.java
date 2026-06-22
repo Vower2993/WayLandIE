@@ -41,6 +41,11 @@ public final class WineRunner {
     // after WineRunner.execWine() returns and appends it to the trace file.
     public static final StringBuilder preLaunchDiagnostics = new StringBuilder();
 
+    // Separate buffer for installer logs — NOT cleared by the diagnostics
+    // section (which calls preLaunchDiagnostics.setLength(0)). The tracer
+    // reads both buffers and concatenates them.
+    public static final StringBuilder installerDiagnostics = new StringBuilder();
+
     private final Context context;
     private final ImageFsManager imageFs;
 
@@ -116,6 +121,9 @@ public final class WineRunner {
             WaylandDriverInstaller.install(context, protonDir);
         } catch (Exception e) {
             android.util.Log.w("WineRunner", "winewayland install failed: " + e.getMessage());
+            installerDiagnostics.append("[wayland-installer] EXCEPTION: ")
+                .append(e.getClass().getSimpleName())
+                .append(": ").append(e.getMessage()).append('\n');
         }
 
         if (!protonDir.exists()) {
