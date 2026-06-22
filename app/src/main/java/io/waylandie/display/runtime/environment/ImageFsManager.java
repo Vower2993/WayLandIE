@@ -14,7 +14,7 @@ import java.util.concurrent.atomic.AtomicLong;
  * ImageFsManager — manages the bundled rootfs (ImageFs) that ships inside
  * the APK's assets directory.
  *
- * <p>On first launch, the app extracts {@code assets/imagefs/imagefs.tar.xz}
+ * <p>On first launch, the app extracts {@code assets/imagefs/imagefs.tar.zst}
  * (~150 MB compressed → ~500 MB extracted) into
  * {@code getFilesDir()/imagefs/}. This rootfs contains:
  *
@@ -55,8 +55,10 @@ public final class ImageFsManager {
     // pkgconfig files (.pc), wayland-protocols XML, wayland-scanner binary;
     // stripped debug symbols from all .so files. Smaller rootfs = faster
     // extraction. Bumping forces re-extraction of the new smaller rootfs.
-    public static final int LATEST_VERSION = 6;
-    private static final String IMAGEFS_ARCHIVE = "imagefs/imagefs.tar.xz";
+    // Version 7: switched from XZ (.tar.xz) to ZSTD (.tar.zst) compression
+    // for 3-5x faster extraction. Bumping forces re-extraction with new format.
+    public static final int LATEST_VERSION = 7;
+    private static final String IMAGEFS_ARCHIVE = "imagefs/imagefs.tar.zst";
     private static final long IMAGEFS_EXTRACTED_BYTES = 500_000_000L;
 
     private final Context context;
@@ -330,7 +332,7 @@ public final class ImageFsManager {
      *
      * <p>Process:
      * <ol>
-     *   <li>Copy the asset to a temp file (cacheDir/imagefs.tar.xz)</li>
+     *   <li>Copy the asset to a temp file (cacheDir/imagefs.tar.zst)</li>
      *   <li>Run {@code /system/bin/tar -xJf <temp> -C <rootDir>}</li>
      *   <li>Delete the temp file</li>
      * </ol>
@@ -341,7 +343,7 @@ public final class ImageFsManager {
     private boolean extractWithNativeTar(android.content.Context ctx,
                                           String assetName, File destDir,
                                           ProgressListener listener) {
-        File tempFile = new File(ctx.getCacheDir(), "imagefs.tar.xz");
+        File tempFile = new File(ctx.getCacheDir(), "imagefs.tar.zst");
         try {
             // Step 1: Copy asset to temp file
             Log.i(TAG, "Copying imagefs asset to temp file for native extraction…");

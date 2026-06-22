@@ -51,7 +51,7 @@ set -o pipefail  # CRITICAL: without this, 'cmd | tail' masks cmd failures
 WORK_DIR="${WORK_DIR:-/tmp/waylandie-imagefs-build}"
 ROOTFS_DIR="$WORK_DIR/rootfs"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-OUTPUT_FILE="${OUTPUT_FILE:-$SCRIPT_DIR/../app/src/main/assets/imagefs/imagefs.tar.xz}"
+OUTPUT_FILE="${OUTPUT_FILE:-$SCRIPT_DIR/../app/src/main/assets/imagefs/imagefs.tar.zst}"
 ARCH="${ARCH:-arm64}"
 DIST="${DIST:-focal}"
 
@@ -394,7 +394,7 @@ fi
 # ---------------------------------------------------------------------
 # 7. Create the tarball
 # ---------------------------------------------------------------------
-echo "[7/7] Creating imagefs.tar.xz…"
+echo "[7/7] Creating imagefs.tar.zst…"
 
 # Purge dev packages — only needed for bridge compilation, bloat rootfs 3x
 # Ubuntu 20.04 Focal ships gcc-9 (not gcc-14 like Trixie)
@@ -469,10 +469,10 @@ echo "  ✓ Aggressive trimming complete"
 echo "  ✓ Cleanup complete"
 
 cd "$ROOTFS_DIR"
-# Use xz compression. On-device extraction uses Android's native toybox tar
-# (tar -xJf) which is 3-5x faster than Java extraction. XZ is also faster
-# to decompress in Java (tukaani) than Zstd (Apache Commons) as a fallback.
-tar --xattrs -cJf "$OUTPUT_FILE" .
+# Use zstd compression. ZSTD decompresses 3-5x faster than XZ, reducing
+# first-launch extraction time from ~5 minutes to ~1 minute.
+# The app's TarCompressorUtils.java already supports ZSTD via zstd-jni.
+tar --xattrs -cf - . | zstd -19 -T0 -o "$OUTPUT_FILE"
 
 SIZE=$(stat -c%s "$OUTPUT_FILE")
 echo
