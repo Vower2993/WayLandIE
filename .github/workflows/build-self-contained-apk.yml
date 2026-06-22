@@ -86,7 +86,7 @@ jobs:
       - name: Extract glibc linker to jniLibs
         run: |
           echo "=== Extracting glibc linker from rootfs tarball ==="
-          sudo mkdir -p app/src/main/jniLibs/arm64-v9-zstda
+          sudo mkdir -p app/src/main/jniLibs/arm64-v8a
           sudo chown -R $(id -u):$(id -g) app/src/main/jniLibs
           mkdir -p /tmp/wl-linker-extract
           # List all ld-linux files in the tarball for debugging
@@ -139,10 +139,10 @@ jobs:
             fi
           fi
           if [ -n "$FOUND" ]; then
-            cp -L "$FOUND" app/src/main/jniLibs/arm64-v9-zstda/libld_glibc.so
-            chmod 755 app/src/main/jniLibs/arm64-v9-zstda/libld_glibc.so
-            echo "  ✓ libld_glibc.so: $(stat -c%s app/src/main/jniLibs/arm64-v9-zstda/libld_glibc.so) bytes"
-            file app/src/main/jniLibs/arm64-v9-zstda/libld_glibc.so
+            cp -L "$FOUND" app/src/main/jniLibs/arm64-v8a/libld_glibc.so
+            chmod 755 app/src/main/jniLibs/arm64-v8a/libld_glibc.so
+            echo "  ✓ libld_glibc.so: $(stat -c%s app/src/main/jniLibs/arm64-v8a/libld_glibc.so) bytes"
+            file app/src/main/jniLibs/arm64-v8a/libld_glibc.so
             # CRITICAL: Verify glibc version is < 2.34 to avoid seccomp SIGSYS on Android
             GLIBC_VER=$(strings "$FOUND" | grep -oP 'GLIBC_\K[0-9]+\.[0-9]+' | sort -V | tail -1)
             echo "  glibc version: $GLIBC_VER"
@@ -168,7 +168,7 @@ jobs:
       - name: Verify proot binary
         run: |
           echo "=== Verifying proot binary ==="
-          PROOT_FILE="app/src/main/jniLibs/arm64-v9-zstda/libproot.so"
+          PROOT_FILE="app/src/main/jniLibs/arm64-v8a/libproot.so"
           if [ ! -f "$PROOT_FILE" ]; then
             echo "ERROR: libproot.so not found" >&2
             exit 1
@@ -191,7 +191,7 @@ jobs:
         continue-on-error: true
         run: |
           echo "=== Fetching libadrenotools.so (optional) ==="
-          ADR_FILE="app/src/main/jniLibs/arm64-v9-zstda/libadrenotools.so"
+          ADR_FILE="app/src/main/jniLibs/arm64-v8a/libadrenotools.so"
           ADR_SIZE=$(stat -c%s "$ADR_FILE" 2>/dev/null || echo 0)
           if [ "$ADR_SIZE" -gt 10000 ]; then
             echo "  ✓ Already present ($ADR_SIZE bytes)"
@@ -201,7 +201,7 @@ jobs:
               echo "  ⚠ Adrenotools fetch failed — continuing with placeholder."
               echo "  The app will use rootfs Turnip instead. OK."
               # Ensure placeholder exists so APK builds
-              mkdir -p app/src/main/jniLibs/arm64-v9-zstda
+              mkdir -p app/src/main/jniLibs/arm64-v8a
               touch "$ADR_FILE"
             }
           fi
@@ -287,14 +287,14 @@ jobs:
           fi
           echo
           echo "libproot.so:"
-          ls -la app/src/main/jniLibs/arm64-v9-zstda/libproot.so
-          PROOT_SIZE=$(stat -c%s app/src/main/jniLibs/arm64-v9-zstda/libproot.so)
+          ls -la app/src/main/jniLibs/arm64-v8a/libproot.so
+          PROOT_SIZE=$(stat -c%s app/src/main/jniLibs/arm64-v8a/libproot.so)
           if [ "$PROOT_SIZE" -lt 100000 ]; then
             echo "ERROR: proot too small (placeholder?)" >&2; exit 1
           fi
           echo
           echo "libadrenotools.so:"
-          ls -la app/src/main/jniLibs/arm64-v9-zstda/libadrenotools.so
+          ls -la app/src/main/jniLibs/arm64-v8a/libadrenotools.so
           echo
           echo "Java sources:"
           find app/src/main/java/io/waylandie -name "*.java" | wc -l
