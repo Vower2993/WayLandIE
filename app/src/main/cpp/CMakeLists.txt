@@ -295,11 +295,12 @@ target_include_directories(waylandie_native_io PRIVATE
 )
 
 target_link_libraries(waylandie_native_io
-target_compile_definitions(waylandie_native_io PRIVATE XZ_USE_CRC64 XZ_DEC_CONCATENATED)
     android
     log
     libzstd_static
 )
+
+target_compile_definitions(waylandie_native_io PRIVATE XZ_USE_CRC64 XZ_DEC_CONCATENATED)
 
 # Strip in release
 if(CMAKE_BUILD_TYPE STREQUAL "Release")
