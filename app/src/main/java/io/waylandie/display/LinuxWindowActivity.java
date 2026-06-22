@@ -131,26 +131,6 @@ public final class LinuxWindowActivity extends Activity implements SurfaceHolder
     @Override
     public boolean dispatchTouchEvent(MotionEvent event) {
         recordInput("touch", event.getActionMasked());
-        // Forward to in-process X server (for winex11.drv)
-        if (io.waylandie.display.runtime.environment.XServerController.isRunning()) {
-            int x = (int) event.getRawX();
-            int y = (int) event.getRawY();
-            int action = event.getActionMasked();
-            switch (action) {
-                case MotionEvent.ACTION_DOWN:
-                    io.waylandie.display.runtime.environment.XServerController.sendMouse(x, y, 1, true);
-                    break;
-                case MotionEvent.ACTION_UP:
-                    io.waylandie.display.runtime.environment.XServerController.sendMouse(x, y, 1, false);
-                    break;
-                case MotionEvent.ACTION_MOVE:
-                    io.waylandie.display.runtime.environment.XServerController.sendMouse(x, y, 0, false);
-                    break;
-                case MotionEvent.ACTION_HOVER_MOVE:
-                    io.waylandie.display.runtime.environment.XServerController.sendMouse(x, y, 0, false);
-                    break;
-            }
-        }
         return super.dispatchTouchEvent(event);
     }
 
@@ -163,16 +143,6 @@ public final class LinuxWindowActivity extends Activity implements SurfaceHolder
     @Override
     public boolean dispatchKeyEvent(KeyEvent event) {
         recordInput("key", event.getKeyCode());
-        // Forward to in-process X server (for winex11.drv)
-        if (io.waylandie.display.runtime.environment.XServerController.isRunning()) {
-            // Convert Android keycode to X11 keycode (add 8 to match X11's
-            // min-keycode convention). The full mapping needs a proper
-            // Android→X11 keycode table; this is the minimal version that
-            // handles common keys.
-            int x11Keycode = event.getKeyCode() + 8;
-            boolean isDown = event.getAction() == KeyEvent.ACTION_DOWN;
-            io.waylandie.display.runtime.environment.XServerController.sendKey(x11Keycode, isDown);
-        }
         return super.dispatchKeyEvent(event);
     }
 
