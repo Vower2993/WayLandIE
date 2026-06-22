@@ -883,7 +883,7 @@ public final class WineRunner {
             File winePrefixDir = new File(rootDir, "home/xuser/.wine");
             // The registry key for the null display device GUID
             String videoKey = "[System\\\\CurrentControlSet\\\\Control\\\\Video\\\\{00000000-0000-0000-0000-000000000000}\\\\0000]";
-            String graphicsValue = "\"GraphicsDriver\"=\"winewayland\"";
+            String graphicsValue = "\"GraphicsDriver\"=\"winewayland.drv\"";
             File regFile = new File(winePrefixDir, "system.reg");
             if (!regFile.exists()) {
                 regFile.createNewFile();
