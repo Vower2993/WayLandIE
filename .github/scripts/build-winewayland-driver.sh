@@ -16,7 +16,7 @@ echo "=== [1/9] Install build deps ==="
 sudo apt-get install -y -qq \
   autoconf automake libtool bison flex gettext \
   pkg-config python3 python3-pip libffi-dev libexpat1-dev \
-  libxml2-dev libxkbcommon-dev wayland-protocols libwayland-bin
+  libxml2-dev libxkbcommon-dev wayland-protocols libwayland-bin libxkbregistry-dev
 pip3 install --user meson ninja 2>&1 | tail -3
 export PATH="$HOME/.local/bin:$PATH"
 
@@ -173,32 +173,39 @@ export CC="$TOOLCHAIN/bin/aarch64-linux-android${API}-clang"
 export CXX="$TOOLCHAIN/bin/aarch64-linux-android${API}-clang++"
 export AR="$TOOLCHAIN/bin/llvm-ar"
 export STRIP="$TOOLCHAIN/bin/llvm-strip"
-export CFLAGS="-fPIC --sysroot=$SYSROOT -I$SYSROOT/usr/include -I$BIONIC_LIBS/include -I/tmp/proton-wine/include -D__ANDROID_API__=$API -D__ANDROID__"
+export CFLAGS="-fPIC --sysroot=$SYSROOT -I$SYSROOT/usr/include -I$BIONIC_LIBS/include -I/tmp/proton-wine/include -I/usr/include -D__ANDROID_API__=$API -D__ANDROID__"
 export CXXFLAGS="$CFLAGS"
-export LDFLAGS="--sysroot=$SYSROOT -L$BIONIC_LIBS/lib -landroid-sysvshm -lffi"
+export LDFLAGS="--sysroot=$SYSROOT -L$BIONIC_LIBS/lib -L/usr/lib/x86_64-linux-gnu -landroid-sysvshm -lffi -lxkbcommon -lxkbregistry"
 export PKG_CONFIG_PATH="$BIONIC_LIBS/lib/pkgconfig"
 export PKG_CONFIG_LIBDIR="$BIONIC_LIBS/lib/pkgconfig"
 unset PKG_CONFIG_SYSROOT_DIR
 
+# Pre-seed all the link-test cache vars (avoid the broken pkg-config path in configure.ac)
 export ac_cv_lib_wayland_client_wl_display_connect=yes
 export ac_cv_lib_wayland_server_wl_display_init_shm=yes
+export ac_cv_lib_wayland_egl_wl_egl_window_create=yes
+export ac_cv_lib_xkbcommon_xkb_context_new=yes
+export ac_cv_lib_xkbregistry_rxkb_context_new=yes
 export ac_cv_header_wayland_client_h=yes
+export ac_cv_header_wayland_egl_h=yes
+export ac_cv_header_xkbcommon_xkbcommon_h=yes
+export ac_cv_header_xkbcommon_xkbregistry_h=yes
+export ac_cv_header_linux_input_h=yes
 export ac_cv_prog_wayland_scanner=$(which wayland-scanner)
 export ac_cv_func_shm_open=yes
 export ac_cv_search_shm_open="none required"
 
-# CRITICAL: set Wine detection vars directly so configure does NOT call pkg-config
-# (configure.ac's pkg-config invocation is broken — runs "--cflags" as a command)
+# Direct env-var settings (configure.ac honors these via WINE_PACKAGE_FLAGS)
 export WAYLAND_CLIENT_CFLAGS="-I$BIONIC_LIBS/include -D__ANDROID__ -DHAVE_SHM_UTILS"
 export WAYLAND_CLIENT_LIBS="-L$BIONIC_LIBS/lib -lwayland-client -lffi -landroid-sysvshm"
 export WAYLAND_SERVER_CFLAGS="-I$BIONIC_LIBS/include -D__ANDROID__ -DHAVE_SHM_UTILS"
 export WAYLAND_SERVER_LIBS="-L$BIONIC_LIBS/lib -lwayland-server -lffi -landroid-sysvshm"
 export WAYLAND_EGL_CFLAGS="-I$BIONIC_LIBS/include"
 export WAYLAND_EGL_LIBS="-L$BIONIC_LIBS/lib -lwayland-egl"
-export XKBCOMMON_CFLAGS="-I$BIONIC_LIBS/include"
-export XKBCOMMON_LIBS="-L$BIONIC_LIBS/lib -lxkbcommon"
-export XKBREGISTRY_CFLAGS="-I$BIONIC_LIBS/include"
-export XKBREGISTRY_LIBS="-L$BIONIC_LIBS/lib -lxkbregistry"
+export XKBCOMMON_CFLAGS="-I/usr/include"
+export XKBCOMMON_LIBS="-lxkbcommon"
+export XKBREGISTRY_CFLAGS="-I/usr/include"
+export XKBREGISTRY_LIBS="-lxkbregistry"
 export WAYLAND_SCANNER="$(which wayland-scanner)"
 
 ./configure \
