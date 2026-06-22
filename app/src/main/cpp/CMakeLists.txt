@@ -167,6 +167,7 @@ if(EXISTS "${BIONIC_LIBS_DIR}/lib/libwayland-server.a"
     # waylandie-wayland-bridge.c — don't redefine them here.
     target_compile_definitions(waylandie_bridge PRIVATE
         WAYLANDIE_NO_XTEST
+        WAYLANDIE_HAS_AHARDWAREBUFFER
         _WAYLAND_SERVER_NOPLUGINS
     )
     target_compile_options(waylandie_bridge PRIVATE
@@ -191,8 +192,12 @@ if(EXISTS "${BIONIC_LIBS_DIR}/lib/libwayland-server.a"
         log
         m
         dl
+        android
         # NOTE: bionic libc has pthread built-in (no -lpthread needed).
         # Android does not ship libpthread.so / libpthread.a.
+        # 'android' is for AHardwareBuffer_allocate / AHardwareBuffer_lock /
+        # AHardwareBuffer_getNativeHandle — used by the SHM→AHardwareBuffer
+        # conversion path (makes Wine's explorer.exe / desktop visible).
     )
 
     # Strip in release for size (matches waylandie_display_native)

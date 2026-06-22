@@ -129,6 +129,36 @@ typedef struct {
 #include "relative-pointer-unstable-v1-server-protocol.h"
 #include "pointer-constraints-unstable-v1-server-protocol.h"
 
+// ----------------------------------------------------------------------
+// AHardwareBuffer support (bionic bridge only)
+//
+// When WAYLANDIE_HAS_AHARDWAREBUFFER is defined (set by CMake for the
+// bionic bridge build), we can convert SHM buffers (from Wine's
+// explorer.exe / desktop) to AHardwareBuffers, export their dmabuf fd,
+// and present them via the SAME zero-copy dmabuf path that game frames
+// use. This makes the Wine desktop visible.
+//
+// The cost is ONE CPU memcpy per desktop frame (XRGB8888 [B,G,R,X] →
+// R8G8B8A8 [R,G,B,A] with byte swap). This is negligible for desktop
+// UI (low FPS, mostly static). Game frames still use true zero-copy
+// dmabuf — no memcpy.
+// ----------------------------------------------------------------------
+#ifdef WAYLANDIE_HAS_AHARDWAREBUFFER
+#include <android/hardware_buffer.h>
+
+// AHardwareBuffer_getNativeHandle is a platform API (in libandroid.so
+// since API 26) but NOT exposed via NDK <android/hardware_buffer.h>.
+// Forward-declare it. Layout of native_handle_t is stable.
+struct waylandie_native_handle {
+    int version;
+    int numFds;
+    int numInts;
+    int data[];
+};
+extern const struct waylandie_native_handle* AHardwareBuffer_getNativeHandle(
+        const AHardwareBuffer* buffer);
+#endif
+
 #define RESPONSE_PREFIX "waylandie-bridge dmabuf-present "
 #define DEFAULT_ANDROID_VK_DRIVER "vulkan.waylandie.a8xx.so"
 #define MAX_FDS 16
@@ -909,6 +939,173 @@ static void close_android_window_for_surface(struct surface_state *surface) {
     surface->android_window_sent = 0;
 }
 
+// ----------------------------------------------------------------------
+// SHM → AHardwareBuffer conversion (bionic bridge only)
+//
+// Wine's explorer.exe / desktop renders into wl_shm buffers (CPU mmap'd
+// memory). Without this function, the bridge skips SHM buffers entirely
+// and the desktop is invisible.
+//
+// This function:
+//   1. Allocates an AHardwareBuffer (R8G8B8A8_UNORM, GPU_SAMPLED_IMAGE)
+//   2. CPU-memcpy's the SHM pixels into it (with byte swap XRGB→RGBA)
+//   3. Exports the AHardwareBuffer's dmabuf fd
+//   4. Returns a temporary shm_buffer_state (kind=DMABUF) the caller
+//      can pass to present_buffer_to_android()
+//
+// The caller MUST release the AHardwareBuffer and close the dmabuf fd
+// after present_buffer_to_android() returns (via shm_ahb_release()).
+//
+// Cost: ONE CPU memcpy per desktop frame. Negligible for low-FPS static
+// UI. Game frames use true zero-copy dmabuf (no conversion needed).
+// ----------------------------------------------------------------------
+#ifdef WAYLANDIE_HAS_AHARDWAREBUFFER
+struct shm_ahb_handle {
+    AHardwareBuffer* ahb;
+    int dmabuf_fd;
+    struct shm_buffer_state temp_buffer;  // kind=DMABUF, ready to present
+};
+
+static int shm_to_ahb(struct shm_buffer_state *shm, int frame_index,
+                       struct shm_ahb_handle *out) {
+    out->ahb = NULL;
+    out->dmabuf_fd = -1;
+    memset(&out->temp_buffer, 0, sizeof(out->temp_buffer));
+
+    if (shm == NULL || shm->kind != BUFFER_KIND_SHM) return -1;
+    if (shm->pool == NULL || shm->pool->data == NULL
+            || shm->pool->data == MAP_FAILED) {
+        printf("wayland-shm-ahb frame=%d status=fail reason=shm-no-pool\n", frame_index);
+        return -1;
+    }
+    if (shm->width <= 0 || shm->height <= 0 || shm->stride <= 0) {
+        printf("wayland-shm-ahb frame=%d status=fail reason=shm-bad-dims %dx%d stride=%d\n",
+               frame_index, shm->width, shm->height, shm->stride);
+        return -1;
+    }
+    // Sanity-check the SHM pool is large enough for the offset + size
+    int64_t needed = (int64_t)shm->offset + (int64_t)shm->stride * shm->height;
+    if (needed > shm->pool->size) {
+        printf("wayland-shm-ahb frame=%d status=fail reason=shm-pool-overflow need=%lld have=%d\n",
+               frame_index, (long long)needed, shm->pool->size);
+        return -1;
+    }
+
+    // 1. Allocate AHardwareBuffer
+    AHardwareBuffer_Desc desc = {};
+    desc.width = (uint32_t)shm->width;
+    desc.height = (uint32_t)shm->height;
+    desc.layers = 1;
+    desc.format = AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM;
+    desc.usage = AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN
+               | AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE
+               | AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN;
+    desc.rfu0 = 0;
+    desc.rfu1 = 0;
+
+    int rc = AHardwareBuffer_allocate(&desc, &out->ahb);
+    if (rc != 0 || out->ahb == NULL) {
+        printf("wayland-shm-ahb frame=%d status=fail reason=ahb-alloc rc=%d errno=%d\n",
+               frame_index, rc, errno);
+        out->ahb = NULL;
+        return -1;
+    }
+
+    // 2. Lock for CPU write
+    void* dst = NULL;
+    rc = AHardwareBuffer_lock(out->ahb,
+                              AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN
+                              | AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN,
+                              -1, NULL, &dst);
+    if (rc != 0 || dst == NULL) {
+        printf("wayland-shm-ahb frame=%d status=fail reason=ahb-lock rc=%d\n",
+               frame_index, rc);
+        AHardwareBuffer_release(out->ahb);
+        out->ahb = NULL;
+        return -1;
+    }
+
+    // 3. Get AHB stride
+    AHardwareBuffer_Desc queried = {};
+    AHardwareBuffer_describe(out->ahb, &queried);
+    int dst_stride_px = queried.stride ? (int)queried.stride : shm->width;
+    size_t dst_stride_bytes = (size_t)dst_stride_px * 4;
+
+    // 4. Copy with byte swap:
+    //    SHM XRGB8888 in memory = [B, G, R, X] per pixel
+    //    AHB R8G8B8A8 in memory = [R, G, B, A] per pixel
+    //    We also handle ARGB8888 SHM (same layout but A instead of X).
+    uint8_t* src_base = (uint8_t*)shm->pool->data + shm->offset;
+    int src_stride_bytes = shm->stride;
+    for (int y = 0; y < shm->height; y++) {
+        const uint8_t* src_row = src_base + (size_t)y * src_stride_bytes;
+        uint8_t* dst_row = (uint8_t*)dst + (size_t)y * dst_stride_bytes;
+        for (int x = 0; x < shm->width; x++) {
+            uint8_t b = src_row[x * 4 + 0];
+            uint8_t g = src_row[x * 4 + 1];
+            uint8_t r = src_row[x * 4 + 2];
+            // byte 3 is X (unused) or A — force opaque for the desktop
+            dst_row[x * 4 + 0] = r;
+            dst_row[x * 4 + 1] = g;
+            dst_row[x * 4 + 2] = b;
+            dst_row[x * 4 + 3] = 0xFF;
+        }
+    }
+
+    AHardwareBuffer_unlock(out->ahb, NULL);
+
+    // 5. Get dmabuf fd
+    const struct waylandie_native_handle* h = AHardwareBuffer_getNativeHandle(out->ahb);
+    if (h == NULL || h->numFds < 1) {
+        printf("wayland-shm-ahb frame=%d status=fail reason=no-dmabuf-fd numFds=%d\n",
+               frame_index, h ? h->numFds : -1);
+        AHardwareBuffer_release(out->ahb);
+        out->ahb = NULL;
+        return -1;
+    }
+    out->dmabuf_fd = dup(h->data[0]);
+    if (out->dmabuf_fd < 0) {
+        printf("wayland-shm-ahb frame=%d status=fail reason=dup-fd errno=%d\n",
+               frame_index, errno);
+        AHardwareBuffer_release(out->ahb);
+        out->ahb = NULL;
+        return -1;
+    }
+
+    // 6. Build a temporary buffer_state that present_buffer_to_android can use
+    out->temp_buffer.kind = BUFFER_KIND_DMABUF;
+    out->temp_buffer.resource = shm->resource;  // so release events go to the right wl_buffer
+    out->temp_buffer.pool = NULL;
+    out->temp_buffer.offset = 0;
+    out->temp_buffer.width = shm->width;
+    out->temp_buffer.height = shm->height;
+    out->temp_buffer.stride = dst_stride_px * 4;  // stride in bytes (what dmabuf path expects)
+    // Use ABGR8888 — memory layout [R,G,B,A] matches our AHB R8G8B8A8.
+    // Java side maps ABGR8888 → VK_FORMAT_R8G8B8A8_UNORM (see waylandie_display_native.c).
+    out->temp_buffer.format = DRM_FORMAT_ABGR8888;
+    out->temp_buffer.flags = 0;
+    out->temp_buffer.modifier = DRM_FORMAT_MOD_LINEAR;
+    out->temp_buffer.dmabuf_fd = out->dmabuf_fd;
+
+    printf("wayland-shm-ahb frame=%d shm-to-ahb ok src_stride=%d dst_stride=%d "
+           "%dx%d fd=%d\n",
+           frame_index, src_stride_bytes, (int)dst_stride_bytes,
+           shm->width, shm->height, out->dmabuf_fd);
+    return 0;
+}
+
+static void shm_ahb_release(struct shm_ahb_handle *h) {
+    if (h->dmabuf_fd >= 0) {
+        close(h->dmabuf_fd);
+        h->dmabuf_fd = -1;
+    }
+    if (h->ahb != NULL) {
+        AHardwareBuffer_release(h->ahb);
+        h->ahb = NULL;
+    }
+}
+#endif  // WAYLANDIE_HAS_AHARDWAREBUFFER
+
 static int present_buffer_to_android(struct surface_state *surface, struct shm_buffer_state *buffer, int frame_index) {
     struct server_state *state = surface == NULL ? NULL : surface->server;
     char response[4096];
@@ -920,8 +1117,35 @@ static int present_buffer_to_android(struct surface_state *surface, struct shm_b
         printf("wayland-shm-ahb frame=%d status=fail reason=no-server\n", frame_index);
         return -1;
     }
+
+    // ----- SHM buffer path: convert to AHardwareBuffer, then present as dmabuf -----
+    // Wine's explorer.exe / desktop uses wl_shm buffers (CPU mmap'd memory).
+    // Without this conversion, the desktop would be invisible. We allocate
+    // an AHardwareBuffer, CPU-copy the SHM pixels into it (with byte swap),
+    // export its dmabuf fd, and present via the same zero-copy path as game
+    // frames. Cost: ONE CPU memcpy per desktop frame (negligible for low-FPS
+    // static UI). Game frames use true zero-copy dmabuf — no conversion.
+#ifdef WAYLANDIE_HAS_AHARDWAREBUFFER
+    struct shm_ahb_handle ahb_handle;
+    if (buffer != NULL && buffer->kind == BUFFER_KIND_SHM) {
+        if (shm_to_ahb(buffer, frame_index, &ahb_handle) != 0) {
+            return -1;  // shm_to_ahb already printed the failure reason
+        }
+        // Present the converted AHB as a dmabuf. We temporarily swap the
+        // buffer pointer so the rest of this function operates on the
+        // AHB-backed dmabuf state.
+        struct shm_buffer_state *orig_buffer = buffer;
+        buffer = &ahb_handle.temp_buffer;
+        int rc = present_buffer_to_android(surface, buffer, frame_index);
+        shm_ahb_release(&ahb_handle);
+        (void)orig_buffer;
+        return rc;
+    }
+#endif  // WAYLANDIE_HAS_AHARDWAREBUFFER
+
     if (buffer == NULL || buffer->kind != BUFFER_KIND_DMABUF || buffer->dmabuf_fd < 0) {
-        printf("wayland-shm-ahb frame=%d status=fail reason=not-dmabuf-zero-copy\n", frame_index);
+        printf("wayland-shm-ahb frame=%d status=fail reason=not-dmabuf-zero-copy kind=%d\n",
+               frame_index, buffer ? buffer->kind : -1);
         return -1;
     }
     if (buffer->width <= 0 || buffer->height <= 0 || buffer->stride <= 0 || buffer->offset < 0) {
@@ -3710,9 +3934,11 @@ static void surface_commit(struct wl_client *client, struct wl_resource *resourc
             if (ensure_android_window_for_surface(surface, presentable->pending_buffer) != 0
                     || present_buffer_to_android(surface, presentable->pending_buffer, frame_index) != 0) {
                 surface->server->present_failures++;
-                /* Don't abort on SHM buffer present failure — only dmabuf is supported.
-                 * SHM buffers (from Wine desktop/explorer) are skipped. Game buffers
-                 * (via DXVK/Vulkan) use dmabuf and will present correctly. */
+                /* SHM buffers (from Wine desktop/explorer) are now converted to
+                 * AHardwareBuffer and presented via the same dmabuf path as game
+                 * frames. If we get here, the conversion or present failed — log
+                 * it but don't abort the bridge. Game dmabuf buffers will still
+                 * present correctly. */
                 send_surface_presentation_feedback(presentable, 0);
                 present_failed = 1;
                 fflush(stdout);
@@ -3782,7 +4008,7 @@ static void surface_commit(struct wl_client *client, struct wl_resource *resourc
     if (ensure_android_window_for_surface(surface, buffer_to_present) != 0
             || present_buffer_to_android(surface, buffer_to_present, frame_index) != 0) {
         surface->server->present_failures++;
-        /* Don't abort on SHM buffer present failure — only dmabuf is supported. */
+        /* SHM present failure is non-fatal — see comment above. */
         send_surface_presentation_feedback(presentable, 0);
         present_failed = 1;
         fflush(stdout);
