@@ -160,10 +160,9 @@ struct server_state {
     int present_failures;
     int abort_requested;
     int clear_ahb_outside;
-// REMOVED: exit when client list empty — Wine has multiple processes
-//     int accept_client_complete;
-//     int client_seen;
-//     int completed_after_client_exit;
+    int accept_client_complete;
+    int client_seen;
+    int completed_after_client_exit;
     int android_windows;
     int next_window_id;
     double total_present_ms;
@@ -240,7 +239,7 @@ struct surface_state {
     int32_t current_width;
     int32_t current_height;
     int has_pending_attach;
-//     int commit_count;
+    int commit_count;
     int is_xdg_surface;
     int is_subsurface;
     struct surface_state *subsurface_parent;
@@ -3953,8 +3952,8 @@ int main(int argc, char **argv) {
     const char *socket_file = argv[3];
     double timeout_ms = atof(argv[4]);
     state.clear_ahb_outside = atoi(argv[5]) != 0;
-// REMOVED: exit when client list empty — Wine has multiple processes
-//     state.accept_client_complete = atoi(argv[6]) != 0;
+    int accept_client_complete;
+    state.accept_client_complete = atoi(argv[6]) != 0;
     state.output_width = argc > 7 ? atoi(argv[7]) : 2688;
     state.output_height = argc > 8 ? atoi(argv[8]) : 1216;
     if (state.target_commits <= 0) {
@@ -4033,7 +4032,7 @@ int main(int argc, char **argv) {
             state.target_commits,
             timeout_ms,
             state.clear_ahb_outside,
-// REMOVED: exit when client list empty — Wine has multiple processes
+    int accept_client_complete;
 //             state.accept_client_complete,
             state.bridge_reconnect_frames,
             state.pass_log_interval,
@@ -4065,7 +4064,7 @@ int main(int argc, char **argv) {
             /* no timeout — run until abort */ 1) {
         wl_event_loop_dispatch(loop, 20);
         wl_display_flush_clients(state.display);
-// REMOVED: exit when client list empty — Wine has multiple processes
+    int accept_client_complete;
 //         if (state.accept_client_complete
 //                 && state.client_seen
 //                 && state.commit_count > 0
