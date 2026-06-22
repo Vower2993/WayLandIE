@@ -215,18 +215,63 @@ cp "$BIONIC_LIBS/usr/local/lib/pkgconfig/xkbcommon.pc" "$BIONIC_LIBS/lib/pkgconf
 # We disabled xkbregistry because it requires libxml2 (not available for bionic).
 # Wine only uses xkbregistry for keyboard layout enumeration — not needed for
 # the wayland driver to function.
-echo "=== Creating stub libxkbregistry.a ==="
+echo "=== Creating stub xkbregistry header + library ==="
+
+# Stub header — provides the types and function declarations Wine expects
+mkdir -p "$BIONIC_LIBS/include/xkbcommon"
+cat > "$BIONIC_LIBS/include/xkbcommon/xkbregistry.h" << 'HDR'
+#ifndef _XKBREGISTRY_H_
+#define _XKBREGISTRY_H_
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+typedef struct rxkb_context rxkb_context;
+typedef struct rxkb_layout rxkb_layout;
+
+enum rxkb_context_flags {
+    RXKB_CONTEXT_NO_FLAGS = 0,
+    RXKB_CONTEXT_NO_DEFAULT_INCLUDES = 1
+};
+
+rxkb_context *rxkb_context_new(enum rxkb_context_flags flags);
+void rxkb_context_unref(rxkb_context *ctx);
+int rxkb_context_parse_default_ruleset(rxkb_context *ctx);
+
+rxkb_layout *rxkb_layout_first(rxkb_context *ctx);
+rxkb_layout *rxkb_layout_next(rxkb_layout *layout);
+const char *rxkb_layout_get_name(rxkb_layout *layout);
+const char *rxkb_layout_get_description(rxkb_layout *layout);
+const char *rxkb_layout_get_variant(rxkb_layout *layout);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* _XKBREGISTRY_H_ */
+HDR
+
+# Stub library — returns NULL/0 from all functions (keyboard layout enum won't work)
 cat > /tmp/xkbregistry_stub.c << 'STUBEOF'
-/* Stub implementations of xkbregistry API */
 #include <stddef.h>
 typedef struct rxkb_context rxkb_context;
-rxkb_context *rxkb_context_new(int flags) { return NULL; }
+typedef struct rxkb_layout rxkb_layout;
+enum rxkb_context_flags { RXKB_CONTEXT_NO_FLAGS = 0, RXKB_CONTEXT_NO_DEFAULT_INCLUDES = 1 };
+
+rxkb_context *rxkb_context_new(enum rxkb_context_flags flags) { return NULL; }
 void rxkb_context_unref(rxkb_context *ctx) {}
-int rxkb_context_parse_default_ruleset(rxkb_context *ctx, const char *path) { return 0; }
+int rxkb_context_parse_default_ruleset(rxkb_context *ctx) { return 0; }
+rxkb_layout *rxkb_layout_first(rxkb_context *ctx) { return NULL; }
+rxkb_layout *rxkb_layout_next(rxkb_layout *layout) { return NULL; }
+const char *rxkb_layout_get_name(rxkb_layout *layout) { return NULL; }
+const char *rxkb_layout_get_description(rxkb_layout *layout) { return NULL; }
+const char *rxkb_layout_get_variant(rxkb_layout *layout) { return NULL; }
 STUBEOF
 $CC -c -fPIC --sysroot=$SYSROOT -I$BIONIC_LIBS/include /tmp/xkbregistry_stub.c -o /tmp/xkbregistry_stub.o
 $AR rcs "$BIONIC_LIBS/lib/libxkbregistry.a" /tmp/xkbregistry_stub.o
-echo "Created: $(ls -la $BIONIC_LIBS/lib/libxkbregistry.a)"
+echo "Created header: $(ls -la $BIONIC_LIBS/include/xkbcommon/xkbregistry.h)"
+echo "Created lib: $(ls -la $BIONIC_LIBS/lib/libxkbregistry.a)"
 
 echo "=== bionic-libs after xkbcommon build ==="
 ls -la "$BIONIC_LIBS/lib/" | grep xkb
