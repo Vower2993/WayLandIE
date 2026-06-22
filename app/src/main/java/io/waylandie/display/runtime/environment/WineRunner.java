@@ -110,6 +110,14 @@ public final class WineRunner {
 
         // 1. Find Proton's Wine binary (validate on HOST)
         File protonDir = new File(context.getFilesDir(), "contents/proton/active");
+
+        // Install winewayland driver into proton tree (idempotent)
+        try {
+            WaylandDriverInstaller.install(context, protonDir);
+        } catch (Exception e) {
+            android.util.Log.w("WineRunner", "winewayland install failed: " + e.getMessage());
+        }
+
         if (!protonDir.exists()) {
             throw new IOException("Proton is not installed. Please go to the "
                     + "Settings tab and install Proton first.");
@@ -1187,7 +1195,7 @@ public final class WineRunner {
         File winePrefix = new File(homeDir, ".wine");
         if (!winePrefix.exists()) winePrefix.mkdirs();
         env.put("WINEPREFIX", winePrefix.getAbsolutePath());
-        env.put("WINEDLLOVERRIDES", "d3d9,d3d10core,d3d11,dxgi=native");
+        env.put("WINEDLLOVERRIDES", "d3d9,d3d10core,d3d11,dxgi=native,winex11.drv=d,winewayland.drv=b,native");
         // CRITICAL: Enable Wine debug channels for display driver + module loading.
         // This tells us EXACTLY which .drv files Wine tries to load and why they
         // fail. The output goes to Wine's stderr (captured by GameLaunchTracer).

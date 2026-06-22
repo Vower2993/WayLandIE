@@ -1,4 +1,4 @@
-package io.waylandie;
+package io.waylandie.display.runtime.environment;
 
 import android.content.Context;
 import android.util.Log;
