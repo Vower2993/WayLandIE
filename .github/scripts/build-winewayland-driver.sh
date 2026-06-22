@@ -57,70 +57,68 @@ mkdir -p "$BIONIC_LIBS/include/sys"
 cp -r sys/* "$BIONIC_LIBS/include/sys/" 2>/dev/null || true
 cp libandroid-sysvshm.so "$ROOTFS_OUT/usr/local/lib/"
 
-# Copy shm_utils.h (provides POSIX shm_open inline impl for Android)
 cp /tmp/proton-wine/android/shm_utils/shm_utils.h "$BIONIC_LIBS/include/shm_utils.h"
 cp /tmp/proton-wine/android/shm_utils/shm_utils.h /tmp/proton-wine/include/
 
-echo "=== [4b/9] Write pkg-config files with proper transitive deps ==="
+echo "=== [4b/9] Write pkg-config files ==="
 mkdir -p "$BIONIC_LIBS/lib/pkgconfig"
 
-# wayland-client.pc — include libffi as transitive dep
-cat > "$BIONIC_LIBS/lib/pkgconfig/wayland-client.pc" << EOF
-prefix=$BIONIC_LIBS
-exec_prefix=\${prefix}
-libdir=\${exec_prefix}/lib
-includedir=\${prefix}/include
+PC_WAYLAND_CLIENT='prefix=BIONIC_LIBS_PLACEHOLDER
+exec_prefix=${prefix}
+libdir=${exec_prefix}/lib
+includedir=${prefix}/include
 
 Name: wayland-client
 Description: Wayland client bionic lib (for Android cross-build)
 Version: 1.20.0
-Libs: -L\${libdir} -lwayland-client -lffi -landroid-sysvshm
-Cflags: -I\${includedir} -D__ANDROID__ -DHAVE_SHM_UTILS
-EOF
+Libs: -L${libdir} -lwayland-client -lffi -landroid-sysvshm
+Cflags: -I${includedir} -D__ANDROID__ -DHAVE_SHM_UTILS
+'
+PC_WAYLAND_CLIENT="${PC_WAYLAND_CLIENT//BIONIC_LIBS_PLACEHOLDER/$BIONIC_LIBS}"
+printf '%s' "$PC_WAYLAND_CLIENT" > "$BIONIC_LIBS/lib/pkgconfig/wayland-client.pc"
 
-cat > "$BIONIC_LIBS/lib/pkgconfig/wayland-server.pc" << EOF
-prefix=$BIONIC_LIBS
-exec_prefix=\${prefix}
-libdir=\${exec_prefix}/lib
-includedir=\${prefix}/include
+PC_WAYLAND_SERVER='prefix=BIONIC_LIBS_PLACEHOLDER
+exec_prefix=${prefix}
+libdir=${exec_prefix}/lib
+includedir=${prefix}/include
 
 Name: wayland-server
 Description: Wayland server bionic lib (for Android cross-build)
 Version: 1.20.0
-Libs: -L\${libdir} -lwayland-server -lffi -landroid-sysvshm
-Cflags: -I\${includedir} -D__ANDROID__ -DHAVE_SHM_UTILS
-EOF
+Libs: -L${libdir} -lwayland-server -lffi -landroid-sysvshm
+Cflags: -I${includedir} -D__ANDROID__ -DHAVE_SHM_UTILS
+'
+PC_WAYLAND_SERVER="${PC_WAYLAND_SERVER//BIONIC_LIBS_PLACEHOLDER/$BIONIC_LIBS}"
+printf '%s' "$PC_WAYLAND_SERVER" > "$BIONIC_LIBS/lib/pkgconfig/wayland-server.pc"
 
-# wayland-scanner.pc — point at system binary
-cat > "$BIONIC_LIBS/lib/pkgconfig/wayland-scanner.pc" << EOF
-prefix=/usr
-exec_prefix=\${prefix}
-bindir=\${exec_prefix}/bin
+PC_SCANNER='prefix=/usr
+exec_prefix=${prefix}
+bindir=${exec_prefix}/bin
 
 Name: wayland-scanner
 Description: Wayland scanner (system binary)
 Version: 1.20.0
-wayland_scanner=\${bindir}/wayland-scanner
-EOF
+wayland_scanner=${bindir}/wayland-scanner
+'
+printf '%s' "$PC_SCANNER" > "$BIONIC_LIBS/lib/pkgconfig/wayland-scanner.pc"
 
-# xkbcommon.pc
-cat > "$BIONIC_LIBS/lib/pkgconfig/xkbcommon.pc" << EOF
-prefix=$BIONIC_LIBS
-exec_prefix=\${prefix}
-libdir=\${exec_prefix}/lib
-includedir=\${prefix}/include
+PC_XKBCOMMON='prefix=BIONIC_LIBS_PLACEHOLDER
+exec_prefix=${prefix}
+libdir=${exec_prefix}/lib
+includedir=${prefix}/include
 
 Name: xkbcommon
 Description: XKB common bionic lib (for Android cross-build)
 Version: 1.4.0
-Libs: -L\${libdir} -lxkbcommon
-Cflags: -I\${includedir}
-EOF
+Libs: -L${libdir} -lxkbcommon
+Cflags: -I${includedir}
+'
+PC_XKBCOMMON="${PC_XKBCOMMON//BIONIC_LIBS_PLACEHOLDER/$BIONIC_LIBS}"
+printf '%s' "$PC_XKBCOMMON" > "$BIONIC_LIBS/lib/pkgconfig/xkbcommon.pc"
 
 echo "=== written .pc files ==="
 ls -la "$BIONIC_LIBS/lib/pkgconfig/"
 
-# Verify pkg-config works (with transitive deps)
 export PKG_CONFIG_PATH="$BIONIC_LIBS/lib/pkgconfig"
 export PKG_CONFIG_LIBDIR="$BIONIC_LIBS/lib/pkgconfig"
 unset PKG_CONFIG_SYSROOT_DIR
@@ -129,15 +127,6 @@ echo "=== pkg-config check ==="
 pkg-config --cflags --libs wayland-client
 pkg-config --cflags --libs xkbcommon
 pkg-config --variable=wayland_scanner wayland-scanner
-
-# Verify the lib actually links by trying a tiny test program
-echo "=== link test: wl_display_connect ==="
-echo 'extern void wl_display_connect(int); int main(void){wl_display_connect(0);return 0;}' > /tmp/wltest.c
- $CC $CFLAGS -c /tmp/wltest.c -o /tmp/wltest.o 2>&1 || echo "compile failed"
- $CC $LDFLAGS /tmp/wltest.o -o /tmp/wltest \
-  -L$BIONIC_LIBS/lib -lwayland-client -lffi -landroid-sysvshm 2>&1 | head -20 || \
-  echo "  link failed (expected — wl_display_connect signature is wrong, just testing lib loads)"
-rm -f /tmp/wltest /tmp/wltest.c /tmp/wltest.o
 
 echo "=== [5/9] Apply GameNative patches (common + arm64ec) ==="
 cd /tmp/proton-wine
@@ -153,7 +142,7 @@ apply_patches() {
       count=$((count+1))
     else
       failed=$((failed+1))
-      echo "  ⚠ failed: $(basename "$p")"
+      echo "  WARN failed: $(basename "$p")"
     fi
   done
   echo "  Applied $count, failed $failed from $dir"
@@ -191,13 +180,10 @@ export PKG_CONFIG_PATH="$BIONIC_LIBS/lib/pkgconfig"
 export PKG_CONFIG_LIBDIR="$BIONIC_LIBS/lib/pkgconfig"
 unset PKG_CONFIG_SYSROOT_DIR
 
-# CRITICAL: pre-seed configure cache so it doesn't try to link-test wayland-client
-# (the static lib needs -lffi transitively, which the autoconf test doesn't add)
 export ac_cv_lib_wayland_client_wl_display_connect=yes
 export ac_cv_lib_wayland_server_wl_display_init_shm=yes
 export ac_cv_header_wayland_client_h=yes
 export ac_cv_prog_wayland_scanner=$(which wayland-scanner)
-# shm_open is provided by shm_utils.h inline impl
 export ac_cv_func_shm_open=yes
 export ac_cv_search_shm_open="none required"
 
@@ -217,7 +203,6 @@ echo "=== configure Wayland vars ==="
 grep -E "^(WAYLAND|XKB)" /tmp/proton-wine/config.status | head -20 || true
 
 echo "=== [8/9] Build winewayland targets ==="
-# Force the makefile to use our flags
 make -j$(nproc) dlls/winewayland.drv 2>&1 | tail -80 || true
 
 echo "=== Searching for built artifacts ==="
@@ -252,7 +237,7 @@ echo "winewayland.drv: $DRV_SIZE bytes"
 echo "winewayland.so: $SO_SIZE bytes"
 
 if [ "$DRV_SIZE" -lt 5000 ]; then
-  echo "✗ FATAL: winewayland.drv missing or too small"
+  echo "FATAL: winewayland.drv missing or too small"
   echo "=== dlls/winewayland.drv/ contents ==="
   ls -la /tmp/proton-wine/dlls/winewayland.drv/ 2>/dev/null || true
   echo "=== Full Wayland detection from config.log ==="
@@ -267,4 +252,4 @@ mkdir -p "$WORKSPACE/app/src/main/assets"
 rm -f "$WORKSPACE/app/src/main/assets/winewayland-driver.zip"
 zip -r "$WORKSPACE/app/src/main/assets/winewayland-driver.zip" proton/ rootfs/
 ls -la "$WORKSPACE/app/src/main/assets/winewayland-driver.zip"
-echo "✓ winewayland-driver.zip built"
+echo "winewayland-driver.zip built"
