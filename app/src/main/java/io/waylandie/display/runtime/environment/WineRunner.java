@@ -872,16 +872,16 @@ public final class WineRunner {
         // =================================================================
         // CRITICAL: Force Wine to use the Wayland display driver.
         // =================================================================
-        // Fix 1: Set Graphics=wayland in BOTH system.reg AND user.reg.
+        // Fix 1: Set Graphics=winewayland in BOTH system.reg AND user.reg.
         // Wine checks HKEY_CURRENT_USER first (user.reg), then
         // HKEY_LOCAL_MACHINE (system.reg). We set both to be safe.
         // The registry key is:
         //   [HKEY_CURRENT_USER\\Software\\Wine\\Drivers]
-        //   "Graphics"="wayland"
+        //   "Graphics"="winewayland"
         try {
             File winePrefixDir = new File(rootDir, "home/xuser/.wine");
             String driversKey = "[HKEY_CURRENT_USER\\\\Software\\\\Wine\\\\Drivers]";
-            String graphicsValue = "\"Graphics\"=\"wayland\"";
+            String graphicsValue = "\"Graphics\"=\"winewayland\"";
             // Write to BOTH system.reg AND user.reg
             for (String regFileName : new String[]{"system.reg", "user.reg"}) {
                 File regFile = new File(winePrefixDir, regFileName);
@@ -900,15 +900,15 @@ public final class WineRunner {
                         regContent = regContent + "\n" + driversKey + "]\n" + graphicsValue + "\n";
                     }
                     java.nio.file.Files.write(regFile.toPath(), regContent.getBytes());
-                    Log.i(TAG, "Set " + regFileName + ": Graphics=wayland");
-                    preLaunchDiagnostics.append("[diag] Registry " + regFileName + ": Graphics=wayland SET\n");
+                    Log.i(TAG, "Set " + regFileName + ": Graphics=winewayland");
+                    preLaunchDiagnostics.append("[diag] Registry " + regFileName + ": Graphics=winewayland SET\n");
                 } else {
-                    Log.i(TAG, regFileName + " already has Graphics=wayland");
+                    Log.i(TAG, regFileName + " already has Graphics=winewayland");
                     preLaunchDiagnostics.append("[diag] Registry " + regFileName + ": already set\n");
                 }
             }
         } catch (Exception e) {
-            Log.w(TAG, "Failed to set Graphics=wayland: " + e.getMessage());
+            Log.w(TAG, "Failed to set Graphics=winewayland: " + e.getMessage());
             preLaunchDiagnostics.append("[diag] Registry FAILED: " + e.getMessage() + "\n");
         }
 
