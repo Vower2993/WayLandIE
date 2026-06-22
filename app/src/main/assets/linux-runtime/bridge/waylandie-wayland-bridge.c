@@ -1535,12 +1535,14 @@ static void bind_output(struct wl_client *client, void *data, uint32_t version, 
     }
     uint32_t bind_version = version > 4 ? 4 : version;
     struct wl_resource *resource = wl_resource_create(client, &wl_output_interface, bind_version, id);
+    __android_log_print(ANDROID_LOG_INFO, "WayLandIE/Bridge", "bind_output: client=%p version=%u id=%u, output %dx%d", client, version, id, width, height);
     if (resource == NULL) {
         wl_client_post_no_memory(client);
         return;
     }
     wl_resource_set_implementation(resource, &output_impl, NULL, NULL);
     wl_output_send_geometry(
+    __android_log_print(ANDROID_LOG_INFO, "WayLandIE/Bridge", "Sent wl_output_send_geometry %dx%d", width, height);
             resource,
             0,
             0,
@@ -1551,6 +1553,7 @@ static void bind_output(struct wl_client *client, void *data, uint32_t version, 
             "Android SurfaceControl",
             WL_OUTPUT_TRANSFORM_NORMAL);
     wl_output_send_mode(
+    __android_log_print(ANDROID_LOG_INFO, "WayLandIE/Bridge", "Sent wl_output_send_mode %dx%d @ %d", width, height, refresh_millihz);
             resource,
             WL_OUTPUT_MODE_CURRENT | WL_OUTPUT_MODE_PREFERRED,
             width,
@@ -1565,6 +1568,7 @@ static void bind_output(struct wl_client *client, void *data, uint32_t version, 
             wl_output_send_scale(resource, 1);
         }
         wl_output_send_done(resource);
+    __android_log_print(ANDROID_LOG_INFO, "WayLandIE/Bridge", "Sent wl_output_send_done (version=%d)", bind_version);
     }
 }
 

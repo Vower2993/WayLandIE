@@ -1225,7 +1225,7 @@ public final class WineRunner {
         // CRITICAL: Enable Wine debug channels for display driver + module loading.
         // This tells us EXACTLY which .drv files Wine tries to load and why they
         // fail. The output goes to Wine's stderr (captured by GameLaunchTracer).
-        env.put("WINEDEBUG", "+module,+display,+driver");
+        env.put("WINEDEBUG", "+module,+display,+driver,+sysparams,+waylanddrv");
         env.put("DXVK_STATE_CACHE_PATH", new File(homeDir, ".dxvk-cache").getAbsolutePath());
         env.put("MESA_VK_WSI_PRESENT_MODE", "immediate");
         // Winlator-inspired env vars — Wine needs these for proper operation
