@@ -392,6 +392,17 @@ for patch in "${PATCHES[@]}"; do
 done
 echo "  Applied $count, failed $failed patches"
 
+# Regenerate server_protocol.h after patches modified server/protocol.def.
+# autogen.sh ran BEFORE patches, so the generated header is stale.
+# tools/make_requests reads protocol.def and generates:
+#   include/wine/server_protocol.h (defines enum esync_type for esync.c)
+#   server/request_trace.h
+#   server/request_handlers.h
+cd /tmp/proton-wine
+perl tools/make_requests 2>&1 | tail -3
+echo "=== server_protocol.h regenerated ==="
+grep -c "ESYNC_" include/wine/server_protocol.h 2>/dev/null && echo "ESYNC types found" || echo "WARNING: ESYNC types not found!"
+
 echo "=== [6/9] Stage A: Native x86_64 tools build ==="
 mkdir -p /tmp/proton-wine-tools-build
 cd /tmp/proton-wine-tools-build
