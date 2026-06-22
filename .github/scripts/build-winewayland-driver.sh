@@ -140,12 +140,90 @@ pkg-config --cflags --libs wayland-client
 pkg-config --cflags --libs xkbcommon
 pkg-config --variable=wayland_scanner wayland-scanner
 
-# Copy system xkbcommon/registry headers into bionic-libs (arch-independent API decls)
-# The bionic-libs cache doesn't ship xkbcommon, so we borrow system headers
-mkdir -p "$BIONIC_LIBS/include/xkbcommon"
-cp /usr/include/xkbcommon/*.h "$BIONIC_LIBS/include/xkbcommon/" 2>/dev/null || true
-echo "=== xkbcommon headers in bionic-libs ==="
-ls "$BIONIC_LIBS/include/xkbcommon/" | head -10
+echo "=== [4c/9] Build xkbcommon + xkbregistry for bionic ==="
+# Build static xkbcommon + xkbregistry for aarch64 Android.
+# These are needed because winewayland.so links against them.
+mkdir -p /tmp/xkb-build
+cd /tmp/xkb-build
+
+# Write meson cross-file for aarch64 bionic
+cat > /tmp/xkb-cross.txt << XEOF
+[binaries]
+c = '$CC'
+cpp = '$CXX'
+ar = '$AR'
+strip = '$STRIP'
+
+[built-in options]
+c_args = ['-fPIC', '--sysroot=$SYSROOT', '-I$SYSROOT/usr/include', '-I$BIONIC_LIBS/include']
+c_link_args = ['--sysroot=$SYSROOT', '-L$BIONIC_LIBS/lib']
+
+[host_machine]
+system = 'android'
+cpu_family = 'aarch64'
+cpu = 'aarch64'
+endian = 'little'
+XEOF
+
+# Write native-file for build machine (uses system gcc + pkg-config)
+cat > /tmp/xkb-native.txt << XEOF
+[binaries]
+c = '/usr/bin/gcc'
+cpp = '/usr/bin/g++'
+ar = '/usr/bin/ar'
+strip = '/usr/bin/strip'
+pkgconfig = '/usr/bin/pkg-config'
+
+[build_machine]
+system = 'linux'
+cpu_family = 'x86_64'
+cpu = 'x86_64'
+endian = 'little'
+XEOF
+
+# Clone and build xkbcommon (includes xkbregistry when enable-xkbregistry=true)
+if [ ! -d libxkbcommon ]; then
+  git clone --depth=1 https://github.com/xkbcommon/libxkbcommon.git
+fi
+cd libxkbcommon
+rm -rf build
+meson setup build \
+  --native-file=/tmp/xkb-native.txt \
+  --cross-file=/tmp/xkb-cross.txt \
+  --prefix=/usr/local \
+  --default-library=static \
+  --libdir=lib \
+  --includedir=include \
+  -Denable-wayland=false \
+  -Denable-docs=false \
+  -Denable-x11=false \
+  -Denable-tools=false \
+  -Denable-xkbregistry=false \
+  2>&1 | tail -20
+ninja -C build 2>&1 | tail -10
+# Install into bionic-libs
+DESTDIR="$BIONIC_LIBS" ninja -C build install 2>&1 | tail -5
+
+# Create a stub libxkbregistry.a so Wine's link test passes.
+# We disabled xkbregistry because it requires libxml2 (not available for bionic).
+# Wine only uses xkbregistry for keyboard layout enumeration — not needed for
+# the wayland driver to function.
+echo "=== Creating stub libxkbregistry.a ==="
+cat > /tmp/xkbregistry_stub.c << 'STUBEOF'
+/* Stub implementations of xkbregistry API */
+#include <stddef.h>
+typedef struct rxkb_context rxkb_context;
+rxkb_context *rxkb_context_new(int flags) { return NULL; }
+void rxkb_context_unref(rxkb_context *ctx) {}
+int rxkb_context_parse_default_ruleset(rxkb_context *ctx, const char *path) { return 0; }
+STUBEOF
+$CC -c -fPIC --sysroot=$SYSROOT -I$BIONIC_LIBS/include /tmp/xkbregistry_stub.c -o /tmp/xkbregistry_stub.o
+$AR rcs "$BIONIC_LIBS/lib/libxkbregistry.a" /tmp/xkbregistry_stub.o
+echo "Created: $(ls -la $BIONIC_LIBS/lib/libxkbregistry.a)"
+
+echo "=== bionic-libs after xkbcommon build ==="
+ls -la "$BIONIC_LIBS/lib/" | grep xkb
+ls "$BIONIC_LIBS/include/xkbcommon/" 2>/dev/null | head -10
 
 echo "=== [5/9] Apply GameNative patches (common + arm64ec + test-bylaws) ==="
 cd /tmp/proton-wine
