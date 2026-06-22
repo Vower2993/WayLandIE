@@ -492,11 +492,18 @@ export WAYLAND_SCANNER="$(which wayland-scanner)"
 export ac_cv_lib_soname_vulkan=libvulkan.so
 export ac_cv_lib_vulkan_vkGetInstanceProcAddr=yes
 
+# Pre-seed EGL soname cache so framebuffer_surface functions are compiled
+# (win32u/opengl.c uses them outside #ifdef SONAME_LIBEGL — without EGL
+# defined, needs_framebuffer_surface and framebuffer_surface_funcs are
+# undeclared → compile error). Android has libEGL.so as a system library.
+export ac_cv_lib_soname_EGL=libEGL.so
+export ac_cv_lib_EGL_eglGetProcAddress=yes
+
 ./configure \
   --host=aarch64-linux-android \
   --prefix=/usr/local \
   --with-wine-tools=/tmp/proton-wine-tools-build \
-  --without-x --without-opengl \
+  --without-x \
   --without-alsa --without-oss --without-pulse --without-cups \
   --without-sane --without-usb --without-sdl --without-gstreamer \
   --without-freetype --without-fontconfig --without-v4l2 \
