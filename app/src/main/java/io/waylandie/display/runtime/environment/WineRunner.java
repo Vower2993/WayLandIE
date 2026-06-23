@@ -132,6 +132,16 @@ public final class WineRunner {
         File rootDir = imageFs.getRootDir();
         String nativeLibDir = context.getApplicationInfo().nativeLibraryDir;
 
+        // =================================================================
+        // STALE PROCESS + LOCKFILE CLEANUP
+        // =================================================================
+        // Kill any previous Wine/bridge processes and remove stale Wayland
+        // socket lockfiles. Without this, the bridge can't create wayland-0
+        // (locked by old process), falls back to wayland-1, and Wine may
+        // connect to the wrong bridge. This was the root cause of "only 1
+        // frame displayed" and "refused to come up on consequent trials".
+        cleanupStaleProcesses(rootDir);
+
         // 1. Find Proton's Wine binary (validate on HOST)
         File protonDir = new File(context.getFilesDir(), "contents/proton/active");
 
@@ -1543,6 +1553,98 @@ public final class WineRunner {
         env.put("WAYLANDIE_BRIDGE_PORT", "57391");
         env.put("WAYLANDIE_BRIDGE_PREFER", "abstract");
         env.put("WAYLANDIE_FINAL_COPY", "forbidden");
+    }
+
+    /**
+     * Kills stale Wine/bridge processes and removes stale Wayland lockfiles
+     * from previous launches. This MUST be called before starting a new
+     * Wine+bridge session.
+     *
+     * <p>Without this, the bridge can't create the wayland-0 socket (locked
+     * by an old process), falls back to wayland-1, and Wine may connect to
+     * the wrong (stale) bridge — resulting in "only 1 frame displayed" or
+     * "refused to come up on consequent trials".
+     *
+     * <p>Cleanup steps:
+     * <ol>
+     *   <li>Kill the previous Wine process (if still alive)</li>
+     *   <li>Remove wayland-*.lock files from XDG_RUNTIME_DIR</li>
+     *   <li>Remove wayland-* socket files from XDG_RUNTIME_DIR</li>
+     *   <li>Log all actions for diagnostics</li>
+     * </ol>
+     */
+    private void cleanupStaleProcesses(File rootDir) {
+        Log.i(TAG, "=== Stale process cleanup ===");
+        installerDiagnostics.append("[cleanup] Stale process cleanup starting\n");
+
+        // 1. Kill previous Wine process (tracked in HomeActivity)
+        // We can't directly access HomeActivity's runningWineProcess here,
+        // but we can kill any process running "wine" or "waylandie-wayland-bridge"
+        // via Android's ActivityManager (requires no special permissions for
+        // same-app processes).
+        try {
+            // Kill processes by name using Android's process killer.
+            // On Android, we can only kill our own app's processes.
+            // The Process.destroyForcibly() in HomeActivity.onDestroy should
+            // handle this, but if the activity was recreated (not destroyed),
+            // the old process may still be alive.
+            android.app.ActivityManager am = (android.app.ActivityManager)
+                    context.getSystemService(Context.ACTIVITY_SERVICE);
+            if (am != null) {
+                for (android.app.ActivityManager.RunningAppProcessInfo proc :
+                        am.getRunningAppProcesses()) {
+                    String name = proc.processName;
+                    if (name != null && (name.contains("wine") ||
+                            name.contains("waylandie") ||
+                            name.contains("bridge"))) {
+                        // Don't kill ourselves
+                        if (proc.pid == android.os.Process.myPid()) continue;
+                        Log.i(TAG, "[cleanup] Killing stale process: " + name +
+                              " (pid=" + proc.pid + ")");
+                        installerDiagnostics.append("[cleanup] Killing stale process: ")
+                            .append(name).append(" (pid=").append(proc.pid).append(")\n");
+                        android.os.Process.killProcess(proc.pid);
+                    }
+                }
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "[cleanup] Process kill failed: " + e.getMessage());
+            installerDiagnostics.append("[cleanup] Process kill failed: ")
+                .append(e.getMessage()).append('\n');
+        }
+
+        // 2. Remove stale Wayland lockfiles + sockets
+        File runtimeDir = new File(new File(rootDir, "usr/tmp"), "runtime");
+        if (runtimeDir.isDirectory()) {
+            File[] files = runtimeDir.listFiles();
+            if (files != null) {
+                for (File f : files) {
+                    String name = f.getName();
+                    if (name.startsWith("wayland-") &&
+                            (name.endsWith(".lock") || !name.contains("."))) {
+                        // Remove wayland-0, wayland-1, wayland-0.lock, etc.
+                        Log.i(TAG, "[cleanup] Removing stale: " + f.getAbsolutePath());
+                        installerDiagnostics.append("[cleanup] Removing: ")
+                            .append(f.getName()).append('\n');
+                        f.delete();
+                    }
+                }
+            }
+        }
+
+        // 3. Remove stale socket-name.txt (forces bridge to create fresh)
+        File socketNameFile = new File(runtimeDir, "socket-name.txt");
+        if (socketNameFile.exists()) {
+            Log.i(TAG, "[cleanup] Removing stale socket-name.txt");
+            installerDiagnostics.append("[cleanup] Removing socket-name.txt\n");
+            socketNameFile.delete();
+        }
+
+        // Give the OS a moment to release resources after killing processes
+        try { Thread.sleep(500); } catch (InterruptedException ignored) {}
+
+        Log.i(TAG, "=== Stale process cleanup complete ===");
+        installerDiagnostics.append("[cleanup] Complete\n");
     }
 
     private void syncAdrenotoolsDriverToRootfs(String driverSoHostPath) {
