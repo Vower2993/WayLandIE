@@ -40,6 +40,7 @@
         android:roundIcon="@drawable/ic_bridge"
         android:supportsRtl="true"
         android:theme="@style/AppTheme"
+        android:extractNativeLibs="true"
         android:requestLegacyExternalStorage="false">
 
         <!-- Launcher entry point: first-run environment extractor.

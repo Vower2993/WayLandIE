@@ -258,6 +258,17 @@ jobs:
             cp src/hook/libgsl_alloc_hook.so "$JNILIBS/"
             cp src/hook/libmain_hook.so "$JNILIBS/"
             echo "  ✓ Built libadrenotools.so ($(stat -c%s "$JNILIBS/libadrenotools.so") bytes)"
+
+            # Also copy libc++_shared.so (libadrenotools.so + libhook_impl.so
+            # depend on it — without it, dlopen fails with
+            # "library libc++_shared.so not found")
+            NDK_LIBCXX="$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so"
+            if [ -f "$NDK_LIBCXX" ]; then
+              cp "$NDK_LIBCXX" "$JNILIBS/"
+              echo "  ✓ Copied libc++_shared.so ($(stat -c%s "$JNILIBS/libc++_shared.so") bytes)"
+            else
+              echo "  ⚠ WARNING: libc++_shared.so not found at $NDK_LIBCXX"
+            fi
           fi
 
           # Verify the .so is NOT 0 bytes (that would break dmabuf display)
@@ -267,6 +278,15 @@ jobs:
             exit 1
           fi
           echo "  ✓ libadrenotools.so is $FINAL_SIZE bytes"
+
+          # Verify libc++_shared.so is present (needed by libadrenotools.so)
+          LIBCXX_FILE="app/src/main/jniLibs/arm64-v8a/libc++_shared.so"
+          LIBCXX_SIZE=$(stat -c%s "$LIBCXX_FILE" 2>/dev/null || echo 0)
+          if [ "$LIBCXX_SIZE" -lt 10000 ]; then
+            echo "  ⚠ WARNING: libc++_shared.so is only $LIBCXX_SIZE bytes — adrenotools dlopen may fail"
+          else
+            echo "  ✓ libc++_shared.so is $LIBCXX_SIZE bytes"
+          fi
 
       # -----------------------------------------------------------------
       # Android SDK setup
@@ -382,6 +402,10 @@ jobs:
           echo
           echo "libadrenotools.so:"
           ls -la app/src/main/jniLibs/arm64-v8a/libadrenotools.so
+          echo "libc++_shared.so:"
+          ls -la app/src/main/jniLibs/arm64-v8a/libc++_shared.so
+          echo "libhook_impl.so:"
+          ls -la app/src/main/jniLibs/arm64-v8a/libhook_impl.so
           echo
           echo "Java sources:"
           find app/src/main/java/io/waylandie -name "*.java" | wc -l
