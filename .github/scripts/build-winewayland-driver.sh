@@ -455,13 +455,14 @@ export PKG_CONFIG_PATH="$BIONIC_LIBS/lib/pkgconfig:$FT_DIR/lib/pkgconfig"
 export PKG_CONFIG_LIBDIR="$BIONIC_LIBS/lib/pkgconfig:$FT_DIR/lib/pkgconfig"
 unset PKG_CONFIG_SYSROOT_DIR
 
-# FreeType cache vars (cross-compile can't run link test)
-export ac_cv_lib_freetype_FT_Init_FreeType=yes
+# FreeType: Wine uses WINE_CHECK_SONAME (not AC_CHECK_LIB) which tries to
+# dlopen the .so at runtime. In cross-compile, it can't run the binary, so
+# it checks the cache var ac_cv_lib_soname_freetype. Set it to the .so path.
+export ac_cv_lib_soname_freetype=libfreetype.so
 export ac_cv_header_ft2build_h=yes
 export FREETYPE_CFLAGS="-I$FT_DIR/include/freetype2"
 export FREETYPE_LIBS="-L$FT_DIR/lib -lfreetype"
-# Create a .so symlink to the .a so -lfreetype finds it
-# (bionic's linker needs either a .so or .a in the -L path)
+# Create a .so symlink to the .a so WINE_CHECK_SONAME finds it
 ln -sf libfreetype.a "$FT_DIR/lib/libfreetype.so" 2>/dev/null || true
 
 # Pre-seed all the link-test cache vars (avoid the broken pkg-config path in configure.ac)
