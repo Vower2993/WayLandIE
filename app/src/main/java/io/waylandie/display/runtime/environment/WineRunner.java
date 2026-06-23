@@ -1551,7 +1551,7 @@ public final class WineRunner {
         File winePrefix = new File(homeDir, ".wine");
         if (!winePrefix.exists()) winePrefix.mkdirs();
         env.put("WINEPREFIX", winePrefix.getAbsolutePath());
-        env.put("WINEDLLOVERRIDES", "d3d9,d3d10core,d3d11,dxgi=native;winex11.drv=d;winewayland.drv=b,native");
+        env.put("WINEDLLOVERRIDES", "d3d9,d3d10core,d3d11,dxgi=native;winex11.drv=d;winewayland.drv=b,native;mscoree=d;mshtml=d");
         // CRITICAL: Enable Wine debug channels for display driver + module loading.
         // This tells us EXACTLY which .drv files Wine tries to load and why they
         // fail. The output goes to Wine's stderr (captured by GameLaunchTracer).

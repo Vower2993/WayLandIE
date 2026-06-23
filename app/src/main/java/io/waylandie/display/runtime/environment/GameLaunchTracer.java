@@ -569,4 +569,30 @@ public final class GameLaunchTracer {
             Log.e(TAG, "Failed to write trace file: " + e.getMessage());
         }
     }
+
+    /**
+     * Force-writes the trace file immediately. Called from HomeActivity.onDestroy()
+     * when the user swipes back before the monitoring window ends. This ensures
+     * we capture whatever bridge/Wine output has been collected so far.
+     */
+    public void forceWriteTrace() {
+        Log.i(TAG, "forceWriteTrace() called — writing trace with current data");
+        // Append final state marker
+        log("");
+        logSection("FORCE-WRITTEN TRACE (activity destroyed)");
+        log("Wine alive: " + (wineProcess != null && wineProcess.isAlive()));
+        log("");
+        // Dump bridge output (may be partial if monitoring was still running)
+        String bridgeOut = io.waylandie.display.runtime.environment.WineRunner.bridgeOutput.toString();
+        if (bridgeOut != null && !bridgeOut.isEmpty()) {
+            logSection("BRIDGE OUTPUT (partial — force-written)");
+            for (String line : bridgeOut.split("\n")) {
+                if (!line.isEmpty()) {
+                    log("  [bridge] " + line);
+                }
+            }
+            log("");
+        }
+        writeTraceFile();
+    }
 }

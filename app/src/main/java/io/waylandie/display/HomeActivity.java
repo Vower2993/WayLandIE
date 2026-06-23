@@ -93,6 +93,7 @@ public final class HomeActivity extends Activity {
     // is detected to have exited (via Refresh).
     private volatile Process runningWineProcess;
     private volatile int winePid = -1;
+    private volatile io.waylandie.display.runtime.environment.GameLaunchTracer activeTracer;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -180,10 +181,18 @@ public final class HomeActivity extends Activity {
     protected void onDestroy() {
         super.onDestroy();
         if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
-        // Kill Wine process when the activity is destroyed. This prevents
-        // socket "Address already in use" errors on the next launch — the
-        // bridge holds the abstract Unix socket (waylandie.display.bridge.v1)
-        // and TCP port 57391 until it exits.
+        // Force-write trace file BEFORE killing Wine — this ensures we
+        // capture whatever bridge output has been collected so far, even
+        // if the user swipes back before the 300s monitoring window ends.
+        try {
+            if (activeTracer != null) {
+                activeTracer.forceWriteTrace();
+                activeTracer = null;
+            }
+        } catch (Throwable t) {
+            android.util.Log.w("HomeActivity", "Trace force-write threw: " + t.getMessage());
+        }
+        // Kill Wine process when the activity is destroyed.
         try {
             if (runningWineProcess != null && runningWineProcess.isAlive()) {
                 runningWineProcess.destroyForcibly();
@@ -375,6 +384,7 @@ public final class HomeActivity extends Activity {
 
                 io.waylandie.display.runtime.environment.GameLaunchTracer tracer =
                         new io.waylandie.display.runtime.environment.GameLaunchTracer(HomeActivity.this);
+                activeTracer = tracer;
                 Process p = tracer.launchAndTrace("explorer", finalArgs, useProtonFinal);
                 runningWineProcess = p;
                 winePid = (int) getPid(p);
