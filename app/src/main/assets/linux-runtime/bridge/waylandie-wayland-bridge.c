@@ -1279,11 +1279,19 @@ static int present_buffer_to_android(struct surface_state *surface, struct shm_b
         state->bridge_sock = connect_abstract_socket(state->bridge_socket_name);
         if (state->bridge_sock >= 0) {
             g_diag.bridge_reconnects++;
+            printf("wayland-shm-ahb frame=%d bridge-connected sock=%d\n", frame_index, state->bridge_sock);
+            fflush(stdout);
         }
     }
     if (state->bridge_sock < 0) {
-        printf("wayland-shm-ahb frame=%d status=fail reason=bridge-connect errno=%d\n", frame_index, errno);
+        printf("wayland-shm-ahb frame=%d status=fail reason=bridge-connect errno=%d socket=%s\n",
+               frame_index, errno, state->bridge_socket_name);
         return -1;
+    }
+    if (frame_index == 0) {
+        printf("wayland-shm-ahb frame=0 present-step sending dmabuf fd=%d to Java presenter sock=%d\n",
+               buffer->dmabuf_fd, state->bridge_sock);
+        fflush(stdout);
     }
     if (send_command_with_fd(state->bridge_sock, command, buffer->dmabuf_fd) != 0) {
         printf("wayland-shm-ahb frame=%d status=fail reason=dmabuf-send errno=%d\n", frame_index, errno);
@@ -1292,15 +1300,25 @@ static int present_buffer_to_android(struct surface_state *surface, struct shm_b
         state->bridge_frames_on_socket = 0;
         goto cleanup;
     }
+    if (frame_index == 0) {
+        printf("wayland-shm-ahb frame=0 present-step waiting for Java presenter response...\n");
+        fflush(stdout);
+    }
     ssize_t response_len = read(state->bridge_sock, response, sizeof(response) - 1U);
     if (response_len <= 0) {
-        printf("wayland-shm-ahb frame=%d status=fail reason=response errno=%d\n", frame_index, errno);
+        printf("wayland-shm-ahb frame=%d status=fail reason=response errno=%d response_len=%zd\n",
+               frame_index, errno, response_len);
         close(state->bridge_sock);
         state->bridge_sock = -1;
         state->bridge_frames_on_socket = 0;
         goto cleanup;
     }
     response[response_len] = '\0';
+    if (frame_index == 0) {
+        printf("wayland-shm-ahb frame=0 present-step got response (%zd bytes): %.200s\n",
+               response_len, response);
+        fflush(stdout);
+    }
     if (strstr(response, RESPONSE_PREFIX) == NULL || !response_is_pass(response, (size_t)response_len)) {
         printf("wayland-shm-ahb frame=%d status=fail reason=app-response response=%s\n", frame_index, response);
         goto cleanup;
