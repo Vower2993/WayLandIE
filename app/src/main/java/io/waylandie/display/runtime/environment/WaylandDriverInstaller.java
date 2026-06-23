@@ -54,6 +54,8 @@ public final class WaylandDriverInstaller {
         // if we skip. Delete old files first to ensure clean install.
         File drvCheck = new File(prefix, "lib/wine/aarch64-windows/winewayland.drv");
         File soCheck = new File(prefix, "lib/wine/aarch64-unix/winewayland.so");
+        File ntdllAarch64Check = new File(prefix, "lib/wine/aarch64-windows/ntdll.dll");
+        File ntdllArm64ecCheck = new File(prefix, "lib/wine/arm64ec-windows/ntdll.dll");
         if (drvCheck.exists()) {
             log("  deleting old winewayland.drv (" + drvCheck.length() + " bytes)");
             drvCheck.delete();
@@ -61,6 +63,18 @@ public final class WaylandDriverInstaller {
         if (soCheck.exists()) {
             log("  deleting old winewayland.so (" + soCheck.length() + " bytes)");
             soCheck.delete();
+        }
+        // Delete old ntdll.dll in BOTH arch dirs so our fresh build (with
+        // RtlIsEcCode + ProcessPendingCrossProcessEmulatorWork exports
+        // required by FEX's libarm64ecfex.dll) replaces the user's pre-
+        // installed Proton armec ntdll.dll.
+        if (ntdllAarch64Check.exists()) {
+            log("  deleting old aarch64-windows/ntdll.dll (" + ntdllAarch64Check.length() + " bytes)");
+            ntdllAarch64Check.delete();
+        }
+        if (ntdllArm64ecCheck.exists()) {
+            log("  deleting old arm64ec-windows/ntdll.dll (" + ntdllArm64ecCheck.length() + " bytes)");
+            ntdllArm64ecCheck.delete();
         }
 
         // Extract
@@ -87,6 +101,13 @@ public final class WaylandDriverInstaller {
             log("=== Install complete: " + extracted + " files extracted ===");
             log("  winewayland.drv at: " + drvCheck);
             log("  exists=" + drvCheck.exists() + " size=" + (drvCheck.exists() ? drvCheck.length() : 0));
+            log("  ntdll.dll (aarch64) at: " + ntdllAarch64Check);
+            log("  exists=" + ntdllAarch64Check.exists() + " size=" + (ntdllAarch64Check.exists() ? ntdllAarch64Check.length() : 0));
+            log("  ntdll.dll (arm64ec) at: " + ntdllArm64ecCheck);
+            log("  exists=" + ntdllArm64ecCheck.exists() + " size=" + (ntdllArm64ecCheck.exists() ? ntdllArm64ecCheck.length() : 0));
+            if (ntdllArm64ecCheck.exists() && ntdllArm64ecCheck.length() < 100000) {
+                log("  WARNING: arm64ec ntdll.dll is suspiciously small — FEX may still crash");
+            }
             return true;
         } catch (IOException ioe) {
             log("  INSTALL FAILED: " + ioe.getClass().getSimpleName() + ": " + ioe.getMessage());

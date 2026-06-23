@@ -535,16 +535,32 @@ grep -E "^(WAYLAND|XKB)" /tmp/proton-wine/config.status | head -20 || true
 echo "=== [8/9] Build winewayland targets ==="
 # Build the specific output files (not the directory target which is a no-op)
 # -k keeps going past errors so we see ALL failures, not just the first
+#
+# ALSO build ntdll.dll — the user's pre-installed Proton armec package may
+# ship an older ntdll.dll that's missing RtlIsEcCode and
+# ProcessPendingCrossProcessEmulatorWork exports. Without these, FEX's
+# libarm64ecfex.dll crashes during DllMain PROCESS_ATTACH (the missing
+# exports get stubbed to address 0x10000, any call to them jumps to an
+# invalid address, Wine's exception handler re-enters FEX → recursion →
+# stack overflow → 00fc:err:virtual:virtual_setup_exception).
+#
+# Building ntdll from this proton_11.0 source tree gives us a fresh DLL
+# with both exports (see dlls/ntdll/signal_arm64ec.c:949 + :1400).
 make -j$(nproc) -k \
   dlls/winewayland.drv/aarch64-windows/winewayland.drv \
   dlls/winewayland.drv/winewayland.so \
   dlls/winewayland.drv/arm64ec-windows/winewayland.drv \
+  dlls/ntdll/aarch64-windows/ntdll.dll \
+  dlls/ntdll/arm64ec-windows/ntdll.dll \
   2>&1 | tail -300 || true
 
 echo "=== Searching for built artifacts ==="
 find /tmp/proton-wine -name "winewayland*" -type f -newer /tmp/proton-wine/configure 2>/dev/null | head -20
 find /tmp/proton-wine -name "*.drv" -type f -newer /tmp/proton-wine/configure 2>/dev/null | head -10
+find /tmp/proton-wine -name "ntdll.dll" -type f -newer /tmp/proton-wine/configure 2>/dev/null | head -10
 ls -la /tmp/proton-wine/dlls/winewayland.drv/ 2>/dev/null
+ls -la /tmp/proton-wine/dlls/ntdll/aarch64-windows/ 2>/dev/null
+ls -la /tmp/proton-wine/dlls/ntdll/arm64ec-windows/ 2>/dev/null
 
 echo "=== [9/9] Collect + zip ==="
 for f in \
@@ -569,10 +585,59 @@ for f in \
   fi
 done
 
+# === Collect ntdll.dll (arm64ec + aarch64) ===
+# These replace the user's pre-installed Proton armec ntdll.dll which may
+# be missing RtlIsEcCode + ProcessPendingCrossProcessEmulatorWork exports
+# that FEX's libarm64ecfex.dll requires. Without these, FEX crashes during
+# DllMain PROCESS_ATTACH (stack overflow from invalid address 0x10000 stub).
+NTDLL_PE=""
+for f in \
+  "/tmp/proton-wine/dlls/ntdll/aarch64-windows/ntdll.dll" \
+  "/tmp/proton-wine/dlls/ntdll/arm64ec-windows/ntdll.dll"; do
+  if [ -f "$f" ] && [ "$(stat -c%s "$f")" -gt 1000 ]; then
+    echo "Found ntdll PE: $f ($(stat -c%s "$f") bytes)"
+    # Both variants go into aarch64-windows/ — Wine's loader picks the right
+    # one based on PE machine type (ARM64 vs ARM64EC) at runtime.
+    # The arm64ec variant has the FEX-required exports; aarch64 is the
+    # native ARM64 fallback for non-EC processes.
+    cp "$f" "$PROTON_OUT/lib/wine/aarch64-windows/$(basename "$f" .dll)_$(echo "$f" | grep -oE '(arm64ec|aarch64)-windows' | cut -d- -f1).dll"
+    NTDLL_PE="$NTDLL_PE $f"
+  fi
+done
+# Also keep a copy with the canonical name (Wine looks for ntdll.dll in
+# aarch64-windows/ for ARM64 processes; arm64ec-windows/ for ARM64EC).
+# We need both directories populated.
+mkdir -p "$PROTON_OUT/lib/wine/aarch64-windows" "$PROTON_OUT/lib/wine/arm64ec-windows"
+if [ -f "/tmp/proton-wine/dlls/ntdll/aarch64-windows/ntdll.dll" ]; then
+  cp "/tmp/proton-wine/dlls/ntdll/aarch64-windows/ntdll.dll" "$PROTON_OUT/lib/wine/aarch64-windows/ntdll.dll"
+  echo "Copied aarch64-windows/ntdll.dll ($(stat -c%s "$PROTON_OUT/lib/wine/aarch64-windows/ntdll.dll") bytes)"
+fi
+if [ -f "/tmp/proton-wine/dlls/ntdll/arm64ec-windows/ntdll.dll" ]; then
+  cp "/tmp/proton-wine/dlls/ntdll/arm64ec-windows/ntdll.dll" "$PROTON_OUT/lib/wine/arm64ec-windows/ntdll.dll"
+  echo "Copied arm64ec-windows/ntdll.dll ($(stat -c%s "$PROTON_OUT/lib/wine/arm64ec-windows/ntdll.dll") bytes)"
+fi
+
+# Verify the new ntdll has the FEX-required exports
+echo "=== Verifying ntdll exports ==="
+NTDLL_AARCH64="$PROTON_OUT/lib/wine/aarch64-windows/ntdll.dll"
+NTDLL_ARM64EC="$PROTON_OUT/lib/wine/arm64ec-windows/ntdll.dll"
+if [ -f "$NTDLL_AARCH64" ]; then
+  echo "aarch64 ntdll.dll exports:"
+  "$LLVM_MINGW_DIR/bin/llvm-objdump" -p "$NTDLL_AARCH64" 2>/dev/null | grep -E "RtlIsEcCode|ProcessPendingCrossProcessEmulatorWork" || echo "  (no FEX-required exports found — aarch64 variant may not need them)"
+fi
+if [ -f "$NTDLL_ARM64EC" ]; then
+  echo "arm64ec ntdll.dll exports:"
+  "$LLVM_MINGW_DIR/bin/llvm-objdump" -p "$NTDLL_ARM64EC" 2>/dev/null | grep -E "RtlIsEcCode|ProcessPendingCrossProcessEmulatorWork" || echo "  WARNING: arm64ec ntdll missing FEX-required exports!"
+fi
+
 DRV_SIZE=$(stat -c%s "$PROTON_OUT/lib/wine/aarch64-windows/winewayland.drv" 2>/dev/null || echo 0)
 SO_SIZE=$(stat -c%s "$PROTON_OUT/lib/wine/aarch64-unix/winewayland.so" 2>/dev/null || echo 0)
+NTDLL_AA_SIZE=$(stat -c%s "$PROTON_OUT/lib/wine/aarch64-windows/ntdll.dll" 2>/dev/null || echo 0)
+NTDLL_EC_SIZE=$(stat -c%s "$PROTON_OUT/lib/wine/arm64ec-windows/ntdll.dll" 2>/dev/null || echo 0)
 echo "winewayland.drv: $DRV_SIZE bytes"
 echo "winewayland.so: $SO_SIZE bytes"
+echo "ntdll.dll (aarch64): $NTDLL_AA_SIZE bytes"
+echo "ntdll.dll (arm64ec): $NTDLL_EC_SIZE bytes"
 
 if [ "$DRV_SIZE" -lt 1000 ]; then
   echo "FATAL: winewayland.drv missing or too small"
