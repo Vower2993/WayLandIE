@@ -1550,14 +1550,11 @@ public final class WineRunner {
         // CRITICAL: Enable Wine debug channels for display driver + module loading.
         // This tells us EXACTLY which .drv files Wine tries to load and why they
         // fail. The output goes to Wine's stderr (captured by GameLaunchTracer).
-        // WINEDEBUG: Use minimal debug channels to see where Wine hangs
-        // without flooding stderr (which causes pipe deadlock).
-        // -all = silence everything (safe but no diagnostics)
-        // +seh,+event = see exceptions + event processing (minimal output)
-        // +module = see DLL loading (moderate output, may risk deadlock)
-        // The wine-output thread drains stderr continuously, so moderate
-        // output should be safe. If deadlock returns, switch back to -all.
-        env.put("WINEDEBUG", "+seh,+event");
+        // WINEDEBUG=-all: silence all Wine debug output to prevent stderr
+        // pipe deadlock. The +seh,+event diagnostic confirmed Wine takes
+        // ~5 minutes for wineboot (no exceptions, just slow initialization).
+        // Switching back to -all for production use.
+        env.put("WINEDEBUG", "-all");
         env.put("DXVK_STATE_CACHE_PATH", new File(homeDir, ".dxvk-cache").getAbsolutePath());
         env.put("MESA_VK_WSI_PRESENT_MODE", "immediate");
         // Winlator-inspired env vars — Wine needs these for proper operation
