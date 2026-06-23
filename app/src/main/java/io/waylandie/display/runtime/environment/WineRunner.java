@@ -1562,6 +1562,38 @@ public final class WineRunner {
         env.put("WINEDEBUG", "-all");
         env.put("DXVK_STATE_CACHE_PATH", new File(homeDir, ".dxvk-cache").getAbsolutePath());
         env.put("MESA_VK_WSI_PRESENT_MODE", "immediate");
+
+        // === DXVK DEBUGGING ===
+        // DXVK_LOG_LEVEL controls DXVK's own logging (goes to stderr):
+        //   none   = no logging (default)
+        //   error  = errors only
+        //   warn   = warnings + errors
+        //   info   = info + warnings + errors (recommended for debugging)
+        //   debug  = everything (very verbose, may cause pipe deadlock)
+        env.put("DXVK_LOG_LEVEL", "info");
+        // Log DXVK to a file instead of stderr (avoids pipe deadlock)
+        env.put("DXVK_LOG_PATH", new File(homeDir, ".dxvk-logs").getAbsolutePath());
+        // Enable DXVK HUD (on-screen display) for FPS/version info
+        // env.put("DXVK_HUD", "version,fps,devinfo");  // Uncomment to enable HUD
+
+        // === FEX DEBUGGING ===
+        // FEX_DEBUG controls FEX x86→ARM translation logging
+        //   0 = no logging (default)
+        //   1 = basic logging (translation hits/misses)
+        env.put("FEX_DEBUG", "0");
+        // FEX_CORE_DEBUG enables detailed FEX core instruction logging
+        // env.put("FEX_CORE_DEBUG", "1");  // Uncomment for instruction-level debug
+
+        // === VULKAN DEBUGGING ===
+        // Enable Vulkan validation layer diagnostics (optional, may slow things down)
+        // env.put("VK_INSTANCE_LAYERS", "VK_LAYER_KHRONOS_validation");
+        // VK_LOCALE controls Vulkan error messages
+        env.put("VK_LOCALE", "en");
+
+        // === INPUT DEBUGGING ===
+        // Enable bridge input debug logging (logs to file, not stdout)
+        env.put("WAYLANDIE_WAYLAND_INPUT_DEBUG", "1");
+        env.put("WAYLANDIE_WAYLAND_INPUT_LOG", new File(homeDir, "input-debug.log").getAbsolutePath());
         // Winlator-inspired env vars — Wine needs these for proper operation
         env.put("WINE_NO_DUPLICATE_EXPLORER", "1");
         env.put("FONTCONFIG_PATH", new File(rootDir, "usr/etc/fonts").getAbsolutePath());

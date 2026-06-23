@@ -3566,7 +3566,8 @@ static void emit_pointer_enter_if_needed(struct server_state *state, struct wl_r
 
 static void emit_pointer_motion(struct server_state *state, double x, double y, uint32_t time_ms) {
     if (state->focused_surface == NULL) {
-        input_debug_log("pointer-motion drop=no-focus x=%.1f y=%.1f", x, y);
+        printf("wayland-shm-ahb pointer-motion drop=no-focus x=%.1f y=%.1f\n", x, y);
+        fflush(stdout);
         return;
     }
     clamp_pointer_to_output(state, &x, &y);
@@ -3586,13 +3587,18 @@ static void emit_pointer_motion(struct server_state *state, double x, double y, 
         maybe_send_pointer_frame(pointer->resource);
         emitted++;
     }
-    input_debug_log(
-            "pointer-motion x=%.1f y=%.1f emitted=%d pointers=%d focused=%p",
-            x,
-            y,
-            emitted,
-            input_resource_count(&state->pointer_resources),
-            (void *)state->focused_surface);
+    // Always log first 10 pointer motions for diagnostics
+    {
+        static int motion_log_count = 0;
+        if (motion_log_count < 10) {
+            printf("wayland-shm-ahb pointer-motion x=%.1f y=%.1f emitted=%d pointers=%d focused=%p\n",
+                   x, y, emitted,
+                   input_resource_count(&state->pointer_resources),
+                   (void *)state->focused_surface);
+            fflush(stdout);
+            motion_log_count++;
+        }
+    }
 }
 
 static void emit_pointer_button(struct server_state *state, const char *button_state, uint32_t time_ms) {
@@ -3943,12 +3949,12 @@ static void seat_get_pointer(struct wl_client *client, struct wl_resource *resou
     input->resource = pointer_resource;
     wl_list_insert(&state->pointer_resources, &input->link);
     wl_resource_set_implementation(pointer_resource, &pointer_impl, input, destroy_input_resource);
-    input_debug_log(
-            "seat-get-pointer resource=%p focus=%p same-client=%d total=%d",
-            (void *)pointer_resource,
-            (void *)state->focused_surface,
-            resource_same_client(pointer_resource, state->focused_surface),
-            input_resource_count(&state->pointer_resources));
+    printf("wayland-shm-ahb seat-get-pointer resource=%p focus=%p same-client=%d total=%d\n",
+           (void *)pointer_resource,
+           (void *)state->focused_surface,
+           resource_same_client(pointer_resource, state->focused_surface),
+           input_resource_count(&state->pointer_resources));
+    fflush(stdout);
     if (resource_same_client(pointer_resource, state->focused_surface)) {
         wl_pointer_send_enter(
                 pointer_resource,
