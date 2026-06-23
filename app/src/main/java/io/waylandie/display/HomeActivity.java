@@ -351,24 +351,15 @@ public final class HomeActivity extends Activity {
 
                 String[] extraArgs = gamescopeFinal ? new String[]{"--gamescope"} : new String[0];
 
-                // Use WinNative-style launch: wine explorer /desktop=shell,WxH game.exe
-                // This wraps the game in explorer's virtual desktop, preventing
-                // wineboot from racing with the game for the desktop window.
-                // Without this, Wine renders 1 frame (blank desktop) then deadlocks.
-                String desktopSize = "1280x720";
-                java.util.List<String> wrappedArgs = new java.util.ArrayList<>();
-                wrappedArgs.add("/desktop=shell," + desktopSize);
-                wrappedArgs.add(exePathFinal);
-                if (extraArgs != null) {
-                    for (String a : extraArgs) {
-                        if (!a.isEmpty()) wrappedArgs.add(a);
-                    }
-                }
-                String[] finalArgs = wrappedArgs.toArray(new String[0]);
-
+                // Launch game directly: wine game.exe
+                // The explorer /desktop=shell wrapper was causing issues with
+                // winewayland.drv (which doesn't support virtual desktops the
+                // same way winex11.drv does). Direct launch lets Wine's
+                // winewayland.drv create the window directly on our Wayland
+                // compositor, which is the correct path for our architecture.
                 io.waylandie.display.runtime.environment.GameLaunchTracer tracer =
                         new io.waylandie.display.runtime.environment.GameLaunchTracer(HomeActivity.this);
-                Process p = tracer.launchAndTrace("explorer", finalArgs, useProtonFinal);
+                Process p = tracer.launchAndTrace(exePathFinal, extraArgs, useProtonFinal);
                 runningWineProcess = p;
                 winePid = (int) getPid(p);
                 runOnUiThread(() -> log("Wine process started (pid=" + winePid + ")"));
