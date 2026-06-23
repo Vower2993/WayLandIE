@@ -602,6 +602,20 @@ rm -f "$WORKSPACE/app/src/main/assets/winewayland-driver.zip"
 # to that dir. Both .drv and .so go into protonDir/lib/ which is in
 # LD_LIBRARY_PATH (proton/active/lib is in the Wine process's search path).
 cp "$ROOTFS_OUT/usr/local/lib/libandroid-sysvshm.so" "$PROTON_OUT/lib/"
+
+# Build a bionic libfreetype.so from the static library so Wine can dlopen
+# it at runtime. The static .a was built with NDK clang (bionic), so the
+# resulting .so will also be bionic-compatible.
+echo "=== Building bionic libfreetype.so from static library ==="
+FT_DIR="$WORKSPACE/.github/scripts/freetype-bionic"
+$CC -shared -fPIC \
+  -o "$PROTON_OUT/lib/libfreetype.so.6" \
+  -Wl,--whole-archive "$FT_DIR/lib/libfreetype.a" \
+  -Wl,--no-whole-archive \
+  -lm \
+  2>&1 || { echo "WARNING: Failed to build libfreetype.so.6 — continuing without it"; }
+ls -la "$PROTON_OUT/lib/libfreetype.so.6" 2>/dev/null || echo "  libfreetype.so.6 not built"
+
 ( cd "$PROTON_OUT" && zip -r "$WORKSPACE/app/src/main/assets/winewayland-driver.zip" lib/ )
 
 echo "=== zip contents ==="

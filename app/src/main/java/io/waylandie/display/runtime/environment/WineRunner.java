@@ -714,14 +714,19 @@ public final class WineRunner {
             if (!localLib.exists()) localLib.mkdirs();
 
             // --- Create bionic-compatible symlinks ---
-            // FreeType: prefer rootfs glibc version (always present), fall back
-            // to Android system lib (may not exist on Samsung devices).
-            // Without FreeType, Wine can't render any text — the desktop
-            // appears blank/white even though it's actually rendering.
+            // FreeType: prefer the bionic version from the Proton driver zip
+            // (libfreetype.so.6 built with NDK clang — bionic compatible).
+            // Fall back to rootfs glibc version, then Android system lib.
+            File protonFreetype = new File(protonDir, "lib/libfreetype.so.6");
             File rootfsFreetype = new File(rootDir, "usr/lib/aarch64-linux-gnu/libfreetype.so.6");
-            String freetypeTarget = rootfsFreetype.exists()
-                    ? rootfsFreetype.getAbsolutePath()
-                    : "/system/lib64/libfreetype.so";
+            String freetypeTarget;
+            if (protonFreetype.exists()) {
+                freetypeTarget = protonFreetype.getAbsolutePath();
+            } else if (rootfsFreetype.exists()) {
+                freetypeTarget = rootfsFreetype.getAbsolutePath();
+            } else {
+                freetypeTarget = "/system/lib64/libfreetype.so";
+            }
             // Also create symlinks for rootfs glibc libs that bionic Wine needs.
             // These are in usr/lib/aarch64-linux-gnu/ (glibc) but bionic Wine's
             // LD_LIBRARY_PATH doesn't include that path (it has glibc libs that
