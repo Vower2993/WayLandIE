@@ -399,6 +399,12 @@ public final class GameLaunchTracer {
             } catch (InterruptedException ignored) {
                 break;
             }
+
+            // Write trace file every 60 seconds so it's always available
+            // even if the app crashes or the user swipes back.
+            if (elapsed > 0 && elapsed % 60_000L < MONITOR_INTERVAL_MS) {
+                writeTraceFile();
+            }
         }
         log("");
 

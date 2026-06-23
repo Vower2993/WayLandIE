@@ -434,11 +434,10 @@ public final class HomeActivity extends Activity {
         // Wayland display to connect to. This was the root cause of
         // "bridge: off" in every diagnostic log.
         intent.putExtra("waylandie_bridge_server", true);
-        // CRITICAL: Enable external present + input forwarding.
-        // Without externalPresentOnlyEnabled, bridgeOwnsExternalSession()
-        // returns false and touch/mouse events are NEVER forwarded to Wine.
-        // This was the root cause of "no cursor / no mouse input".
-        intent.putExtra("waylandie_external_present_only", true);
+        // NOTE: Do NOT set waylandie_external_present_only=true — it stops
+        // the internal frame loop and breaks the display. Input forwarding
+        // is now handled by bridgeOwnsExternalSession() which checks for
+        // active dmabuf-present sessions instead.
         startActivity(intent);
         acquireWakeLock();
         refreshBridgeStatus();

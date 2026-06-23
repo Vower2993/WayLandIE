@@ -3364,7 +3364,16 @@ public final class MainActivity extends Activity
     }
 
     private boolean bridgeOwnsExternalSession() {
-        return bridgeServerEnabled && externalPresentOnlyEnabled;
+        // Input forwarding is enabled when:
+        // 1. Bridge server is enabled (Wine is running and connected)
+        // 2. Either externalPresentOnlyEnabled (legacy mode) OR bridgeServerEnabled
+        //    is true with an active dmabuf-present session (Wine is sending frames)
+        // This allows touch/mouse input to be forwarded to Wine without requiring
+        // externalPresentOnlyEnabled (which stops the internal frame loop and
+        // breaks the display).
+        return bridgeServerEnabled && (externalPresentOnlyEnabled
+                || bridgeDmaBufPresentStatusText != null
+                && bridgeDmaBufPresentStatusText.contains("status=pass"));
     }
 
     private boolean isBridgePresenterUsable() {
