@@ -590,44 +590,55 @@ done
 # be missing RtlIsEcCode + ProcessPendingCrossProcessEmulatorWork exports
 # that FEX's libarm64ecfex.dll requires. Without these, FEX crashes during
 # DllMain PROCESS_ATTACH (stack overflow from invalid address 0x10000 stub).
-NTDLL_PE=""
+#
+# Wine's build system produces a HYBRID ntdll.dll at:
+#   dlls/ntdll/aarch64-windows/ntdll.dll
+# This single PE file contains BOTH aarch64 (native ARM64) code AND arm64ec
+# (x86_64-emulated-on-ARM64) code in separate sections. The .hexpthk section
+# is the EC (emulated) entry point thunk; the rest is native ARM64.
+# Wine's loader detects the PE machine type at runtime and uses the right
+# section. So we only need ONE ntdll.dll file, but it must be present in
+# BOTH lib/wine/aarch64-windows/ AND lib/wine/arm64ec-windows/ so Wine's
+# arch-specific search paths find it.
+mkdir -p "$PROTON_OUT/lib/wine/aarch64-windows" "$PROTON_OUT/lib/wine/arm64ec-windows"
+NTDLL_SRC=""
 for f in \
   "/tmp/proton-wine/dlls/ntdll/aarch64-windows/ntdll.dll" \
   "/tmp/proton-wine/dlls/ntdll/arm64ec-windows/ntdll.dll"; do
   if [ -f "$f" ] && [ "$(stat -c%s "$f")" -gt 1000 ]; then
     echo "Found ntdll PE: $f ($(stat -c%s "$f") bytes)"
-    # Both variants go into aarch64-windows/ — Wine's loader picks the right
-    # one based on PE machine type (ARM64 vs ARM64EC) at runtime.
-    # The arm64ec variant has the FEX-required exports; aarch64 is the
-    # native ARM64 fallback for non-EC processes.
-    cp "$f" "$PROTON_OUT/lib/wine/aarch64-windows/$(basename "$f" .dll)_$(echo "$f" | grep -oE '(arm64ec|aarch64)-windows' | cut -d- -f1).dll"
-    NTDLL_PE="$NTDLL_PE $f"
+    NTDLL_SRC="$f"
+    break
   fi
 done
-# Also keep a copy with the canonical name (Wine looks for ntdll.dll in
-# aarch64-windows/ for ARM64 processes; arm64ec-windows/ for ARM64EC).
-# We need both directories populated.
-mkdir -p "$PROTON_OUT/lib/wine/aarch64-windows" "$PROTON_OUT/lib/wine/arm64ec-windows"
-if [ -f "/tmp/proton-wine/dlls/ntdll/aarch64-windows/ntdll.dll" ]; then
-  cp "/tmp/proton-wine/dlls/ntdll/aarch64-windows/ntdll.dll" "$PROTON_OUT/lib/wine/aarch64-windows/ntdll.dll"
-  echo "Copied aarch64-windows/ntdll.dll ($(stat -c%s "$PROTON_OUT/lib/wine/aarch64-windows/ntdll.dll") bytes)"
-fi
-if [ -f "/tmp/proton-wine/dlls/ntdll/arm64ec-windows/ntdll.dll" ]; then
-  cp "/tmp/proton-wine/dlls/ntdll/arm64ec-windows/ntdll.dll" "$PROTON_OUT/lib/wine/arm64ec-windows/ntdll.dll"
-  echo "Copied arm64ec-windows/ntdll.dll ($(stat -c%s "$PROTON_OUT/lib/wine/arm64ec-windows/ntdll.dll") bytes)"
+if [ -n "$NTDLL_SRC" ]; then
+  # Copy the hybrid ntdll.dll to BOTH arch dirs. Wine's loader picks the
+  # right code path based on the PE machine type field in the binary header,
+  # not based on which directory it was loaded from.
+  cp "$NTDLL_SRC" "$PROTON_OUT/lib/wine/aarch64-windows/ntdll.dll"
+  cp "$NTDLL_SRC" "$PROTON_OUT/lib/wine/arm64ec-windows/ntdll.dll"
+  echo "Copied ntdll.dll to aarch64-windows/ ($(stat -c%s "$PROTON_OUT/lib/wine/aarch64-windows/ntdll.dll") bytes)"
+  echo "Copied ntdll.dll to arm64ec-windows/ ($(stat -c%s "$PROTON_OUT/lib/wine/arm64ec-windows/ntdll.dll") bytes)"
+else
+  echo "WARNING: ntdll.dll not built — FEX will still crash. Check make output above."
 fi
 
 # Verify the new ntdll has the FEX-required exports
 echo "=== Verifying ntdll exports ==="
-NTDLL_AARCH64="$PROTON_OUT/lib/wine/aarch64-windows/ntdll.dll"
-NTDLL_ARM64EC="$PROTON_OUT/lib/wine/arm64ec-windows/ntdll.dll"
-if [ -f "$NTDLL_AARCH64" ]; then
-  echo "aarch64 ntdll.dll exports:"
-  "$LLVM_MINGW_DIR/bin/llvm-objdump" -p "$NTDLL_AARCH64" 2>/dev/null | grep -E "RtlIsEcCode|ProcessPendingCrossProcessEmulatorWork" || echo "  (no FEX-required exports found — aarch64 variant may not need them)"
-fi
-if [ -f "$NTDLL_ARM64EC" ]; then
-  echo "arm64ec ntdll.dll exports:"
-  "$LLVM_MINGW_DIR/bin/llvm-objdump" -p "$NTDLL_ARM64EC" 2>/dev/null | grep -E "RtlIsEcCode|ProcessPendingCrossProcessEmulatorWork" || echo "  WARNING: arm64ec ntdll missing FEX-required exports!"
+NTDLL_HYBRID="$PROTON_OUT/lib/wine/aarch64-windows/ntdll.dll"
+if [ -f "$NTDLL_HYBRID" ]; then
+  echo "ntdll.dll size: $(stat -c%s "$NTDLL_HYBRID") bytes"
+  echo "Searching for FEX-required export names in binary..."
+  if strings "$NTDLL_HYBRID" | grep -q "^RtlIsEcCode$"; then
+    echo "  ✓ RtlIsEcCode export found"
+  else
+    echo "  ✗ RtlIsEcCode NOT found — FEX will still crash!"
+  fi
+  if strings "$NTDLL_HYBRID" | grep -q "^ProcessPendingCrossProcessEmulatorWork$"; then
+    echo "  ✓ ProcessPendingCrossProcessEmulatorWork export found"
+  else
+    echo "  ✗ ProcessPendingCrossProcessEmulatorWork NOT found — FEX will still crash!"
+  fi
 fi
 
 DRV_SIZE=$(stat -c%s "$PROTON_OUT/lib/wine/aarch64-windows/winewayland.drv" 2>/dev/null || echo 0)
