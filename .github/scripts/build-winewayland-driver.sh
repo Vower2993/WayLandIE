@@ -421,7 +421,7 @@ export CXXFLAGS="-O2"
   --without-x --without-opengl --without-vulkan \
   --without-alsa --without-oss --without-pulse --without-cups \
   --without-sane --without-usb --without-sdl --without-gstreamer \
-  --with-freetype --with-fontconfig --without-v4l2 \
+  --without-freetype --without-fontconfig --without-v4l2 \
   --enable-win64 \
   --disable-tests \
   2>&1 | tail -10
@@ -444,70 +444,11 @@ export CXX="$TOOLCHAIN/bin/aarch64-linux-android${API}-clang++"
 export AR="$TOOLCHAIN/bin/llvm-ar"
 export STRIP="$TOOLCHAIN/bin/llvm-strip"
 
-# Extract FreeType + Fontconfig headers from the rootfs tarball so Wine
-# can be compiled with --with-freetype --with-fontconfig.
-# The rootfs tarball (imagefs.tar.zst) contains aarch64 FreeType/Fontconfig
-# from Ubuntu 20.04 Focal (installed via apt in build-imagefs.sh).
-IMAGEFS_TAR="$WORKSPACE/app/src/main/assets/imagefs/imagefs.tar.zst"
-FT_EXTRACT_DIR="/tmp/freetype-extract"
-mkdir -p "$FT_EXTRACT_DIR"
-if [ -f "$IMAGEFS_TAR" ]; then
-  echo "  Extracting FreeType + Fontconfig headers from rootfs tarball…"
-  zstd -d "$IMAGEFS_TAR" -c | tar -xf - -C "$FT_EXTRACT_DIR" \
-    --wildcards "usr/include/freetype2/*" \
-    "usr/include/fontconfig/*" \
-    "usr/include/ft2build.h" \
-    "usr/lib/aarch64-linux-gnu/libfreetype.so*" \
-    "usr/lib/aarch64-linux-gnu/libfontconfig.so*" \
-    "usr/lib/aarch64-linux-gnu/pkgconfig/freetype2.pc" \
-    "usr/lib/aarch64-linux-gnu/pkgconfig/fontconfig.pc" 2>/dev/null || true
-  # Fix .pc files to point to extracted paths
-  if [ -f "$FT_EXTRACT_DIR/usr/lib/aarch64-linux-gnu/pkgconfig/freetype2.pc" ]; then
-    sed -i "s|prefix=/usr|prefix=$FT_EXTRACT_DIR/usr|g" \
-      "$FT_EXTRACT_DIR/usr/lib/aarch64-linux-gnu/pkgconfig/freetype2.pc"
-    sed -i "s|/usr/include|include=/usr/include|g" \
-      "$FT_EXTRACT_DIR/usr/lib/aarch64-linux-gnu/pkgconfig/freetype2.pc" 2>/dev/null || true
-    echo "  ✓ FreeType .pc found and patched"
-  fi
-  if [ -f "$FT_EXTRACT_DIR/usr/lib/aarch64-linux-gnu/pkgconfig/fontconfig.pc" ]; then
-    sed -i "s|prefix=/usr|prefix=$FT_EXTRACT_DIR/usr|g" \
-      "$FT_EXTRACT_DIR/usr/lib/aarch64-linux-gnu/pkgconfig/fontconfig.pc"
-    echo "  ✓ Fontconfig .pc found and patched"
-  fi
-  echo "  FreeType headers: $(ls $FT_EXTRACT_DIR/usr/include/freetype2/ 2>/dev/null | wc -l) files"
-
-  # Create stub static libraries so Wine's configure link test passes.
-  # The glibc .so files can't link against bionic, but we don't need them
-  # to — Wine just needs to know FreeType EXISTS at compile time. At runtime,
-  # the rootfs glibc libfreetype.so.6 will be loaded via our symlinks.
-  # The stub .a contains a single empty object file — enough to satisfy the
-  # linker check without providing any real symbols.
-  echo "  Creating stub FreeType + Fontconfig static libraries…"
-  FT_STUB_DIR="/tmp/freetype-stub"
-  mkdir -p "$FT_STUB_DIR"
-  echo 'void __freetype_stub(void) {}' > "$FT_STUB_DIR/stub.c"
-  "$TOOLCHAIN/bin/aarch64-linux-android${API}-clang" -c -fPIC \
-    --sysroot="$SYSROOT" -o "$FT_STUB_DIR/stub.o" "$FT_STUB_DIR/stub.c"
-  "$TOOLCHAIN/bin/llvm-ar" rcs "$FT_STUB_DIR/libfreetype.a" "$FT_STUB_DIR/stub.o"
-  "$TOOLCHAIN/bin/llvm-ar" rcs "$FT_STUB_DIR/libfontconfig.a" "$FT_STUB_DIR/stub.o"
-  # Replace the glibc .so files with symlinks to our stub .a
-  rm -f "$FT_EXTRACT_DIR/usr/lib/aarch64-linux-gnu/libfreetype.so"*
-  rm -f "$FT_EXTRACT_DIR/usr/lib/aarch64-linux-gnu/libfontconfig.so"*
-  ln -sf "$FT_STUB_DIR/libfreetype.a" "$FT_EXTRACT_DIR/usr/lib/aarch64-linux-gnu/libfreetype.so"
-  ln -sf "$FT_STUB_DIR/libfontconfig.a" "$FT_EXTRACT_DIR/usr/lib/aarch64-linux-gnu/libfontconfig.so"
-  echo "  ✓ Stub libraries created"
-else
-  echo "  WARNING: rootfs tarball not found at $IMAGEFS_TAR"
-  echo "  Wine will be built WITHOUT FreeType (fonts won't render)"
-  FT_EXTRACT_DIR="/tmp/freetype-extract"
-  mkdir -p "$FT_EXTRACT_DIR"
-fi
-
-export CFLAGS="-fPIC --sysroot=$SYSROOT -I$SYSROOT/usr/include -I$BIONIC_LIBS/include -I$FT_EXTRACT_DIR/usr/include -I$FT_EXTRACT_DIR/usr/include/freetype2 -I/tmp/proton-wine/include -D__ANDROID_API__=$API -D__ANDROID__"
+export CFLAGS="-fPIC --sysroot=$SYSROOT -I$SYSROOT/usr/include -I$BIONIC_LIBS/include -I/tmp/proton-wine/include -D__ANDROID_API__=$API -D__ANDROID__"
 export CXXFLAGS="$CFLAGS"
-export LDFLAGS="--sysroot=$SYSROOT -L$BIONIC_LIBS/lib -L$FT_EXTRACT_DIR/usr/lib/aarch64-linux-gnu -landroid-sysvshm -lffi"
-export PKG_CONFIG_PATH="$BIONIC_LIBS/lib/pkgconfig:$FT_EXTRACT_DIR/usr/lib/aarch64-linux-gnu/pkgconfig"
-export PKG_CONFIG_LIBDIR="$BIONIC_LIBS/lib/pkgconfig:$FT_EXTRACT_DIR/usr/lib/aarch64-linux-gnu/pkgconfig"
+export LDFLAGS="--sysroot=$SYSROOT -L$BIONIC_LIBS/lib -landroid-sysvshm -lffi"
+export PKG_CONFIG_PATH="$BIONIC_LIBS/lib/pkgconfig"
+export PKG_CONFIG_LIBDIR="$BIONIC_LIBS/lib/pkgconfig"
 unset PKG_CONFIG_SYSROOT_DIR
 
 # Pre-seed all the link-test cache vars (avoid the broken pkg-config path in configure.ac)
@@ -520,17 +461,6 @@ export ac_cv_header_wayland_client_h=yes
 export ac_cv_header_wayland_egl_h=yes
 export ac_cv_header_xkbcommon_xkbcommon_h=yes
 export ac_cv_header_xkbcommon_xkbregistry_h=yes
-
-# FreeType + Fontconfig cache vars (cross-compile can't run link test)
-export ac_cv_lib_freetype_FT_Init_FreeType=yes
-export ac_cv_header_ft2build_h=yes
-export ac_cv_header_freetype2_freetype_freetype_h=yes
-
-# FreeType + Fontconfig pkg-config vars
-export FREETYPE_CFLAGS="-I$FT_EXTRACT_DIR/usr/include -I$FT_EXTRACT_DIR/usr/include/freetype2"
-export FREETYPE_LIBS="-L$FT_EXTRACT_DIR/usr/lib/aarch64-linux-gnu -lfreetype"
-export FONTCONFIG_CFLAGS="-I$FT_EXTRACT_DIR/usr/include"
-export FONTCONFIG_LIBS="-L$FT_EXTRACT_DIR/usr/lib/aarch64-linux-gnu -lfontconfig"
 
 # Direct env-var settings (configure.ac honors these via WINE_PACKAGE_FLAGS)
 # Point at bionic-libs where we just copied the system xkbcommon headers
@@ -577,7 +507,7 @@ export ac_cv_lib_EGL_eglGetProcAddress=yes
   --without-x \
   --without-alsa --without-oss --without-pulse --without-cups \
   --without-sane --without-usb --without-sdl --without-gstreamer \
-  --with-freetype --with-fontconfig --without-v4l2 \
+  --without-freetype --without-fontconfig --without-v4l2 \
   --enable-win64 \
   --enable-archs=arm64ec,aarch64 \
   --with-mingw=$LLVM_MINGW_DIR/bin/clang \
