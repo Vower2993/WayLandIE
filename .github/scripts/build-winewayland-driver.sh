@@ -475,10 +475,32 @@ if [ -f "$IMAGEFS_TAR" ]; then
     echo "  ✓ Fontconfig .pc found and patched"
   fi
   echo "  FreeType headers: $(ls $FT_EXTRACT_DIR/usr/include/freetype2/ 2>/dev/null | wc -l) files"
-  echo "  FreeType .so: $(ls $FT_EXTRACT_DIR/usr/lib/aarch64-linux-gnu/libfreetype.so* 2>/dev/null | wc -l) files"
+
+  # Create stub static libraries so Wine's configure link test passes.
+  # The glibc .so files can't link against bionic, but we don't need them
+  # to — Wine just needs to know FreeType EXISTS at compile time. At runtime,
+  # the rootfs glibc libfreetype.so.6 will be loaded via our symlinks.
+  # The stub .a contains a single empty object file — enough to satisfy the
+  # linker check without providing any real symbols.
+  echo "  Creating stub FreeType + Fontconfig static libraries…"
+  FT_STUB_DIR="/tmp/freetype-stub"
+  mkdir -p "$FT_STUB_DIR"
+  echo 'void __freetype_stub(void) {}' > "$FT_STUB_DIR/stub.c"
+  "$TOOLCHAIN/bin/aarch64-linux-android${API}-clang" -c -fPIC \
+    --sysroot="$SYSROOT" -o "$FT_STUB_DIR/stub.o" "$FT_STUB_DIR/stub.c"
+  "$TOOLCHAIN/bin/llvm-ar" rcs "$FT_STUB_DIR/libfreetype.a" "$FT_STUB_DIR/stub.o"
+  "$TOOLCHAIN/bin/llvm-ar" rcs "$FT_STUB_DIR/libfontconfig.a" "$FT_STUB_DIR/stub.o"
+  # Replace the glibc .so files with symlinks to our stub .a
+  rm -f "$FT_EXTRACT_DIR/usr/lib/aarch64-linux-gnu/libfreetype.so"*
+  rm -f "$FT_EXTRACT_DIR/usr/lib/aarch64-linux-gnu/libfontconfig.so"*
+  ln -sf "$FT_STUB_DIR/libfreetype.a" "$FT_EXTRACT_DIR/usr/lib/aarch64-linux-gnu/libfreetype.so"
+  ln -sf "$FT_STUB_DIR/libfontconfig.a" "$FT_EXTRACT_DIR/usr/lib/aarch64-linux-gnu/libfontconfig.so"
+  echo "  ✓ Stub libraries created"
 else
   echo "  WARNING: rootfs tarball not found at $IMAGEFS_TAR"
   echo "  Wine will be built WITHOUT FreeType (fonts won't render)"
+  FT_EXTRACT_DIR="/tmp/freetype-extract"
+  mkdir -p "$FT_EXTRACT_DIR"
 fi
 
 export CFLAGS="-fPIC --sysroot=$SYSROOT -I$SYSROOT/usr/include -I$BIONIC_LIBS/include -I$FT_EXTRACT_DIR/usr/include -I$FT_EXTRACT_DIR/usr/include/freetype2 -I/tmp/proton-wine/include -D__ANDROID_API__=$API -D__ANDROID__"
