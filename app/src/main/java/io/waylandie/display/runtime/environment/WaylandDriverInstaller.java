@@ -49,13 +49,18 @@ public final class WaylandDriverInstaller {
             return false;
         }
 
-        // Check if already installed (idempotent) — verify BOTH .drv and .so
+        // Always re-extract the driver — the old cached version may be from
+        // a previous build (e.g. without FreeType) and won't be overwritten
+        // if we skip. Delete old files first to ensure clean install.
         File drvCheck = new File(prefix, "lib/wine/aarch64-windows/winewayland.drv");
         File soCheck = new File(prefix, "lib/wine/aarch64-unix/winewayland.so");
-        if (drvCheck.exists() && drvCheck.length() > 1000
-                && soCheck.exists() && soCheck.length() > 1000) {
-            log("  already installed: drv=" + drvCheck.length() + " bytes, so=" + soCheck.length() + " bytes");
-            return true;
+        if (drvCheck.exists()) {
+            log("  deleting old winewayland.drv (" + drvCheck.length() + " bytes)");
+            drvCheck.delete();
+        }
+        if (soCheck.exists()) {
+            log("  deleting old winewayland.so (" + soCheck.length() + " bytes)");
+            soCheck.delete();
         }
 
         // Extract
