@@ -460,6 +460,8 @@ export ac_cv_lib_freetype_FT_Init_FreeType=yes
 export ac_cv_header_ft2build_h=yes
 export FREETYPE_CFLAGS="-I$FT_DIR/include/freetype2"
 export FREETYPE_LIBS="-L$FT_DIR/lib -lfreetype"
+# Also put -lfreetype in LIBS so it's appended AFTER conftest.o (static lib ordering)
+export LIBS="-lfreetype"
 
 # Pre-seed all the link-test cache vars (avoid the broken pkg-config path in configure.ac)
 export ac_cv_lib_wayland_client_wl_display_connect=yes
