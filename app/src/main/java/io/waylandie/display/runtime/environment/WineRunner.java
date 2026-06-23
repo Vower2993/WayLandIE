@@ -714,12 +714,20 @@ public final class WineRunner {
             if (!localLib.exists()) localLib.mkdirs();
 
             // --- Create bionic-compatible symlinks ---
+            // FreeType: prefer rootfs glibc version (always present), fall back
+            // to Android system lib (may not exist on Samsung devices).
+            // Without FreeType, Wine can't render any text — the desktop
+            // appears blank/white even though it's actually rendering.
+            File rootfsFreetype = new File(rootDir, "usr/lib/aarch64-linux-gnu/libfreetype.so.6");
+            String freetypeTarget = rootfsFreetype.exists()
+                    ? rootfsFreetype.getAbsolutePath()
+                    : "/system/lib64/libfreetype.so";
             String[][] symlinks = {
-                // {symlink name, Android system lib path, description}
+                // {symlink name, target path, description}
                 {"libvulkan.so.1", "/system/lib64/libvulkan.so", "Vulkan loader"},
                 {"libvulkan.so",   "/system/lib64/libvulkan.so", "Vulkan (unversioned)"},
-                {"libfreetype.so.6", "/system/lib64/libfreetype.so", "FreeType fonts"},
-                {"libfreetype.so",   "/system/lib64/libfreetype.so", "FreeType (unversioned)"},
+                {"libfreetype.so.6", freetypeTarget, "FreeType fonts"},
+                {"libfreetype.so",   freetypeTarget, "FreeType (unversioned)"},
                 {"libX11.so.6",    "/system/lib64/libX11.so", "X11 (if Android has it)"},
                 {"libX11.so",      "/system/lib64/libX11.so", "X11 (unversioned)"},
             };

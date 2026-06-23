@@ -43,7 +43,11 @@ import java.util.TreeMap;
 public final class GameLaunchTracer {
 
     private static final String TAG = "WayLandIE/Tracer";
-    private static final long MONITOR_DURATION_MS = 30_000L;
+    // 120 seconds — Wine's wineboot can take 30-60 seconds on first run
+    // (installing Mono, configuring registry, etc.). The previous 30s window
+    // was too short — by the time Wine rendered its first frame, the trace
+    // monitoring was already ending, so we never saw the present result.
+    private static final long MONITOR_DURATION_MS = 120_000L;
     private static final long MONITOR_INTERVAL_MS = 1_000L;
 
     private final Context context;
