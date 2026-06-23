@@ -3597,7 +3597,9 @@ static void emit_pointer_motion(struct server_state *state, double x, double y, 
 
 static void emit_pointer_button(struct server_state *state, const char *button_state, uint32_t time_ms) {
     if (state->focused_surface == NULL) {
-        input_debug_log("pointer-button drop=no-focus state=%s", button_state);
+        printf("wayland-shm-ahb pointer-button drop=no-focus state=%s
+", button_state);
+        fflush(stdout);
         return;
     }
     uint32_t wl_state = strcmp(button_state, "down") == 0
@@ -3618,12 +3620,12 @@ static void emit_pointer_button(struct server_state *state, const char *button_s
         maybe_send_pointer_frame(pointer->resource);
         emitted++;
     }
-    input_debug_log(
-            "pointer-button state=%s emitted=%d pointers=%d focused=%p",
-            button_state,
-            emitted,
-            input_resource_count(&state->pointer_resources),
-            (void *)state->focused_surface);
+    printf("wayland-shm-ahb pointer-button state=%s emitted=%d pointers=%d focused=%p
+",
+           button_state, emitted,
+           input_resource_count(&state->pointer_resources),
+           (void *)state->focused_surface);
+    fflush(stdout);
 }
 
 static void emit_pointer_scroll(struct server_state *state, double hscroll, double vscroll, uint32_t time_ms) {
@@ -3759,11 +3761,12 @@ static void handle_input_line(struct server_state *state, const char *line) {
             xtest_pointer_move(state, x, y);
         } else if (strcmp(action, "button") == 0
                 && input_token_string(line, "state", button_state, sizeof(button_state))) {
-            // Log first 5 button events for diagnostics
+            // Log first 10 button events for diagnostics
             static int button_event_count = 0;
-            if (button_event_count < 5) {
-                printf("wayland-shm-ahb input-button state=%s x=%.1f y=%.1f focused=%p\n",
-                       button_state, x, y, (void*)state->focused_surface);
+            if (button_event_count < 10) {
+                printf("wayland-shm-ahb input-button state=%s x=%.1f y=%.1f focused=%p pointers=%d\n",
+                       button_state, x, y, (void*)state->focused_surface,
+                       input_resource_count(&state->pointer_resources));
                 fflush(stdout);
                 button_event_count++;
             }
