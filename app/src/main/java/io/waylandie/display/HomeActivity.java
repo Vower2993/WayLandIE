@@ -351,15 +351,28 @@ public final class HomeActivity extends Activity {
 
                 String[] extraArgs = gamescopeFinal ? new String[]{"--gamescope"} : new String[0];
 
-                // Launch game directly: wine game.exe
-                // The explorer /desktop=shell wrapper was causing issues with
-                // winewayland.drv (which doesn't support virtual desktops the
-                // same way winex11.drv does). Direct launch lets Wine's
-                // winewayland.drv create the window directly on our Wayland
-                // compositor, which is the correct path for our architecture.
+                // Launch with explorer desktop wrapper — needed for:
+                // 1. File management (Wine's file manager)
+                // 2. Wine configuration (winecfg)
+                // 3. Game launchers (Steam, GOG, Epic) that need desktop UI
+                // 4. Installers with dialog boxes
+                // The desktop wrapper creates a virtual desktop where the game
+                // runs as the shell process. This is the standard Wine desktop
+                // mode — both Winlator and WinNative use this pattern.
+                String desktopSize = "1920x1080";
+                java.util.List<String> wrappedArgs = new java.util.ArrayList<>();
+                wrappedArgs.add("/desktop=shell," + desktopSize);
+                wrappedArgs.add(exePathFinal);
+                if (extraArgs != null) {
+                    for (String a : extraArgs) {
+                        if (!a.isEmpty()) wrappedArgs.add(a);
+                    }
+                }
+                String[] finalArgs = wrappedArgs.toArray(new String[0]);
+
                 io.waylandie.display.runtime.environment.GameLaunchTracer tracer =
                         new io.waylandie.display.runtime.environment.GameLaunchTracer(HomeActivity.this);
-                Process p = tracer.launchAndTrace(exePathFinal, extraArgs, useProtonFinal);
+                Process p = tracer.launchAndTrace("explorer", finalArgs, useProtonFinal);
                 runningWineProcess = p;
                 winePid = (int) getPid(p);
                 runOnUiThread(() -> log("Wine process started (pid=" + winePid + ")"));

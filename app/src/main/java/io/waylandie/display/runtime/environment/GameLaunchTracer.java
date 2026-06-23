@@ -402,6 +402,14 @@ public final class GameLaunchTracer {
         }
         log("");
 
+        // Grace period: wait 10 seconds after monitoring ends to let the
+        // bridge's present_buffer_to_android() complete. The bridge sends
+        // the dmabuf to the Java presenter and waits for a response — if
+        // the trace is written immediately after the loop ends, the present
+        // may still be in progress and the response won't be captured.
+        log("Waiting 10s for pending bridge present to complete…");
+        try { Thread.sleep(10_000L); } catch (InterruptedException ignored) {}
+
         // ---------------------------------------------------------------
         // 7. Final state
         // ---------------------------------------------------------------
