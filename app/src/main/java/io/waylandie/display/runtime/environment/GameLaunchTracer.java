@@ -499,31 +499,44 @@ public final class GameLaunchTracer {
 
     private void writeTraceFile() {
         try {
-            // CRITICAL: Write trace files to APP-PRIVATE storage, NOT the
-            // public Download folder. The Download folder can be wiped by:
-            //   - Wine's explorer.exe (which has write access to Z: → /)
-            //   - Android storage management after a crash
-            //   - The user's file manager
-            // App-private storage (getFilesDir) survives all of these.
-            // The user can access trace files via:
-            //   adb shell run-as io.waylandie.display ls files/logs/
-            //   adb shell run-as io.waylandie.display cat files/logs/launch-trace-*.txt
-            // Or via the in-app "Save Logs" button which copies to Download.
-            File logDir = new File(context.getFilesDir(), "logs");
-            if (!logDir.exists() && !logDir.mkdirs()) {
-                Log.e(TAG, "Failed to create log dir: " + logDir);
+            // Write trace to APP-PRIVATE storage first (safe from Wine crashes).
+            File privateLogDir = new File(context.getFilesDir(), "logs");
+            if (!privateLogDir.exists() && !privateLogDir.mkdirs()) {
+                Log.e(TAG, "Failed to create private log dir: " + privateLogDir);
                 return;
             }
             String fname = "launch-trace-"
                     + new SimpleDateFormat("yyyy-MM-dd_HH-mm-ss", Locale.US).format(new Date())
                     + ".txt";
-            File outFile = new File(logDir, fname);
-            try (Writer w = new OutputStreamWriter(new FileOutputStream(outFile))) {
+            File privateFile = new File(privateLogDir, fname);
+            try (Writer w = new OutputStreamWriter(new FileOutputStream(privateFile))) {
                 w.write(trace.toString());
             }
-            Log.i(TAG, "Trace file written: " + outFile.getAbsolutePath());
+            Log.i(TAG, "Trace written to private storage: " + privateFile.getAbsolutePath());
             io.waylandie.display.shared.util.LogRingBuffer.append(
-                    "[trace] Trace file written: " + outFile.getAbsolutePath());
+                    "[trace] Trace file written: " + privateFile.getAbsolutePath());
+
+            // ALSO copy to Download folder so the user can access it from
+            // their Android file explorer. This is safe because writeTraceFile()
+            // is called AFTER Wine has exited (the trace monitoring loop has
+            // finished), so Wine can't wipe it.
+            try {
+                File publicLogDir = new File(
+                        android.os.Environment.getExternalStorageDirectory(),
+                        "Download/WayLandIE/logs");
+                if (!publicLogDir.exists() && !publicLogDir.mkdirs()) {
+                    Log.w(TAG, "Could not create public log dir: " + publicLogDir);
+                    return;
+                }
+                File publicFile = new File(publicLogDir, fname);
+                java.nio.file.Files.copy(privateFile.toPath(), publicFile.toPath(),
+                        java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                Log.i(TAG, "Trace copied to Download: " + publicFile.getAbsolutePath());
+                io.waylandie.display.shared.util.LogRingBuffer.append(
+                        "[trace] Trace file copied to: " + publicFile.getAbsolutePath());
+            } catch (Exception e) {
+                Log.w(TAG, "Could not copy trace to Download: " + e.getMessage());
+            }
         } catch (IOException e) {
             Log.e(TAG, "Failed to write trace file: " + e.getMessage());
         }
