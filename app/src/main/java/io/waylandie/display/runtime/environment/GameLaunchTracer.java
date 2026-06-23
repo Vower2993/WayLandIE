@@ -203,10 +203,8 @@ public final class GameLaunchTracer {
         }
 
         log("Calling WineRunner.execWine(exePath=" + exePath + ", useProton=" + useProton + ")…");
-        Process wineProcess = null;
         try {
             wineProcess = wineRunner.execWine(exePath, extraArgs, useProton);
-            this.wineProcess = wineProcess; // store for forceWriteTrace()
         } catch (IOException e) {
             log("✗ WineRunner.execWine threw: " + e.getClass().getSimpleName()
                     + ": " + e.getMessage());
