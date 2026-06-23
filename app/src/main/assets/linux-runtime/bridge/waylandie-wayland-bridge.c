@@ -3759,6 +3759,14 @@ static void handle_input_line(struct server_state *state, const char *line) {
             xtest_pointer_move(state, x, y);
         } else if (strcmp(action, "button") == 0
                 && input_token_string(line, "state", button_state, sizeof(button_state))) {
+            // Log first 5 button events for diagnostics
+            static int button_event_count = 0;
+            if (button_event_count < 5) {
+                printf("wayland-shm-ahb input-button state=%s x=%.1f y=%.1f focused=%p\n",
+                       button_state, x, y, (void*)state->focused_surface);
+                fflush(stdout);
+                button_event_count++;
+            }
             emit_pointer_motion(state, x, y, (uint32_t)event_time);
             xtest_pointer_move(state, x, y);
             emit_pointer_button(state, button_state, (uint32_t)event_time);
