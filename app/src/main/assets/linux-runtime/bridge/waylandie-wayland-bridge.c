@@ -1318,7 +1318,9 @@ static int present_buffer_to_android(struct surface_state *surface, struct shm_b
         state->total_app_slot_wait_us += (double)app_slot_wait_us;
         state->app_slot_wait_samples++;
     }
-    if (state->pass_log_interval > 0 && (frame_index % state->pass_log_interval) == 0) {
+    if (state->pass_log_interval > 0
+            ? (frame_index % state->pass_log_interval) == 0
+            : frame_index < 5) {  // Always log first 5 frames for diagnostics
         printf(
             "wayland-shm-ahb frame=%d status=pass kind=dmabuf client=%dx%d format=0x%08x modifier=0x%016" PRIx64 " stride=%d size=%" PRIu64 " zero-copy=gpu driver=%s present-ms=%.3f app-wait-us=%lld app-slot-wait-us=%lld source-wait-us=%lld\n",
             frame_index,
@@ -1341,6 +1343,12 @@ static int present_buffer_to_android(struct surface_state *surface, struct shm_b
 cleanup:
     if (status != 0) {
         g_diag.surfaces_presented_fail++;
+    }
+    // Always log the first frame's present result (pass or fail) for diagnostics
+    if (frame_index == 0) {
+        printf("wayland-shm-ahb frame=0 present-result status=%s\n",
+               status == 0 ? "pass" : "fail");
+        fflush(stdout);
     }
     return status;
 }
