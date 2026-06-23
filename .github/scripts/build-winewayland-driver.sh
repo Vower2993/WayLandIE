@@ -17,7 +17,8 @@ echo "=== [1/9] Install build deps ==="
 sudo apt-get install -y -qq \
   autoconf automake libtool bison flex gettext \
   pkg-config python3 python3-pip libffi-dev libexpat1-dev \
-  libxml2-dev libxml2 libxkbcommon-dev wayland-protocols libwayland-bin libxkbregistry-dev
+  libxml2-dev libxml2 libxkbcommon-dev wayland-protocols libwayland-bin libxkbregistry-dev \
+  libfreetype-dev libfontconfig1-dev
 pip3 install --user meson ninja 2>&1 | tail -3
 export PATH="$HOME/.local/bin:$PATH"
 
@@ -421,7 +422,7 @@ export CXXFLAGS="-O2"
   --without-x --without-opengl --without-vulkan \
   --without-alsa --without-oss --without-pulse --without-cups \
   --without-sane --without-usb --without-sdl --without-gstreamer \
-  --without-freetype --without-fontconfig --without-v4l2 \
+  --with-freetype --with-fontconfig --without-v4l2 \
   --enable-win64 \
   --disable-tests \
   2>&1 | tail -10
@@ -506,7 +507,7 @@ export ac_cv_lib_EGL_eglGetProcAddress=yes
   --without-x \
   --without-alsa --without-oss --without-pulse --without-cups \
   --without-sane --without-usb --without-sdl --without-gstreamer \
-  --without-freetype --without-fontconfig --without-v4l2 \
+  --with-freetype --with-fontconfig --without-v4l2 \
   --enable-win64 \
   --enable-archs=arm64ec,aarch64 \
   --with-mingw=$LLVM_MINGW_DIR/bin/clang \

@@ -43,11 +43,11 @@ import java.util.TreeMap;
 public final class GameLaunchTracer {
 
     private static final String TAG = "WayLandIE/Tracer";
-    // 120 seconds — Wine's wineboot can take 30-60 seconds on first run
-    // (installing Mono, configuring registry, etc.). The previous 30s window
-    // was too short — by the time Wine rendered its first frame, the trace
-    // monitoring was already ending, so we never saw the present result.
-    private static final long MONITOR_DURATION_MS = 120_000L;
+    // 180 seconds — Wine's wineboot can take 2+ minutes on first run
+    // (installing Mono, configuring registry, etc.). The 120s window was
+    // still too short — Wine rendered its first frame at the 120s mark
+    // and the trace ended before shm-to-ahb could complete.
+    private static final long MONITOR_DURATION_MS = 180_000L;
     private static final long MONITOR_INTERVAL_MS = 1_000L;
 
     private final Context context;
@@ -376,6 +376,23 @@ public final class GameLaunchTracer {
             if (!wineAlive) {
                 log("  → Wine process exited. Stopping monitor.");
                 break;
+            }
+
+            // Every 30 seconds, dump any new bridge output to the trace
+            // so we can see bridge events as they happen (not just at the end).
+            if (elapsed > 0 && elapsed % 30_000L < MONITOR_INTERVAL_MS) {
+                String bridgeSnapshot = io.waylandie.display.runtime.environment.WineRunner.bridgeOutput.toString();
+                if (bridgeSnapshot != null && !bridgeSnapshot.isEmpty()) {
+                    int newLines = 0;
+                    for (String line : bridgeSnapshot.split("\n")) {
+                        if (!line.isEmpty() && !trace.toString().contains(line)) {
+                            newLines++;
+                        }
+                    }
+                    if (newLines > 0) {
+                        log("  [bridge snapshot at " + (elapsed/1000) + "s: " + newLines + " new lines]");
+                    }
+                }
             }
 
             try {
