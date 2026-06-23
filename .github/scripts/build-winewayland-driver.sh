@@ -459,9 +459,10 @@ unset PKG_CONFIG_SYSROOT_DIR
 export ac_cv_lib_freetype_FT_Init_FreeType=yes
 export ac_cv_header_ft2build_h=yes
 export FREETYPE_CFLAGS="-I$FT_DIR/include/freetype2"
-export FREETYPE_LIBS="$FT_DIR/lib/libfreetype.a"
-# Use full path to .a instead of -lfreetype to avoid LIBS leaking into
-# PE cross-compiler checks (which broke arm64ec detection)
+export FREETYPE_LIBS="-L$FT_DIR/lib -lfreetype"
+# Create a .so symlink to the .a so -lfreetype finds it
+# (bionic's linker needs either a .so or .a in the -L path)
+ln -sf libfreetype.a "$FT_DIR/lib/libfreetype.so" 2>/dev/null || true
 
 # Pre-seed all the link-test cache vars (avoid the broken pkg-config path in configure.ac)
 export ac_cv_lib_wayland_client_wl_display_connect=yes
