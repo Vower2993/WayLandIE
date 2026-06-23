@@ -496,7 +496,31 @@ public final class WineRunner {
 
         ProcessBuilder pb = new ProcessBuilder(cmd);
         pb.directory(rootDir);
-        pb.redirectErrorStream(true);
+
+        // CRITICAL: Redirect Wine's stderr to a FILE, not a Java pipe.
+        // Wine with WINEDEBUG=+loaddll,+module,+input,+event can produce
+        // megabytes of output. The kernel pipe buffer is only 64KB on
+        // Android — if the Java reader thread can't drain fast enough,
+        // Wine blocks on write() forever and appears hung.
+        // By redirecting stderr to a file, Wine can dump freely without
+        // ever blocking. The tracer reads the file at the end.
+        File wineStderrFile = new File("/storage/emulated/0/Download/WayLandIE/logs/wine-stderr.log");
+        try {
+            wineStderrFile.getParentFile().mkdirs();
+            // Truncate so each launch starts fresh
+            new java.io.FileOutputStream(wineStderrFile, false).close();
+        } catch (IOException ignored) {
+            // Non-fatal — if we can't truncate, Wine will append.
+        }
+        pb.redirectErrorStream(false);
+        try {
+            pb.redirectError(ProcessBuilder.Redirect.to(wineStderrFile));
+            Log.i(TAG, "Wine stderr → " + wineStderrFile.getAbsolutePath());
+        } catch (Exception e) {
+            // Fallback: merge streams if file redirect fails (legacy path)
+            Log.w(TAG, "Wine stderr redirect to file failed, falling back to merged stream: " + e.getMessage());
+            pb.redirectErrorStream(true);
+        }
 
         Map<String, String> env = pb.environment();
         env.clear();
@@ -511,8 +535,9 @@ public final class WineRunner {
 
         Process p = pb.start();
 
-        // Capture output in a background thread so we can see Wine errors
-        // in logcat. Without this, if Wine crashes we have no idea why.
+        // Capture STDOUT (not stderr — that goes to file now) in a background
+        // thread so we can see Wine errors in logcat. Without this, if Wine
+        // crashes we have no idea why.
         new Thread(() -> {
             try (java.io.BufferedReader reader = new java.io.BufferedReader(
                     new java.io.InputStreamReader(p.getInputStream()))) {
@@ -679,7 +704,23 @@ public final class WineRunner {
 
         ProcessBuilder pb = new ProcessBuilder(cmd);
         pb.directory(rootDir);
-        pb.redirectErrorStream(true);
+
+        // CRITICAL: Redirect Wine's stderr to a FILE (same as glibc path above).
+        // See the comment in launchNative() for the full explanation.
+        File wineStderrFileBionic = new File("/storage/emulated/0/Download/WayLandIE/logs/wine-stderr.log");
+        try {
+            wineStderrFileBionic.getParentFile().mkdirs();
+            new java.io.FileOutputStream(wineStderrFileBionic, false).close();
+        } catch (IOException ignored) {
+        }
+        pb.redirectErrorStream(false);
+        try {
+            pb.redirectError(ProcessBuilder.Redirect.to(wineStderrFileBionic));
+            Log.i(TAG, "Wine stderr (bionic) → " + wineStderrFileBionic.getAbsolutePath());
+        } catch (Exception e) {
+            Log.w(TAG, "Wine stderr redirect to file failed (bionic), falling back to merged stream: " + e.getMessage());
+            pb.redirectErrorStream(true);
+        }
 
         Map<String, String> env = pb.environment();
         env.clear();
@@ -1552,48 +1593,71 @@ public final class WineRunner {
         if (!winePrefix.exists()) winePrefix.mkdirs();
         env.put("WINEPREFIX", winePrefix.getAbsolutePath());
         env.put("WINEDLLOVERRIDES", "d3d9,d3d10core,d3d11,dxgi=native;winex11.drv=d;winewayland.drv=b,native");
-        // CRITICAL: Enable Wine debug channels for display driver + module loading.
-        // This tells us EXACTLY which .drv files Wine tries to load and why they
-        // fail. The output goes to Wine's stderr (captured by GameLaunchTracer).
-        // WINEDEBUG=-all: silence all Wine debug output to prevent stderr
-        // pipe deadlock. The +seh,+event diagnostic confirmed Wine takes
-        // ~5 minutes for wineboot (no exceptions, just slow initialization).
-        // Switching back to -all for production use.
-        env.put("WINEDEBUG", "-all");
+        // === WINEDEBUG ===
+        // Selective Wine debug channels — NOT +all (which produces GB of output
+        // and deadlocks the stderr pipe). We redirect stderr to a FILE (see
+        // launchNative() below) so Wine can dump freely without ever blocking.
+        // Channels chosen:
+        //   +loaddll        → DLL load events (proves DXVK d3d11.dll loaded)
+        //   +module         → module load/unload events
+        //   +input          → input events flowing through Wine's input queue
+        //   +event          → window/event dispatch (clicks, focus changes)
+        //   +winewayland_drv → Wayland driver messages
+        // FORBIDDEN: +relay (logs every API call → GB output → pipe deadlock)
+        env.put("WINEDEBUG", "+loaddll,+module,+input,+event,+winewayland_drv");
         env.put("DXVK_STATE_CACHE_PATH", new File(homeDir, ".dxvk-cache").getAbsolutePath());
         env.put("MESA_VK_WSI_PRESENT_MODE", "immediate");
 
         // === DXVK DEBUGGING ===
-        // DXVK_LOG_LEVEL controls DXVK's own logging (goes to stderr):
+        // DXVK_LOG_LEVEL controls DXVK's own logging (goes to file via DXVK_LOG_PATH):
         //   none   = no logging (default)
         //   error  = errors only
         //   warn   = warnings + errors
         //   info   = info + warnings + errors (recommended for debugging)
-        //   debug  = everything (very verbose, may cause pipe deadlock)
+        //   debug  = everything (very verbose)
         env.put("DXVK_LOG_LEVEL", "info");
-        // Log DXVK to a file instead of stderr (avoids pipe deadlock)
-        env.put("DXVK_LOG_PATH", new File(homeDir, ".dxvk-logs").getAbsolutePath());
+        // Log DXVK to a file (NOT stderr — stderr is already used by Wine)
+        File dxvkLogDir = new File("/storage/emulated/0/Download/WayLandIE/logs/dxvk");
+        if (!dxvkLogDir.exists()) dxvkLogDir.mkdirs();
+        env.put("DXVK_LOG_PATH", dxvkLogDir.getAbsolutePath());
         // Enable DXVK HUD (on-screen display) for FPS/version info
-        // env.put("DXVK_HUD", "version,fps,devinfo");  // Uncomment to enable HUD
+        env.put("DXVK_HUD", "fps,frametimes,devinfo,gpuload");
+        env.put("DXVK_FRAME_RATE", "0"); // 0 = uncapped
 
         // === FEX DEBUGGING ===
-        // FEX_DEBUG controls FEX x86→ARM translation logging
-        //   0 = no logging (default)
-        //   1 = basic logging (translation hits/misses)
-        env.put("FEX_DEBUG", "0");
-        // FEX_CORE_DEBUG enables detailed FEX core instruction logging
-        // env.put("FEX_CORE_DEBUG", "1");  // Uncomment for instruction-level debug
+        // FEX_LOG_LEVEL controls FEX x86→ARM translation logging:
+        //   none   = no logging
+        //   info   = basic translation decisions
+        //   debug  = instruction-level (very verbose)
+        env.put("FEX_LOG_LEVEL", "info");
+        env.put("FEX_PRINT_OPTIONS", "1"); // dump parsed FEX config at startup
+        env.put("FEX_DISABLE_JIT", "0");   // 0 = JIT enabled (default)
+        // FEX_DEBUG_FILE — FEX writes its log here instead of stderr
+        env.put("FEX_DEBUG_FILE", "/storage/emulated/0/Download/WayLandIE/logs/fex.log");
+        // FEX_ROOTFS — where the x86_64 rootfs lives (if installed)
+        File fexRootfs = new File(context.getFilesDir(), "contents/fex/active/rootfs");
+        if (fexRootfs.isDirectory()) {
+            env.put("FEX_ROOTFS", fexRootfs.getAbsolutePath());
+        }
+        env.put("FEX_THROW_ON_INVALID", "1"); // fail fast on bad x86 code
+        env.put("FEX_INTERPRETER_VISITOR", "0"); // 0 = JIT (default)
 
         // === VULKAN DEBUGGING ===
-        // Enable Vulkan validation layer diagnostics (optional, may slow things down)
-        // env.put("VK_INSTANCE_LAYERS", "VK_LAYER_KHRONOS_validation");
-        // VK_LOCALE controls Vulkan error messages
+        // VK_EXT_debug_utils — enables debug messenger in apps that opt in
+        env.put("VK_EXT_debug_utils", "1");
+        // VK_INSTANCE_LAYERS — explicit layers (monitor = FPS overlay)
+        env.put("VK_INSTANCE_LAYERS", "VK_LAYER_LUNARG_monitor");
+        env.put("MESA_VK_DONT_CARE_ASPECT", "1");
         env.put("VK_LOCALE", "en");
+        // adrenotools + Turnip driver debug
+        env.put("ADRENOTOOLS_LOG_LEVEL", "1");
+        env.put("TU_DEBUG", "perf"); // Turnip driver perf warnings
 
         // === INPUT DEBUGGING ===
-        // Enable bridge input debug logging (logs to file, not stdout)
+        // Bridge input debug logging — writes detailed input events to a file
         env.put("WAYLANDIE_WAYLAND_INPUT_DEBUG", "1");
-        env.put("WAYLANDIE_WAYLAND_INPUT_LOG", new File(homeDir, "input-debug.log").getAbsolutePath());
+        env.put("WAYLANDIE_WAYLAND_INPUT_LOG",
+                "/storage/emulated/0/Download/WayLandIE/logs/wayland-input.log");
         // Winlator-inspired env vars — Wine needs these for proper operation
         env.put("WINE_NO_DUPLICATE_EXPLORER", "1");
         env.put("FONTCONFIG_PATH", new File(rootDir, "usr/etc/fonts").getAbsolutePath());

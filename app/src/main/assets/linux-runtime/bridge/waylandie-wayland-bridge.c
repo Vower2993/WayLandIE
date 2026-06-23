@@ -3005,11 +3005,21 @@ static void send_surface_focus(
     if (state->focused_surface == surface_resource) {
         return;
     }
+    struct wl_resource *old_focus = state->focused_surface;
     state->focused_surface = surface_resource;
-    printf("wayland-shm-ahb input-focus surface=%p size=%dx%d\n",
+    int pointers_total = input_resource_count(&state->pointer_resources);
+    int keyboards_total = input_resource_count(&state->keyboard_resources);
+    int touches_total = input_resource_count(&state->touch_resources);
+    printf("wayland-shm-ahb input-focus surface=%p size=%dx%d old=%p new=%p xdg=%d subsurface=%d pointers=%d keyboards=%d touches=%d pointer_xy=(%.1f,%.1f)\n",
             (void *)surface,
             state->focused_surface_width,
-            state->focused_surface_height);
+            state->focused_surface_height,
+            (void *)old_focus,
+            (void *)surface_resource,
+            surface->is_xdg_surface,
+            surface->is_subsurface,
+            pointers_total, keyboards_total, touches_total,
+            state->pointer_x, state->pointer_y);
     fflush(stdout);
     input_debug_log(
             "focus surface=%p resource=%p xdg=%d subsurface=%d size=%dx%d pointers=%d keyboards=%d touches=%d",
@@ -3019,9 +3029,13 @@ static void send_surface_focus(
             surface->is_subsurface,
             state->focused_surface_width,
             state->focused_surface_height,
-            input_resource_count(&state->pointer_resources),
-            input_resource_count(&state->keyboard_resources),
-            input_resource_count(&state->touch_resources));
+            pointers_total, keyboards_total, touches_total);
+
+    // For each existing pointer/keyboard that belongs to the SAME client as
+    // the newly-focused surface, send an enter event. Count them so we can
+    // verify in the trace whether any enters were actually sent.
+    int pointer_enters_sent = 0;
+    int keyboard_enters_sent = 0;
 
     struct input_resource_state *keyboard;
     wl_list_for_each(keyboard, &state->keyboard_resources, link) {
@@ -3039,12 +3053,17 @@ static void send_surface_focus(
         }
         struct wl_array keys;
         wl_array_init(&keys);
+        uint32_t kb_serial = next_input_serial(state);
         wl_keyboard_send_enter(
                 keyboard->resource,
-                next_input_serial(state),
+                kb_serial,
                 surface_resource,
                 &keys);
         wl_array_release(&keys);
+        keyboard_enters_sent++;
+        printf("wayland-shm-ahb keyboard-enter sent serial=%u kb=%p focused=%p\n",
+                kb_serial, (void *)keyboard->resource, (void *)surface_resource);
+        fflush(stdout);
     }
 
     struct input_resource_state *pointer;
@@ -3052,14 +3071,23 @@ static void send_surface_focus(
         if (!resource_same_client(pointer->resource, surface_resource)) {
             continue;
         }
+        uint32_t ptr_serial = next_input_serial(state);
         wl_pointer_send_enter(
                 pointer->resource,
-                next_input_serial(state),
+                ptr_serial,
                 surface_resource,
                 wl_fixed_from_double(state->pointer_x),
                 wl_fixed_from_double(state->pointer_y));
         maybe_send_pointer_frame(pointer->resource);
+        pointer_enters_sent++;
+        printf("wayland-shm-ahb pointer-enter sent serial=%u ptr=%p focused=%p x=%.1f y=%.1f\n",
+                ptr_serial, (void *)pointer->resource, (void *)surface_resource,
+                state->pointer_x, state->pointer_y);
+        fflush(stdout);
     }
+    printf("wayland-shm-ahb input-focus enters-sent pointers=%d keyboards=%d focused=%p\n",
+            pointer_enters_sent, keyboard_enters_sent, (void *)surface_resource);
+    fflush(stdout);
 }
 
 static void send_focus_for_presentable(
@@ -3553,20 +3581,36 @@ static void maybe_send_pointer_frame(struct wl_resource *resource) {
 
 static void emit_pointer_enter_if_needed(struct server_state *state, struct wl_resource *pointer_resource) {
     if (state->focused_surface == NULL || !resource_same_client(pointer_resource, state->focused_surface)) {
+        printf("wayland-shm-ahb pointer-enter skip focused=%p ptr=%p same-client=0 pointers=%d\n",
+                (void *)state->focused_surface,
+                (void *)pointer_resource,
+                input_resource_count(&state->pointer_resources));
+        fflush(stdout);
         return;
     }
+    uint32_t serial = next_input_serial(state);
     wl_pointer_send_enter(
             pointer_resource,
-            next_input_serial(state),
+            serial,
             state->focused_surface,
             wl_fixed_from_double(state->pointer_x),
             wl_fixed_from_double(state->pointer_y));
     maybe_send_pointer_frame(pointer_resource);
+    printf("wayland-shm-ahb pointer-enter sent serial=%u focused=%p ptr=%p x=%.1f y=%.1f pointers=%d\n",
+            serial,
+            (void *)state->focused_surface,
+            (void *)pointer_resource,
+            state->pointer_x,
+            state->pointer_y,
+            input_resource_count(&state->pointer_resources));
+    fflush(stdout);
 }
 
 static void emit_pointer_motion(struct server_state *state, double x, double y, uint32_t time_ms) {
+    int total_pointers = input_resource_count(&state->pointer_resources);
     if (state->focused_surface == NULL) {
-        printf("wayland-shm-ahb pointer-motion drop=no-focus x=%.1f y=%.1f\n", x, y);
+        printf("wayland-shm-ahb pointer-motion drop=no-focus x=%.1f y=%.1f pointers=%d\n",
+                x, y, total_pointers);
         fflush(stdout);
         return;
     }
@@ -3574,9 +3618,11 @@ static void emit_pointer_motion(struct server_state *state, double x, double y, 
     state->pointer_x = x;
     state->pointer_y = y;
     int emitted = 0;
+    int skipped = 0;
     struct input_resource_state *pointer;
     wl_list_for_each(pointer, &state->pointer_resources, link) {
         if (!resource_same_client(pointer->resource, state->focused_surface)) {
+            skipped++;
             continue;
         }
         wl_pointer_send_motion(
@@ -3587,50 +3633,50 @@ static void emit_pointer_motion(struct server_state *state, double x, double y, 
         maybe_send_pointer_frame(pointer->resource);
         emitted++;
     }
-    // Always log first 10 pointer motions for diagnostics
-    {
-        static int motion_log_count = 0;
-        if (motion_log_count < 10) {
-            printf("wayland-shm-ahb pointer-motion x=%.1f y=%.1f emitted=%d pointers=%d focused=%p\n",
-                   x, y, emitted,
-                   input_resource_count(&state->pointer_resources),
-                   (void *)state->focused_surface);
-            fflush(stdout);
-            motion_log_count++;
-        }
-    }
+    // Always log pointer motion (no cap) — needed to diagnose click-vs-drag
+    printf("wayland-shm-ahb pointer-motion x=%.1f y=%.1f emitted=%d skipped=%d total=%d focused=%p time=%u\n",
+           x, y, emitted, skipped, total_pointers,
+           (void *)state->focused_surface, time_ms);
+    fflush(stdout);
 }
 
 static void emit_pointer_button(struct server_state *state, const char *button_state, uint32_t time_ms) {
+    int total_pointers = input_resource_count(&state->pointer_resources);
     if (state->focused_surface == NULL) {
-        printf("wayland-shm-ahb pointer-button drop=no-focus state=%s
-", button_state);
+        printf("wayland-shm-ahb pointer-button drop=no-focus state=%s pointers=%d time=%u\n",
+                button_state, total_pointers, time_ms);
         fflush(stdout);
         return;
     }
     uint32_t wl_state = strcmp(button_state, "down") == 0
             ? WL_POINTER_BUTTON_STATE_PRESSED
             : WL_POINTER_BUTTON_STATE_RELEASED;
+    uint32_t serial_before = state->input_serial;
     int emitted = 0;
+    int skipped = 0;
     struct input_resource_state *pointer;
     wl_list_for_each(pointer, &state->pointer_resources, link) {
         if (!resource_same_client(pointer->resource, state->focused_surface)) {
+            skipped++;
             continue;
         }
+        uint32_t this_serial = next_input_serial(state);
         wl_pointer_send_button(
                 pointer->resource,
-                next_input_serial(state),
+                this_serial,
                 time_ms,
                 WAYLANDIE_BTN_LEFT,
                 wl_state);
         maybe_send_pointer_frame(pointer->resource);
         emitted++;
+        printf("wayland-shm-ahb pointer-button-send serial=%u state=%s btn=%d wl_state=%u ptr=%p time=%u\n",
+                this_serial, button_state, WAYLANDIE_BTN_LEFT, wl_state,
+                (void *)pointer->resource, time_ms);
+        fflush(stdout);
     }
-    printf("wayland-shm-ahb pointer-button state=%s emitted=%d pointers=%d focused=%p
-",
-           button_state, emitted,
-           input_resource_count(&state->pointer_resources),
-           (void *)state->focused_surface);
+    printf("wayland-shm-ahb pointer-button state=%s emitted=%d skipped=%d total=%d focused=%p serial_start=%u time=%u\n",
+            button_state, emitted, skipped, total_pointers,
+            (void *)state->focused_surface, serial_before, time_ms);
     fflush(stdout);
 }
 
@@ -3750,7 +3796,18 @@ static void handle_input_line(struct server_state *state, const char *line) {
     input_token_int(line, "id", &touch_id);
     input_token_int(line, "keycode", &keycode);
     input_token_int(line, "time", &event_time);
+    double pre_map_x = x;
+    double pre_map_y = y;
     map_input_to_focused_surface(state, input_width, input_height, &x, &y);
+    int pointers_total = input_resource_count(&state->pointer_resources);
+    int keyboards_total = input_resource_count(&state->keyboard_resources);
+    int touches_total = input_resource_count(&state->touch_resources);
+    printf("wayland-shm-ahb input-line kind=%s action=%s pre_map=(%.1f,%.1f) post_map=(%.1f,%.1f) iw=%.0f ih=%.0f focused=%p pointers=%d keyboards=%d touches=%d time=%d\n",
+            kind, action, pre_map_x, pre_map_y, x, y,
+            input_width, input_height,
+            (void *)state->focused_surface,
+            pointers_total, keyboards_total, touches_total, event_time);
+    fflush(stdout);
     input_debug_log(
             "input-line kind=%s action=%s x=%.1f y=%.1f width=%.1f height=%.1f focused=%p",
             kind,
@@ -3767,15 +3824,12 @@ static void handle_input_line(struct server_state *state, const char *line) {
             xtest_pointer_move(state, x, y);
         } else if (strcmp(action, "button") == 0
                 && input_token_string(line, "state", button_state, sizeof(button_state))) {
-            // Log first 10 button events for diagnostics
-            static int button_event_count = 0;
-            if (button_event_count < 10) {
-                printf("wayland-shm-ahb input-button state=%s x=%.1f y=%.1f focused=%p pointers=%d\n",
-                       button_state, x, y, (void*)state->focused_surface,
-                       input_resource_count(&state->pointer_resources));
-                fflush(stdout);
-                button_event_count++;
-            }
+            // Log EVERY input-button event (no cap) — this is the entry point
+            // for tap-to-click and is critical for diagnosing click failures.
+            printf("wayland-shm-ahb input-button state=%s x=%.1f y=%.1f focused=%p pointers=%d time=%d\n",
+                   button_state, x, y, (void*)state->focused_surface,
+                   pointers_total, event_time);
+            fflush(stdout);
             emit_pointer_motion(state, x, y, (uint32_t)event_time);
             xtest_pointer_move(state, x, y);
             emit_pointer_button(state, button_state, (uint32_t)event_time);
@@ -3949,20 +4003,28 @@ static void seat_get_pointer(struct wl_client *client, struct wl_resource *resou
     input->resource = pointer_resource;
     wl_list_insert(&state->pointer_resources, &input->link);
     wl_resource_set_implementation(pointer_resource, &pointer_impl, input, destroy_input_resource);
-    printf("wayland-shm-ahb seat-get-pointer resource=%p focus=%p same-client=%d total=%d\n",
+    int total_pointers = input_resource_count(&state->pointer_resources);
+    int same_client = resource_same_client(pointer_resource, state->focused_surface);
+    printf("wayland-shm-ahb seat-get-pointer ptr=%p focused=%p same-client=%d total=%d pointer_x=%.1f pointer_y=%.1f\n",
            (void *)pointer_resource,
            (void *)state->focused_surface,
-           resource_same_client(pointer_resource, state->focused_surface),
-           input_resource_count(&state->pointer_resources));
+           same_client, total_pointers,
+           state->pointer_x, state->pointer_y);
     fflush(stdout);
-    if (resource_same_client(pointer_resource, state->focused_surface)) {
+    if (same_client) {
+        uint32_t enter_serial = next_input_serial(state);
         wl_pointer_send_enter(
                 pointer_resource,
-                next_input_serial(state),
+                enter_serial,
                 state->focused_surface,
                 wl_fixed_from_double(state->pointer_x),
                 wl_fixed_from_double(state->pointer_y));
         maybe_send_pointer_frame(pointer_resource);
+        printf("wayland-shm-ahb seat-get-pointer enter-sent serial=%u ptr=%p focused=%p x=%.1f y=%.1f\n",
+                enter_serial, (void *)pointer_resource,
+                (void *)state->focused_surface,
+                state->pointer_x, state->pointer_y);
+        fflush(stdout);
     }
 }
 

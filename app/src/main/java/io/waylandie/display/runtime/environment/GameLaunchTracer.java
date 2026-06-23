@@ -171,6 +171,24 @@ public final class GameLaunchTracer {
         env.put("WINEPREFIX", winePrefix.getAbsolutePath());
         env.put("WINEDLLOVERRIDES", "d3d9,d3d10core,d3d11,dxgi=native;winex11.drv=d;winewayland.drv=b,native");
         env.put("MESA_VK_WSI_PRESENT_MODE", "immediate");
+        // Mirror WineRunner diagnostics env (so trace shows what Wine will see)
+        env.put("WINEDEBUG", "+loaddll,+module,+input,+event,+winewayland_drv");
+        env.put("DXVK_LOG_LEVEL", "info");
+        env.put("DXVK_LOG_PATH", "/storage/emulated/0/Download/WayLandIE/logs/dxvk");
+        env.put("DXVK_HUD", "fps,frametimes,devinfo,gpuload");
+        env.put("DXVK_FRAME_RATE", "0");
+        env.put("FEX_LOG_LEVEL", "info");
+        env.put("FEX_PRINT_OPTIONS", "1");
+        env.put("FEX_DISABLE_JIT", "0");
+        env.put("FEX_DEBUG_FILE", "/storage/emulated/0/Download/WayLandIE/logs/fex.log");
+        env.put("FEX_THROW_ON_INVALID", "1");
+        env.put("FEX_INTERPRETER_VISITOR", "0");
+        env.put("VK_EXT_debug_utils", "1");
+        env.put("VK_INSTANCE_LAYERS", "VK_LAYER_LUNARG_monitor");
+        env.put("ADRENOTOOLS_LOG_LEVEL", "1");
+        env.put("TU_DEBUG", "perf");
+        env.put("WAYLANDIE_WAYLAND_INPUT_DEBUG", "1");
+        env.put("WAYLANDIE_WAYLAND_INPUT_LOG", "/storage/emulated/0/Download/WayLandIE/logs/wayland-input.log");
         env.put("WINE_NO_DUPLICATE_EXPLORER", "1");
         env.put("FONTCONFIG_PATH", new File(rootDir, "usr/etc/fonts").getAbsolutePath());
         env.put("GST_PLUGIN_PATH", new File(rootDir, "usr/lib/gstreamer-1.0").getAbsolutePath());
@@ -475,11 +493,82 @@ public final class GameLaunchTracer {
         log("");
 
         // ---------------------------------------------------------------
+        // 8c. Dump wine-stderr.log (Wine's WINEDEBUG output redirected to file)
+        // ---------------------------------------------------------------
+        logSection("WINE STDERR (from wine-stderr.log file)");
+        File wineStderrFile = new File("/storage/emulated/0/Download/WayLandIE/logs/wine-stderr.log");
+        dumpFileTail(wineStderrFile, 500);
+        log("");
+
+        // ---------------------------------------------------------------
+        // 8d. Dump wayland-input.log (bridge's input_debug_log file output)
+        // ---------------------------------------------------------------
+        logSection("WAYLAND BRIDGE INPUT LOG (from wayland-input.log)");
+        File waylandInputFile = new File("/storage/emulated/0/Download/WayLandIE/logs/wayland-input.log");
+        dumpFileTail(waylandInputFile, 500);
+        log("");
+
+        // ---------------------------------------------------------------
+        // 8e. Dump FEX log if it exists
+        // ---------------------------------------------------------------
+        logSection("FEX LOG (from fex.log)");
+        File fexLogFile = new File("/storage/emulated/0/Download/WayLandIE/logs/fex.log");
+        dumpFileTail(fexLogFile, 200);
+        log("");
+
+        // ---------------------------------------------------------------
+        // 8f. Dump DXVK logs if they exist (dxvk/dxvk-<pid>.log)
+        // ---------------------------------------------------------------
+        logSection("DXVK LOG (from dxvk/dxvk-*.log)");
+        File dxvkLogDir = new File("/storage/emulated/0/Download/WayLandIE/logs/dxvk");
+        if (dxvkLogDir.isDirectory()) {
+            File[] dxvkLogs = dxvkLogDir.listFiles();
+            if (dxvkLogs != null && dxvkLogs.length > 0) {
+                for (File dxvkLog : dxvkLogs) {
+                    if (dxvkLog.isFile()) {
+                        log("  --- " + dxvkLog.getName() + " ---");
+                        dumpFileTail(dxvkLog, 200);
+                    }
+                }
+            } else {
+                log("  (dxvk dir empty — DXVK may not have loaded)");
+            }
+        } else {
+            log("  (dxvk log dir not created — DXVK may not have loaded)");
+        }
+        log("");
+
+        // ---------------------------------------------------------------
         // 9. Write trace file
         // ---------------------------------------------------------------
         writeTraceFile();
 
         return wineProcess;
+    }
+
+    /** Dump the last N lines of a file to the trace (prefixed with "    "). */
+    private void dumpFileTail(File f, int maxLines) {
+        if (f == null || !f.isFile()) {
+            log("  (file not found: " + (f == null ? "null" : f.getAbsolutePath()) + ")");
+            return;
+        }
+        try {
+            java.util.Deque<String> tail = new java.util.ArrayDeque<>(maxLines + 1);
+            try (java.io.BufferedReader r = new java.io.BufferedReader(
+                    new java.io.InputStreamReader(new java.io.FileInputStream(f)))) {
+                String line;
+                while ((line = r.readLine()) != null) {
+                    tail.addLast(line);
+                    if (tail.size() > maxLines) tail.removeFirst();
+                }
+            }
+            log("  (" + f.getName() + " — last " + tail.size() + " lines)");
+            for (String line : tail) {
+                log("    " + line);
+            }
+        } catch (IOException e) {
+            log("  (read error: " + e.getMessage() + ")");
+        }
     }
 
     private void checkFile(String label, File f) {
