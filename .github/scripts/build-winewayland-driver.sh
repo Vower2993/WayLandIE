@@ -458,7 +458,7 @@ unset PKG_CONFIG_SYSROOT_DIR
 # FreeType: Wine uses WINE_CHECK_SONAME (not AC_CHECK_LIB) which tries to
 # dlopen the .so at runtime. In cross-compile, it can't run the binary, so
 # it checks the cache var ac_cv_lib_soname_freetype. Set it to the .so path.
-export ac_cv_lib_soname_freetype=libfreetype.so
+export ac_cv_lib_soname_freetype=libfreetype.so.6
 export ac_cv_header_ft2build_h=yes
 export FREETYPE_CFLAGS="-I$FT_DIR/include/freetype2"
 export FREETYPE_LIBS="-L$FT_DIR/lib -lfreetype"
