@@ -1494,7 +1494,15 @@ public final class WineRunner {
         // CRITICAL: Enable Wine debug channels for display driver + module loading.
         // This tells us EXACTLY which .drv files Wine tries to load and why they
         // fail. The output goes to Wine's stderr (captured by GameLaunchTracer).
-        env.put("WINEDEBUG", "+module,+display,+driver,+sysparams,+waylanddrv");
+        // CRITICAL: Set WINEDEBUG=-all to prevent stderr pipe deadlock.
+        // WinNative's research confirms: Wine's debug output (fixme:/err:/trace:)
+        // fills the 64KB kernel pipe buffer and the child BLOCKS FOREVER if
+        // nothing drains stderr fast enough. This was the root cause of
+        // "1 frame displayed then nothing" — Wine rendered 1 frame, tried to
+        // write debug output, the pipe filled, and Wine deadlocked.
+        // To enable debug logging for troubleshooting, set this to e.g.
+        // "+module,+display" — but be aware it may cause deadlocks.
+        env.put("WINEDEBUG", "-all");
         env.put("DXVK_STATE_CACHE_PATH", new File(homeDir, ".dxvk-cache").getAbsolutePath());
         env.put("MESA_VK_WSI_PRESENT_MODE", "immediate");
         // Winlator-inspired env vars — Wine needs these for proper operation

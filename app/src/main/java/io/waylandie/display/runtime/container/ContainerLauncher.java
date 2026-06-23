@@ -71,14 +71,14 @@ public class ContainerLauncher {
         }
 
         // For desktop mode, we launch wine explorer.exe with /desktop flag
-        // This creates a virtual desktop window that contains the Wine desktop
+        // This creates a virtual desktop window that contains the Wine desktop.
+        // The game .exe is NOT passed here — desktop mode just shows the desktop.
         String desktopSize = container.getDisplayWidth() + "x" + container.getDisplayHeight();
-        String explorerArgs = "/desktop=shell," + desktopSize + " explorer.exe";
         log("desktop size: " + desktopSize);
-        log("launch args: " + explorerArgs);
+        log("launch args: explorer /desktop=shell," + desktopSize);
 
         try {
-            Process p = wineRunner.execWine("C:\\windows\\explorer.exe",
+            Process p = wineRunner.execWine("explorer",
                     new String[]{"/desktop=shell," + desktopSize}, true);
             log("Wine process started: pid=" + getPid(p));
             log("=== ContainerLauncher: launchDesktop COMPLETE ===");
@@ -92,6 +92,16 @@ public class ContainerLauncher {
 
     /**
      * Launches a specific game .exe within the given container.
+     *
+     * <p>Uses the WinNative pattern: {@code wine explorer /desktop=shell,WxH game.exe}
+     * This is CRITICAL — without the explorer wrapper:
+     * <ul>
+     *   <li>Wine runs wineboot separately, which starts explorer.exe</li>
+     *   <li>Explorer.exe and game.exe fight for the desktop window</li>
+     *   <li>Explorer renders 1 frame (the blank desktop), game never gets foregrounded</li>
+     * </ul>
+     * With the explorer wrapper, the game .exe is the shell's initial process
+     * on the virtual desktop — it starts immediately, no wineboot race.
      */
     public Process launchGame(Container container, String exePath, String extraArgs) {
         log("=== ContainerLauncher: launchGame ===");
@@ -116,10 +126,28 @@ public class ContainerLauncher {
             return null;
         }
 
+        // Build the desktop wrapper command:
+        //   wine explorer /desktop=shell,WxH "game.exe" [args]
+        // This is the WinNative pattern — the game is the shell's initial
+        // process on the virtual desktop, so it starts immediately.
+        String desktopSize = container.getDisplayWidth() + "x" + container.getDisplayHeight();
+        log("desktop wrapper: explorer /desktop=shell," + desktopSize);
+
         try {
-            String[] args = extraArgs != null && !extraArgs.isEmpty()
-                    ? extraArgs.split("\\s+") : null;
-            Process p = wineRunner.execWine(exePath, args, true);
+            // Build args array: ["/desktop=shell,WxH", exePath, ...extraArgs]
+            java.util.List<String> argList = new java.util.ArrayList<>();
+            argList.add("/desktop=shell," + desktopSize);
+            argList.add(exePath);
+            if (extraArgs != null && !extraArgs.isEmpty()) {
+                for (String a : extraArgs.split("\\s+")) {
+                    if (!a.isEmpty()) argList.add(a);
+                }
+            }
+            String[] args = argList.toArray(new String[0]);
+
+            // Pass "explorer" as the exePath — wine will run explorer.exe
+            // with the desktop wrapper args + game exe
+            Process p = wineRunner.execWine("explorer", args, true);
             log("Wine process started: pid=" + getPid(p));
             log("=== ContainerLauncher: launchGame COMPLETE ===");
             return p;
