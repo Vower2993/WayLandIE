@@ -722,6 +722,20 @@ public final class WineRunner {
             String freetypeTarget = rootfsFreetype.exists()
                     ? rootfsFreetype.getAbsolutePath()
                     : "/system/lib64/libfreetype.so";
+            // Also create symlinks for rootfs glibc libs that bionic Wine needs.
+            // These are in usr/lib/aarch64-linux-gnu/ (glibc) but bionic Wine's
+            // LD_LIBRARY_PATH doesn't include that path (it has glibc libs that
+            // would break bionic). So we symlink individual .so files into
+            // usr/local/lib (which IS in the bionic LD_LIBRARY_PATH).
+            File rootfsLibDir = new File(rootDir, "usr/lib/aarch64-linux-gnu");
+            String[][] rootfsSymlinks = {
+                {"libwayland-client.so", "libwayland-client.so.0"},
+                {"libwayland-client.so.0", null},  // keep if already exists
+                {"libwayland-server.so", "libwayland-server.so.0"},
+                {"libfontconfig.so", "libfontconfig.so.1"},
+                {"libfontconfig.so.1", null},
+            };
+
             String[][] symlinks = {
                 // {symlink name, target path, description}
                 {"libvulkan.so.1", "/system/lib64/libvulkan.so", "Vulkan loader"},
@@ -753,6 +767,40 @@ public final class WineRunner {
                             + " (" + sl[2] + " — Wine will fail to load this)");
                     io.waylandie.display.shared.util.LogRingBuffer.append(
                             "[diag] symlink ✗ " + sl[0] + " — target missing: " + sl[1]);
+                }
+            }
+
+            // Create rootfs library symlinks (libwayland-client, libfontconfig, etc.)
+            // These are needed by bionic Wine but live in the glibc rootfs lib dir.
+            for (String[] sl : rootfsSymlinks) {
+                String linkName = sl[0];
+                String targetName = sl[1];
+                File symlink = new File(localLib, linkName);
+                if (symlink.exists()) continue;  // Don't overwrite existing
+                if (targetName == null) {
+                    // Direct symlink to rootfs .so file
+                    File target = new File(rootfsLibDir, linkName);
+                    if (target.exists()) {
+                        try {
+                            java.nio.file.Files.createSymbolicLink(
+                                    symlink.toPath(), target.toPath());
+                            Log.i(TAG, "  rootfs symlink ✓ " + linkName + " → " + target);
+                        } catch (Exception e) {
+                            Log.w(TAG, "  rootfs symlink ✗ " + linkName + ": " + e.getMessage());
+                        }
+                    }
+                } else {
+                    // Symlink to versioned .so (e.g. libwayland-client.so → libwayland-client.so.0)
+                    File target = new File(rootfsLibDir, targetName);
+                    if (target.exists()) {
+                        try {
+                            java.nio.file.Files.createSymbolicLink(
+                                    symlink.toPath(), target.toPath());
+                            Log.i(TAG, "  rootfs symlink ✓ " + linkName + " → " + target);
+                        } catch (Exception e) {
+                            Log.w(TAG, "  rootfs symlink ✗ " + linkName + ": " + e.getMessage());
+                        }
+                    }
                 }
             }
         } catch (Exception e) {
