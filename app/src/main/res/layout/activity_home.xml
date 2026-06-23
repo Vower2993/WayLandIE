@@ -77,6 +77,14 @@
                 android:text="Use Armec Proton (install via Settings first)"
                 android:textColor="@color/text_primary"
                 android:buttonTint="@color/accent"
+                android:checked="true" />
+
+            <CheckBox android:id="@+id/chkDesktopMode"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Desktop mode (show Wine desktop + taskbar)"
+                android:textColor="@color/text_primary"
+                android:buttonTint="@color/accent"
                 android:checked="true"
                 android:layout_marginBottom="14dp" />
 

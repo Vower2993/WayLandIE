@@ -57,6 +57,7 @@ public final class HomeActivity extends Activity {
     private TextView selectedExePath;
     private CheckBox chkGamescope;
     private CheckBox chkUseProton;
+    private CheckBox chkDesktopMode;
     private Button btnPickExe;
     private Button btnLaunchGame;
 
@@ -130,6 +131,7 @@ public final class HomeActivity extends Activity {
         selectedExePath = findViewById(R.id.selectedExePath);
         chkGamescope = findViewById(R.id.chkGamescope);
         chkUseProton = findViewById(R.id.chkUseProton);
+        chkDesktopMode = findViewById(R.id.chkDesktopMode);
         btnPickExe = findViewById(R.id.btnPickExe);
         btnLaunchGame = findViewById(R.id.btnLaunchGame);
         bridgeStatusDot = findViewById(R.id.bridgeStatusDot);
@@ -287,6 +289,7 @@ public final class HomeActivity extends Activity {
 
         final boolean gamescope = chkGamescope.isChecked();
         final boolean useProton = chkUseProton.isChecked();
+        final boolean desktopMode = chkDesktopMode.isChecked();
 
         startDisplay();
 
@@ -322,6 +325,7 @@ public final class HomeActivity extends Activity {
         final String exePathFinal = exePath;
         final boolean gamescopeFinal = gamescope;
         final boolean useProtonFinal = useProton;
+        final boolean desktopModeFinal = desktopMode;
         new Thread(() -> {
             try {
                 // CRITICAL: Wait for the Android bridge socket to be listening
@@ -363,29 +367,33 @@ public final class HomeActivity extends Activity {
 
                 String[] extraArgs = gamescopeFinal ? new String[]{"--gamescope"} : new String[0];
 
-                // Launch with explorer desktop wrapper — needed for:
-                // 1. File management (Wine's file manager)
-                // 2. Wine configuration (winecfg)
-                // 3. Game launchers (Steam, GOG, Epic) that need desktop UI
-                // 4. Installers with dialog boxes
-                // The desktop wrapper creates a virtual desktop where the game
-                // runs as the shell process. This is the standard Wine desktop
-                // mode — both Winlator and WinNative use this pattern.
-                String desktopSize = "1920x1080";
-                java.util.List<String> wrappedArgs = new java.util.ArrayList<>();
-                wrappedArgs.add("/desktop=shell," + desktopSize);
-                wrappedArgs.add(exePathFinal);
-                if (extraArgs != null) {
-                    for (String a : extraArgs) {
-                        if (!a.isEmpty()) wrappedArgs.add(a);
-                    }
-                }
-                String[] finalArgs = wrappedArgs.toArray(new String[0]);
-
                 io.waylandie.display.runtime.environment.GameLaunchTracer tracer =
                         new io.waylandie.display.runtime.environment.GameLaunchTracer(HomeActivity.this);
                 activeTracer = tracer;
-                Process p = tracer.launchAndTrace("explorer", finalArgs, useProtonFinal);
+
+                Process p;
+                if (desktopModeFinal) {
+                    // Desktop mode: wrap in explorer /desktop=shell
+                    // Shows Wine desktop with taskbar, file manager, etc.
+                    // Good for: game launchers, installers, file management
+                    String desktopSize = "1920x1080";
+                    java.util.List<String> wrappedArgs = new java.util.ArrayList<>();
+                    wrappedArgs.add("/desktop=shell," + desktopSize);
+                    wrappedArgs.add(exePathFinal);
+                    if (extraArgs != null) {
+                        for (String a : extraArgs) {
+                            if (!a.isEmpty()) wrappedArgs.add(a);
+                        }
+                    }
+                    String[] finalArgs = wrappedArgs.toArray(new String[0]);
+                    p = tracer.launchAndTrace("explorer", finalArgs, useProtonFinal);
+                } else {
+                    // Direct launch: wine game.exe
+                    // No desktop, no taskbar — just the game window.
+                    // Good for: fullscreen games, direct .exe games.
+                    // Wine still runs wineboot (fast on 2nd+ run).
+                    p = tracer.launchAndTrace(exePathFinal, extraArgs, useProtonFinal);
+                }
                 runningWineProcess = p;
                 winePid = (int) getPid(p);
                 runOnUiThread(() -> log("Wine process started (pid=" + winePid + ")"));
