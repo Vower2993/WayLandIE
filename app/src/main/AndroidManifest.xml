@@ -89,6 +89,27 @@
             android:resizeableActivity="true"
             android:theme="@style/WindowAppTheme" />
 
+        <!-- File explorer — browse for .exe files -->
+        <activity
+            android:name=".FileExplorerActivity"
+            android:exported="false"
+            android:screenOrientation="portrait"
+            android:theme="@style/AppTheme" />
+
+        <!-- Container list — Winlator-style home screen -->
+        <activity
+            android:name=".ContainerListActivity"
+            android:exported="false"
+            android:screenOrientation="portrait"
+            android:theme="@style/AppTheme" />
+
+        <!-- Container settings — edit container properties -->
+        <activity
+            android:name=".ContainerSettingsActivity"
+            android:exported="false"
+            android:screenOrientation="portrait"
+            android:theme="@style/AppTheme" />
+
         <!-- Settings — driver/wrapper install UI -->
         <activity
             android:name=".SettingsActivity"

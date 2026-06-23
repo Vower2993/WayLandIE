@@ -74,6 +74,7 @@ public final class HomeActivity extends Activity {
     private Button btnStartDisplay;
     private Button btnStopDisplay;
     private Button btnSettings;
+    private Button btnContainers;
     private Button btnSaveLogs;
     private Button btnAbout;
     private Button btnTaskManager;
@@ -143,6 +144,7 @@ public final class HomeActivity extends Activity {
         btnStartDisplay = findViewById(R.id.btnStartDisplay);
         btnStopDisplay = findViewById(R.id.btnStopDisplay);
         btnSettings = findViewById(R.id.btnSettings);
+        btnContainers = findViewById(R.id.btnContainers);
         btnSaveLogs = findViewById(R.id.btnSaveLogs);
         btnAbout = findViewById(R.id.btnAbout);
         btnTaskManager = findViewById(R.id.btnTaskManager);
@@ -157,6 +159,8 @@ public final class HomeActivity extends Activity {
         btnStopDisplay.setOnClickListener(v -> stopDisplay());
         btnSettings.setOnClickListener(v ->
                 startActivity(new Intent(this, SettingsActivity.class)));
+        btnContainers.setOnClickListener(v ->
+                startActivity(new Intent(this, ContainerListActivity.class)));
         btnSaveLogs.setOnClickListener(v -> saveLogs());
         btnAbout.setOnClickListener(v -> showAbout());
         btnTaskManager.setOnClickListener(v -> showTaskManager());
