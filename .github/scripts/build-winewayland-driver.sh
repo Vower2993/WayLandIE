@@ -421,7 +421,7 @@ export CXXFLAGS="-O2"
   --without-x --without-opengl --without-vulkan \
   --without-alsa --without-oss --without-pulse --without-cups \
   --without-sane --without-usb --without-sdl --without-gstreamer \
-  --without-freetype --without-fontconfig --without-v4l2 \
+  --with-freetype --without-fontconfig --without-v4l2 \
   --enable-win64 \
   --disable-tests \
   2>&1 | tail -10
@@ -444,12 +444,22 @@ export CXX="$TOOLCHAIN/bin/aarch64-linux-android${API}-clang++"
 export AR="$TOOLCHAIN/bin/llvm-ar"
 export STRIP="$TOOLCHAIN/bin/llvm-strip"
 
-export CFLAGS="-fPIC --sysroot=$SYSROOT -I$SYSROOT/usr/include -I$BIONIC_LIBS/include -I/tmp/proton-wine/include -D__ANDROID_API__=$API -D__ANDROID__"
+# FreeType: use bionic static library built with NDK (vendored in repo)
+FT_DIR="$WORKSPACE/.github/scripts/freetype-bionic"
+echo "  FreeType bionic static lib: $FT_DIR/lib/libfreetype.a ($(stat -c%s $FT_DIR/lib/libfreetype.a 2>/dev/null || echo 0) bytes)"
+
+export CFLAGS="-fPIC --sysroot=$SYSROOT -I$SYSROOT/usr/include -I$BIONIC_LIBS/include -I$FT_DIR/include/freetype2 -I/tmp/proton-wine/include -D__ANDROID_API__=$API -D__ANDROID__"
 export CXXFLAGS="$CFLAGS"
-export LDFLAGS="--sysroot=$SYSROOT -L$BIONIC_LIBS/lib -landroid-sysvshm -lffi"
-export PKG_CONFIG_PATH="$BIONIC_LIBS/lib/pkgconfig"
-export PKG_CONFIG_LIBDIR="$BIONIC_LIBS/lib/pkgconfig"
+export LDFLAGS="--sysroot=$SYSROOT -L$BIONIC_LIBS/lib -L$FT_DIR/lib -landroid-sysvshm -lffi"
+export PKG_CONFIG_PATH="$BIONIC_LIBS/lib/pkgconfig:$FT_DIR/lib/pkgconfig"
+export PKG_CONFIG_LIBDIR="$BIONIC_LIBS/lib/pkgconfig:$FT_DIR/lib/pkgconfig"
 unset PKG_CONFIG_SYSROOT_DIR
+
+# FreeType cache vars (cross-compile can't run link test)
+export ac_cv_lib_freetype_FT_Init_FreeType=yes
+export ac_cv_header_ft2build_h=yes
+export FREETYPE_CFLAGS="-I$FT_DIR/include/freetype2"
+export FREETYPE_LIBS="-L$FT_DIR/lib -lfreetype"
 
 # Pre-seed all the link-test cache vars (avoid the broken pkg-config path in configure.ac)
 export ac_cv_lib_wayland_client_wl_display_connect=yes
@@ -507,7 +517,7 @@ export ac_cv_lib_EGL_eglGetProcAddress=yes
   --without-x \
   --without-alsa --without-oss --without-pulse --without-cups \
   --without-sane --without-usb --without-sdl --without-gstreamer \
-  --without-freetype --without-fontconfig --without-v4l2 \
+  --with-freetype --without-fontconfig --without-v4l2 \
   --enable-win64 \
   --enable-archs=arm64ec,aarch64 \
   --with-mingw=$LLVM_MINGW_DIR/bin/clang \
