@@ -499,7 +499,17 @@ public final class GameLaunchTracer {
 
     private void writeTraceFile() {
         try {
-            File logDir = new File("/storage/emulated/0/Download/WayLandIE/logs");
+            // CRITICAL: Write trace files to APP-PRIVATE storage, NOT the
+            // public Download folder. The Download folder can be wiped by:
+            //   - Wine's explorer.exe (which has write access to Z: → /)
+            //   - Android storage management after a crash
+            //   - The user's file manager
+            // App-private storage (getFilesDir) survives all of these.
+            // The user can access trace files via:
+            //   adb shell run-as io.waylandie.display ls files/logs/
+            //   adb shell run-as io.waylandie.display cat files/logs/launch-trace-*.txt
+            // Or via the in-app "Save Logs" button which copies to Download.
+            File logDir = new File(context.getFilesDir(), "logs");
             if (!logDir.exists() && !logDir.mkdirs()) {
                 Log.e(TAG, "Failed to create log dir: " + logDir);
                 return;

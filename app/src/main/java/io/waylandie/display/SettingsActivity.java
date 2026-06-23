@@ -657,9 +657,19 @@ public final class SettingsActivity extends Activity {
                                 java.nio.file.Files.createSymbolicLink(
                                         new File(dosdevices, "c:").toPath(),
                                         new File("../drive_c").toPath());
+                                // Z: maps to / (root filesystem) so Wine can access
+                                // /sdcard, /storage, etc. via Unix paths.
+                                // NOTE: Wine has FULL read/write access to Z:.
+                                // This is intentional — games need to read/write files
+                                // on /sdcard (save games, configs, etc.).
+                                // However, the Download folder wipe bug may be caused
+                                // by Wine's explorer.exe or wineboot deleting files.
+                                // To mitigate: we set WINE_NO_DUPLICATE_EXPLORER=1
+                                // (prevents second explorer) and WINEDEBUG=-all
+                                // (prevents deadlock that could cause crashes).
                                 java.nio.file.Files.createSymbolicLink(
                                         new File(dosdevices, "z:").toPath(),
-                                        imgFs.getRootDir().toPath());
+                                        new File("/").toPath());
                                 output.append("  ✓ dosdevices symlinks created (c:, z:)\n");
                             } catch (Exception e) {
                                 output.append("  ⚠ dosdevices symlink failed: ").append(e.getMessage()).append('\n');
