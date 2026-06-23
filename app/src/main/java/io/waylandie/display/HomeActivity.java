@@ -176,6 +176,18 @@ public final class HomeActivity extends Activity {
     protected void onDestroy() {
         super.onDestroy();
         if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
+        // Kill Wine process when the activity is destroyed. This prevents
+        // socket "Address already in use" errors on the next launch — the
+        // bridge holds the abstract Unix socket (waylandie.display.bridge.v1)
+        // and TCP port 57391 until it exits.
+        try {
+            if (runningWineProcess != null && runningWineProcess.isAlive()) {
+                runningWineProcess.destroyForcibly();
+                android.util.Log.i("HomeActivity", "Killed Wine process in onDestroy");
+            }
+        } catch (Throwable t) {
+            android.util.Log.w("HomeActivity", "Wine process cleanup threw: " + t.getMessage());
+        }
     }
 
     // --- File picker ---

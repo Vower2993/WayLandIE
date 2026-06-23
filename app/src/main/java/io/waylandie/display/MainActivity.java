@@ -490,6 +490,7 @@ public final class MainActivity extends Activity
         private final Thread thread;
         private volatile boolean stopRequested;
         private volatile LocalServerSocket serverSocket;
+        private long retryDelayMs = 100L;  // Exponential backoff for socket retry
 
         BridgeLocalServer() {
             thread = new Thread(this, "WayLandIEBridgeLocal");
@@ -529,6 +530,7 @@ public final class MainActivity extends Activity
             while (!stopRequested) {
                 try (LocalServerSocket server = new LocalServerSocket(BRIDGE_LOCAL_SOCKET_NAME)) {
                     serverSocket = server;
+                    retryDelayMs = 100L;  // Reset backoff on successful bind
                     bridgeNativeStatusText = String.format(
                             Locale.US,
                             "native-bridge: unix-abstract %s listening",
@@ -589,8 +591,15 @@ public final class MainActivity extends Activity
         }
 
         private void sleepBeforeLocalServerRetry() {
+            // Exponential backoff: start at 100ms, double each retry, cap at 5s.
+            // The old 25ms retry was too aggressive — when the previous Wine
+            // process hasn't released the socket yet, the retry loop hammers
+            // it every 25ms and fills the log with "Address already in use".
+            // With backoff, we give the OS time to actually release the socket.
+            retryDelayMs = Math.min(retryDelayMs * 2, 5000L);
+            if (retryDelayMs < 100L) retryDelayMs = 100L;
             try {
-                Thread.sleep(25L);
+                Thread.sleep(retryDelayMs);
             } catch (InterruptedException ignored) {
                 Thread.currentThread().interrupt();
                 stopRequested = true;
