@@ -187,6 +187,9 @@ public final class HomeActivity extends Activity {
         try {
             if (runningWineProcess != null && runningWineProcess.isAlive()) {
                 runningWineProcess.destroyForcibly();
+                // Wait for the process to actually die so sockets are released
+                try { runningWineProcess.waitFor(3, java.util.concurrent.TimeUnit.SECONDS); }
+                catch (InterruptedException ignored) {}
                 android.util.Log.i("HomeActivity", "Killed Wine process in onDestroy");
             }
         } catch (Throwable t) {
@@ -421,6 +424,11 @@ public final class HomeActivity extends Activity {
         // Wayland display to connect to. This was the root cause of
         // "bridge: off" in every diagnostic log.
         intent.putExtra("waylandie_bridge_server", true);
+        // CRITICAL: Enable external present + input forwarding.
+        // Without externalPresentOnlyEnabled, bridgeOwnsExternalSession()
+        // returns false and touch/mouse events are NEVER forwarded to Wine.
+        // This was the root cause of "no cursor / no mouse input".
+        intent.putExtra("waylandie_external_present_only", true);
         startActivity(intent);
         acquireWakeLock();
         refreshBridgeStatus();
