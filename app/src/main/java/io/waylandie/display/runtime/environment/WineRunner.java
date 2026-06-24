@@ -1771,44 +1771,47 @@ public final class WineRunner {
         // a FRESH wineserver on next launch. The stale wineserver (if any) is
         // orphaned — it can't be contacted via the deleted socket.
         //
-        // This is MUCH simpler and more reliable than `wineserver -k`:
-        // - No glibc linker needed
-        // - No library path issues (libc.so, libdl.so version mismatches)
-        // - No binary compatibility concerns
-        // - Works regardless of proton build version
+        // Wine's server socket is at: ${XDG_RUNTIME_DIR}/.wine-<uid>/server-<hostname>/
+        // On our setup, XDG_RUNTIME_DIR = imagefs/usr/tmp/runtime
+        // So the path is: imagefs/usr/tmp/runtime/.wine-<uid>/server-<hostname>/
         //
-        // The fresh wineserver reads the PATCHED PE headers (8MB stack) from
-        // the exe files we patched. This gives FEX's DllMain 8MB of native
-        // stack instead of 1MB → no stack overflow → desktop renders.
+        // We also check WINEPREFIX/ and WINEPREFIX/.wine/ for server dirs
+        // (older Wine versions may use these locations).
         try {
             File winePrefix = new File(rootDir, "home/xuser/.wine");
-            File serverDir = new File(winePrefix, ".wine");
-            // Wine's server socket is at: WINEPREFIX/.wine/server-<hostname>/
-            // But some Wine versions use: WINEPREFIX/server-<hostname>/
-            // Check both locations.
-            File[] winePrefixFiles = winePrefix.listFiles();
-            if (winePrefixFiles != null) {
-                for (File f : winePrefixFiles) {
-                    if (f.getName().startsWith("server-") && f.isDirectory()) {
-                        Log.i(TAG, "[cleanup] Deleting wineserver socket dir: " + f.getAbsolutePath());
-                        installerDiagnostics.append("[cleanup] Deleting server dir: ").append(f.getName()).append('\n');
-                        deleteRecursive(f);
-                    }
-                }
-            }
-            // Also check WINEPREFIX/.wine/ for server dirs (nested .wine)
-            if (serverDir.isDirectory()) {
-                File[] innerFiles = serverDir.listFiles();
-                if (innerFiles != null) {
-                    for (File f : innerFiles) {
-                        if (f.getName().startsWith("server-") && f.isDirectory()) {
-                            Log.i(TAG, "[cleanup] Deleting inner wineserver socket dir: " + f.getAbsolutePath());
-                            installerDiagnostics.append("[cleanup] Deleting inner server dir: ").append(f.getName()).append('\n');
-                            deleteRecursive(f);
+            File xdgRuntimeDir = new File(rootDir, "usr/tmp/runtime");
+            java.util.List<File> searchDirs = new java.util.ArrayList<>();
+            searchDirs.add(winePrefix);
+            searchDirs.add(new File(winePrefix, ".wine"));
+            searchDirs.add(xdgRuntimeDir);
+            // Also check XDG_RUNTIME_DIR/.wine-*/ dirs
+            if (xdgRuntimeDir.isDirectory()) {
+                File[] xdgFiles = xdgRuntimeDir.listFiles();
+                if (xdgFiles != null) {
+                    for (File f : xdgFiles) {
+                        if (f.getName().startsWith(".wine-") && f.isDirectory()) {
+                            searchDirs.add(f);
                         }
                     }
                 }
             }
+            int deleted = 0;
+            for (File searchDir : searchDirs) {
+                if (!searchDir.isDirectory()) continue;
+                File[] files = searchDir.listFiles();
+                if (files == null) continue;
+                for (File f : files) {
+                    if (f.getName().startsWith("server-") && f.isDirectory()) {
+                        Log.i(TAG, "[cleanup] Deleting wineserver socket dir: " + f.getAbsolutePath());
+                        installerDiagnostics.append("[cleanup] Deleting server dir: ")
+                            .append(f.getAbsolutePath()).append('\n');
+                        deleteRecursive(f);
+                        deleted++;
+                    }
+                }
+            }
+            installerDiagnostics.append("[cleanup] Deleted ").append(deleted)
+                .append(" server socket dirs\n");
         } catch (Exception e) {
             Log.w(TAG, "[cleanup] Server socket delete failed: " + e.getMessage());
             installerDiagnostics.append("[cleanup] Server socket delete failed: ")

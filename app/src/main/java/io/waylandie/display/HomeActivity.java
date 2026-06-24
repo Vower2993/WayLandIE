@@ -467,16 +467,33 @@ public final class HomeActivity extends Activity {
         }
         // Delete the Wine server socket directory so the next launch starts
         // a FRESH wineserver (with patched PE headers → 8MB native stack).
-        // This is simpler and more reliable than wineserver -k.
+        // Wine's server socket is at: XDG_RUNTIME_DIR/.wine-<uid>/server-<hostname>/
         try {
             File rootDir = new File(getFilesDir(), "imagefs");
             File winePrefix = new File(rootDir, "home/xuser/.wine");
-            File[] files = winePrefix.listFiles();
-            if (files != null) {
-                for (File f : files) {
+            File xdgRuntimeDir = new File(rootDir, "usr/tmp/runtime");
+            // Search WINEPREFIX, WINEPREFIX/.wine, XDG_RUNTIME_DIR, and XDG_RUNTIME_DIR/.wine-*/
+            java.io.File[] searchDirs = { winePrefix, new File(winePrefix, ".wine"), xdgRuntimeDir };
+            for (java.io.File searchDir : searchDirs) {
+                if (!searchDir.isDirectory()) continue;
+                java.io.File[] files = searchDir.listFiles();
+                if (files == null) continue;
+                for (java.io.File f : files) {
                     if (f.getName().startsWith("server-") && f.isDirectory()) {
                         deleteDirRecursive(f);
-                        log("Deleted wineserver socket dir: " + f.getName());
+                        log("Deleted server dir: " + f.getAbsolutePath());
+                    }
+                    if (f.getName().startsWith(".wine-") && f.isDirectory()) {
+                        // Check inside .wine-<uid>/ for server-*/ dirs
+                        java.io.File[] inner = f.listFiles();
+                        if (inner != null) {
+                            for (java.io.File innerF : inner) {
+                                if (innerF.getName().startsWith("server-") && innerF.isDirectory()) {
+                                    deleteDirRecursive(innerF);
+                                    log("Deleted server dir: " + innerF.getAbsolutePath());
+                                }
+                            }
+                        }
                     }
                 }
             }
