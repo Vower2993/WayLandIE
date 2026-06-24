@@ -495,7 +495,21 @@ public final class WineRunner {
         Log.i(TAG, "Native launch command (glibc): " + String.join(" ", cmd));
 
         ProcessBuilder pb = new ProcessBuilder(cmd);
-        pb.directory(rootDir);
+        // Set working directory to the game's parent directory so Wine's "."
+        // in the DLL search path finds game-specific DLLs (bink2w64.dll,
+        // steam_api64.dll, etc.). If exePath is not a real file (e.g.
+        // "explorer"), fall back to rootDir.
+        File gameDir = null;
+        if (exePath != null && !exePath.equals("explorer")) {
+            File exeFile = new File(exePath);
+            if (exeFile.isFile()) {
+                gameDir = exeFile.getParentFile();
+            }
+        }
+        pb.directory(gameDir != null ? gameDir : rootDir);
+        if (gameDir != null) {
+            Log.i(TAG, "Working directory set to game dir: " + gameDir.getAbsolutePath());
+        }
 
         // CRITICAL: Redirect Wine's stderr to a FILE, not a Java pipe.
         // Wine with WINEDEBUG=+loaddll,+module,+input,+event can produce
@@ -703,7 +717,15 @@ public final class WineRunner {
         Log.i(TAG, "Native launcher command: " + String.join(" ", cmd));
 
         ProcessBuilder pb = new ProcessBuilder(cmd);
-        pb.directory(rootDir);
+        // Set working directory to the game's parent directory (same as glibc path).
+        File gameDirBionic = null;
+        if (exePath != null && !exePath.equals("explorer")) {
+            File exeFile = new File(exePath);
+            if (exeFile.isFile()) {
+                gameDirBionic = exeFile.getParentFile();
+            }
+        }
+        pb.directory(gameDirBionic != null ? gameDirBionic : rootDir);
 
         // CRITICAL: Redirect Wine's stderr to a FILE (same as glibc path above).
         // See the comment in launchNative() for the full explanation.
@@ -1592,7 +1614,7 @@ public final class WineRunner {
         File winePrefix = new File(homeDir, ".wine");
         if (!winePrefix.exists()) winePrefix.mkdirs();
         env.put("WINEPREFIX", winePrefix.getAbsolutePath());
-        env.put("WINEDLLOVERRIDES", "d3d9,d3d10core,d3d11,dxgi=native;winex11.drv=d;winewayland.drv=b,native");
+        env.put("WINEDLLOVERRIDES", "d3d9,d3d10core,d3d11,dxgi=native;winex11.drv=d;winewayland.drv=b,native;mscoree=d;mshtml=d");
         // CRITICAL: Increase Wine's kernel/pthread stack from 1MB to 8MB.
         // Wine's thread creation uses: pthread_attr_setstack(attr, kernel_stack, kernel_stack_size)
         // The default kernel_stack_size is 0x100000 (1MB). FEX's libarm64ecfex.dll DllMain
@@ -1760,13 +1782,33 @@ public final class WineRunner {
                 Log.i(TAG, "[cleanup] Killing wineserver via: " + wineserverBin.getAbsolutePath() + " -k");
                 installerDiagnostics.append("[cleanup] Running wineserver -k\n");
                 ProcessBuilder pbKill = new ProcessBuilder(wineserverBin.getAbsolutePath(), "-k");
-                pbKill.environment().put("WINEPREFIX",
-                        new File(rootDir, "home/xuser/.wine").getAbsolutePath());
+                // wineserver needs the same env as wine — WINEPREFIX, LD_LIBRARY_PATH, etc.
+                Map<String, String> killEnv = pbKill.environment();
+                killEnv.put("WINEPREFIX", new File(rootDir, "home/xuser/.wine").getAbsolutePath());
+                killEnv.put("LD_LIBRARY_PATH",
+                        new File(rootDir, "usr/lib").getAbsolutePath() + ":"
+                        + new File(rootDir, "usr/lib/aarch64-linux-gnu").getAbsolutePath() + ":"
+                        + new File(rootDir, "usr/local/lib").getAbsolutePath() + ":"
+                        + new File(protonDir, "lib").getAbsolutePath() + ":"
+                        + "/system/lib64");
+                killEnv.put("HOME", new File(rootDir, "home/xuser").getAbsolutePath());
                 pbKill.redirectErrorStream(true);
                 Process killProc = pbKill.start();
-                try { killProc.waitFor(3, java.util.concurrent.TimeUnit.SECONDS); }
+                // Read output to prevent pipe deadlock
+                try (java.io.BufferedReader r = new java.io.BufferedReader(
+                        new java.io.InputStreamReader(killProc.getInputStream()))) {
+                    String line;
+                    while ((line = r.readLine()) != null) {
+                        installerDiagnostics.append("[cleanup] wineserver: ").append(line).append('\n');
+                    }
+                }
+                try { killProc.waitFor(5, java.util.concurrent.TimeUnit.SECONDS); }
                 catch (Exception ignored) {}
-                Log.i(TAG, "[cleanup] wineserver -k exit code: " + killProc.exitValue());
+                int exitCode = killProc.exitValue();
+                Log.i(TAG, "[cleanup] wineserver -k exit code: " + exitCode);
+                installerDiagnostics.append("[cleanup] wineserver -k exit code: ").append(exitCode).append('\n');
+            } else {
+                installerDiagnostics.append("[cleanup] wineserver binary not found at ").append(wineserverBin.getAbsolutePath()).append('\n');
             }
         } catch (Exception e) {
             Log.w(TAG, "[cleanup] wineserver -k failed: " + e.getMessage());

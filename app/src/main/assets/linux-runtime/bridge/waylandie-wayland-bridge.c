@@ -2939,15 +2939,16 @@ static int buffer_is_primary_for_surface(struct surface_state *surface, struct s
             && buffer->kind == BUFFER_KIND_DMABUF) {
         return 1;
     }
-    if ((int64_t)buffer->width * 5 < (int64_t)surface->server->output_width * 4) {
+    /* Accept any window >= 200x200 as primary. The old 80% threshold
+     * (width*5 >= output_width*4) skipped the Mono installer dialog
+     * (~400x300), the taskbar (1920x128), and game launcher windows.
+     * With 200px minimum, all these windows are displayed. The first
+     * primary window to commit gets presented; subsequent smaller
+     * windows are still skipped to avoid flickering. */
+    if (buffer->width < 200 || buffer->height < 200) {
         return 0;
     }
-    if ((int64_t)buffer->height * 5 < (int64_t)surface->server->output_height * 4) {
-        return 0;
-    }
-    int64_t output_area = (int64_t)surface->server->output_width
-            * (int64_t)surface->server->output_height;
-    return area * 5 >= output_area * 4;
+    return 1;
 }
 
 static struct surface_state *find_presentable_subsurface(struct surface_state *surface) {

@@ -452,7 +452,45 @@ public final class HomeActivity extends Activity {
     }
 
     private void stopDisplay() {
-        log("Stopping display activity + keep-alive service…");
+        log("Stopping display + killing Wine/bridge processes…");
+        // Kill the running Wine process
+        if (runningWineProcess != null) {
+            try {
+                runningWineProcess.destroyForcibly();
+                runningWineProcess.waitFor(3, java.util.concurrent.TimeUnit.SECONDS);
+                log("Killed Wine process (pid=" + winePid + ")");
+            } catch (Exception e) {
+                log("Wine kill failed: " + e.getMessage());
+            }
+            runningWineProcess = null;
+            winePid = -1;
+        }
+        // Also kill wineserver to ensure clean state for next launch
+        try {
+            File protonDir = new File(getFilesDir(), "contents/proton/active");
+            File wineserverBin = new File(protonDir, "bin/wineserver");
+            if (!wineserverBin.exists()) {
+                wineserverBin = new File(protonDir, "lib/wine/aarch64-unix/wineserver");
+            }
+            if (wineserverBin.exists()) {
+                File rootDir = new File(getFilesDir(), "imagefs");
+                ProcessBuilder pb = new ProcessBuilder(wineserverBin.getAbsolutePath(), "-k");
+                pb.environment().put("WINEPREFIX", new File(rootDir, "home/xuser/.wine").getAbsolutePath());
+                pb.environment().put("LD_LIBRARY_PATH",
+                        new File(rootDir, "usr/lib").getAbsolutePath() + ":"
+                        + new File(rootDir, "usr/lib/aarch64-linux-gnu").getAbsolutePath() + ":"
+                        + new File(rootDir, "usr/local/lib").getAbsolutePath() + ":"
+                        + new File(protonDir, "lib").getAbsolutePath() + ":"
+                        + "/system/lib64");
+                pb.environment().put("HOME", new File(rootDir, "home/xuser").getAbsolutePath());
+                pb.redirectErrorStream(true);
+                Process p = pb.start();
+                p.waitFor(3, java.util.concurrent.TimeUnit.SECONDS);
+                log("Killed wineserver");
+            }
+        } catch (Exception e) {
+            log("wineserver kill failed: " + e.getMessage());
+        }
         BridgeKeepAliveService.stop(this);
         releaseWakeLock();
         refreshBridgeStatus();
