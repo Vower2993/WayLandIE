@@ -400,6 +400,30 @@ echo "=== Applying custom patch: add esync.h include ==="
 git apply "$WORKSPACE/.github/scripts/patches/add_esync_include.patch" 2>&1 || \
   echo "  WARNING: add_esync_include.patch failed (may already be applied)"
 
+# Apply our custom patch: export FEX-required ntdll functions from all win64 archs.
+#
+# Background: FEX's libarm64ecfex.dll imports RtlIsEcCode + ProcessPendingCrossProcessEmulatorWork
+# from ntdll.dll. These functions ARE in the proton_11.0 source (signal_arm64ec.c:949 + :1400)
+# but the spec file marks them with -arch=arm64ec and -arch=x86_64 respectively.
+#
+# When Wine's build system creates a hybrid ARM64X ntdll.dll (via -b arm64ec-windows -marm64x),
+# the ARM64EC-specific exports go into the CHPE metadata's export table (not the standard PE
+# export directory). Wine's import_dll uses RtlImageDirectoryEntryToData to find exports,
+# which ONLY looks at the standard PE export directory. Result: FEX's imports can't find
+# these symbols → Wine stubs them to 0x10000 → FEX's DllMain calls them → SIGSEGV →
+# exception handler re-enters FEX → recursion → stack overflow → FEX never inits.
+#
+# Fix: change -arch=arm64ec / -arch=x86_64 to -arch=win64 (which includes x86_64 + ARM64
+# + ARM64EC). This puts the functions in the STANDARD PE export directory, where Wine's
+# import_dll can find them. Side effect: ARM64 native processes also see these exports,
+# but since the functions are guarded by EcCodeBitMap checks internally, calling them from
+# native ARM64 code is safe (they'll just return false / no-op).
+echo "=== Applying custom patch: export FEX-required ntdll functions from all win64 archs ==="
+git apply "$WORKSPACE/.github/scripts/patches/ntdll-spec-fex-exports.patch" 2>&1 || \
+  echo "  WARNING: ntdll-spec-fex-exports.patch failed (may already be applied)"
+# Verify the patch took effect
+grep -E "RtlIsEcCode|ProcessPendingCrossProcessEmulatorWork" /tmp/proton-wine/dlls/ntdll/ntdll.spec | head -5
+
 # Regenerate server_protocol.h after patches modified server/protocol.def.
 # autogen.sh ran BEFORE patches, so the generated header is stale.
 # tools/make_requests reads protocol.def and generates:
