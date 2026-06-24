@@ -120,12 +120,30 @@ public final class WaylandDriverInstaller {
             // thread stack is 1MB (from the exe's PE header). By patching the
             // SizeOfStackReserve field in the PE Optional Header to 8MB, all threads
             // spawned by Wine get 8MB of stack — enough for FEX + Wine's loader.
+            //
+            // We patch exes in TWO locations:
+            //   1. proton/lib/wine/{arch}-windows/ — builtin exes (fallback)
+            //   2. wineprefix/drive_c/windows/{system32,syswow64}/ — prefix exes
+            //      (these are the ones Wine ACTUALLY loads first; the builtin
+            //      versions are only used if the prefix copy doesn't exist)
+            //
             // This is safe because:
             //   - PE files don't have a protocol version (only Unix ELF .so files do)
             //   - We're only changing one number in the header, no code changes
             //   - 8MB is virtual-reserved, physical memory is committed on demand
             log("=== Patching PE headers for 8MB stack ===");
             patchExeStackReserve(prefix);
+
+            // Also patch the Wine prefix exes — these are the ones Wine actually loads
+            File rootDir = new File(ctx.getFilesDir(), "imagefs");
+            File winePrefix = new File(rootDir, "home/xuser/.wine");
+            File prefixSystem32 = new File(winePrefix, "drive_c/windows/system32");
+            File prefixSyswow64 = new File(winePrefix, "drive_c/windows/syswow64");
+            log("  Wine prefix: " + winePrefix.getAbsolutePath());
+            log("  system32 exists: " + prefixSystem32.isDirectory());
+            log("  syswow64 exists: " + prefixSyswow64.isDirectory());
+            patchExeStackReserveInDir(prefixSystem32);
+            patchExeStackReserveInDir(prefixSyswow64);
 
             return true;
         } catch (IOException ioe) {
@@ -197,7 +215,37 @@ public final class WaylandDriverInstaller {
                 }
             }
         }
-        log("  Patched " + patched + " exe files, skipped " + skipped);
+        log("  Builtin exes: patched " + patched + ", skipped " + skipped);
+    }
+
+    /**
+     * Patch all .exe files in a single directory (e.g. wineprefix's system32/
+     * or syswow64/). Unlike patchExeStackReserve which scans multiple arch
+     * subdirs, this scans a FLAT directory.
+     */
+    private static void patchExeStackReserveInDir(File dir) {
+        final long TARGET_STACK_RESERVE = 0x800000L; // 8MB
+        if (!dir.isDirectory()) return;
+        File[] exes = dir.listFiles((d, name) -> name.endsWith(".exe"));
+        if (exes == null || exes.length == 0) {
+            log("  " + dir.getName() + "/: no .exe files found");
+            return;
+        }
+        int patched = 0;
+        int skipped = 0;
+        for (File exe : exes) {
+            try {
+                if (patchOneExe(exe, TARGET_STACK_RESERVE)) {
+                    patched++;
+                } else {
+                    skipped++;
+                }
+            } catch (Exception e) {
+                log("  PATCH FAIL: " + exe.getName() + " — " + e.getMessage());
+                skipped++;
+            }
+        }
+        log("  " + dir.getName() + "/: patched " + patched + ", skipped " + skipped);
     }
 
     /**
