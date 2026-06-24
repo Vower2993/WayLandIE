@@ -56,7 +56,6 @@ public final class WaylandDriverInstaller {
         File soCheck = new File(prefix, "lib/wine/aarch64-unix/winewayland.so");
         File ntdllAarch64Check = new File(prefix, "lib/wine/aarch64-windows/ntdll.dll");
         File ntdllArm64ecCheck = new File(prefix, "lib/wine/arm64ec-windows/ntdll.dll");
-        File ntdllSoCheck = new File(prefix, "lib/wine/aarch64-unix/ntdll.so");
         if (drvCheck.exists()) {
             log("  deleting old winewayland.drv (" + drvCheck.length() + " bytes)");
             drvCheck.delete();
@@ -77,14 +76,12 @@ public final class WaylandDriverInstaller {
             log("  deleting old arm64ec-windows/ntdll.dll (" + ntdllArm64ecCheck.length() + " bytes)");
             ntdllArm64ecCheck.delete();
         }
-        // Delete old ntdll.so (Unix-side ELF). This is CRITICAL for the 8MB
-        // stack patch — virtual_alloc_thread_stack() lives in ntdll.so, not
-        // ntdll.dll. Without replacing ntdll.so, the old 1MB-minimum version
-        // continues to be loaded and FEX's DllMain still overflows the stack.
-        if (ntdllSoCheck.exists()) {
-            log("  deleting old aarch64-unix/ntdll.so (" + ntdllSoCheck.length() + " bytes)");
-            ntdllSoCheck.delete();
-        }
+        // CRITICAL: Do NOT delete or replace ntdll.so. The user's Proton armec
+        // ntdll.so has wineserver protocol version 933, but our build from
+        // proton_11.0 has version 932. Replacing ntdll.so causes:
+        //   wine client error:0: version mismatch 933/932.
+        // Instead, the 8MB stack fix is done by patching PE headers of exe
+        // files (see patchExeStackReserve below).
 
         // Extract
         long extracted = 0;
@@ -114,14 +111,22 @@ public final class WaylandDriverInstaller {
             log("  exists=" + ntdllAarch64Check.exists() + " size=" + (ntdllAarch64Check.exists() ? ntdllAarch64Check.length() : 0));
             log("  ntdll.dll (arm64ec) at: " + ntdllArm64ecCheck);
             log("  exists=" + ntdllArm64ecCheck.exists() + " size=" + (ntdllArm64ecCheck.exists() ? ntdllArm64ecCheck.length() : 0));
-            log("  ntdll.so (Unix ELF) at: " + ntdllSoCheck);
-            log("  exists=" + ntdllSoCheck.exists() + " size=" + (ntdllSoCheck.exists() ? ntdllSoCheck.length() : 0));
             if (ntdllArm64ecCheck.exists() && ntdllArm64ecCheck.length() < 100000) {
                 log("  WARNING: arm64ec ntdll.dll is suspiciously small — FEX may still crash");
             }
-            if (!ntdllSoCheck.exists()) {
-                log("  WARNING: ntdll.so not installed — 8MB stack patch will NOT take effect");
-            }
+
+            // === Patch PE headers of exe files to set SizeOfStackReserve = 8MB ===
+            // FEX's libarm64ecfex.dll DllMain consumes ~1MB of stack. Wine's default
+            // thread stack is 1MB (from the exe's PE header). By patching the
+            // SizeOfStackReserve field in the PE Optional Header to 8MB, all threads
+            // spawned by Wine get 8MB of stack — enough for FEX + Wine's loader.
+            // This is safe because:
+            //   - PE files don't have a protocol version (only Unix ELF .so files do)
+            //   - We're only changing one number in the header, no code changes
+            //   - 8MB is virtual-reserved, physical memory is committed on demand
+            log("=== Patching PE headers for 8MB stack ===");
+            patchExeStackReserve(prefix);
+
             return true;
         } catch (IOException ioe) {
             log("  INSTALL FAILED: " + ioe.getClass().getSimpleName() + ": " + ioe.getMessage());
@@ -146,6 +151,118 @@ public final class WaylandDriverInstaller {
             // Ignore if static init order issues
         }
         System.err.println("[WaylandDriverInstaller] " + msg);
+    }
+
+    /**
+     * Patch SizeOfStackReserve in PE headers of all .exe files in the proton
+     * prefix's lib/wine/{arch}-windows/ directories. Sets the value to 8MB
+     * (0x800000) so Wine allocates 8MB thread stacks instead of the default 1MB.
+     *
+     * This replaces the ntdll.so stack-size patch (which caused a wineserver
+     * protocol version mismatch). PE files don't have a protocol version, so
+     * patching their headers is safe regardless of Wine version.
+     *
+     * PE header layout:
+     *   offset 0x3C: e_lfanew (4 bytes, LE) — pointer to PE signature
+     *   e_lfanew + 0: PE signature ("PE\0\0")
+     *   e_lfanew + 24: Optional Header
+     *   e_lfanew + 24 + 0: Magic (0x20b = PE32+, 0x10b = PE32)
+     *   For PE32+: SizeOfStackReserve at e_lfanew + 24 + 72 (8 bytes, LE)
+     *   For PE32:  SizeOfStackReserve at e_lfanew + 24 + 72 (4 bytes, LE)
+     */
+    private static void patchExeStackReserve(File prefix) {
+        final long TARGET_STACK_RESERVE = 0x800000L; // 8MB
+        File[] archDirs = {
+            new File(prefix, "lib/wine/aarch64-windows"),
+            new File(prefix, "lib/wine/arm64ec-windows"),
+            new File(prefix, "lib/wine/x86_64-windows"),
+            new File(prefix, "lib/wine/i386-windows"),
+        };
+        int patched = 0;
+        int skipped = 0;
+        for (File archDir : archDirs) {
+            if (!archDir.isDirectory()) continue;
+            File[] exes = archDir.listFiles((d, name) -> name.endsWith(".exe"));
+            if (exes == null) continue;
+            for (File exe : exes) {
+                try {
+                    if (patchOneExe(exe, TARGET_STACK_RESERVE)) {
+                        patched++;
+                    } else {
+                        skipped++;
+                    }
+                } catch (Exception e) {
+                    log("  PATCH FAIL: " + exe.getName() + " — " + e.getMessage());
+                    skipped++;
+                }
+            }
+        }
+        log("  Patched " + patched + " exe files, skipped " + skipped);
+    }
+
+    /**
+     * Patch a single PE file's SizeOfStackReserve. Returns true if the file
+     * was modified, false if it was already >= target or couldn't be parsed.
+     */
+    private static boolean patchOneExe(File exe, long targetReserve) throws IOException {
+        java.io.RandomAccessFile raf = new java.io.RandomAccessFile(exe, "rw");
+        try {
+            // Read e_lfanew at offset 0x3C
+            raf.seek(0x3C);
+            int eLfanew = Integer.reverseBytes(raf.readInt()) & 0x7FFFFFFF;
+            if (eLfanew <= 0 || eLfanew > raf.length() - 26) return false;
+
+            // Verify PE signature ("PE\0\0" in the file = bytes 50 45 00 00)
+            // readInt() reads big-endian, so the raw value is 0x50450000
+            raf.seek(eLfanew);
+            int peSig = raf.readInt();
+            if (peSig != 0x50450000) return false;
+
+            // Read Optional Header magic
+            raf.seek(eLfanew + 24);
+            short magic = Short.reverseBytes(raf.readShort());
+
+            long stackReserveOffset;
+            int fieldSize;
+            if (magic == 0x020B) { // PE32+ (64-bit)
+                stackReserveOffset = eLfanew + 24 + 72;
+                fieldSize = 8;
+            } else if (magic == 0x010B) { // PE32 (32-bit)
+                stackReserveOffset = eLfanew + 24 + 72;
+                fieldSize = 4;
+            } else {
+                return false; // Unknown PE format
+            }
+
+            // Read current SizeOfStackReserve
+            raf.seek(stackReserveOffset);
+            long currentReserve;
+            if (fieldSize == 8) {
+                currentReserve = Long.reverseBytes(raf.readLong());
+            } else {
+                currentReserve = Integer.reverseBytes(raf.readInt()) & 0xFFFFFFFFL;
+            }
+
+            if (currentReserve >= targetReserve) {
+                log("  skip " + exe.getParentFile().getName() + "/" + exe.getName()
+                        + " — already " + (currentReserve / 1024 / 1024) + "MB");
+                return false;
+            }
+
+            // Write new SizeOfStackReserve
+            raf.seek(stackReserveOffset);
+            if (fieldSize == 8) {
+                raf.writeLong(Long.reverseBytes(targetReserve));
+            } else {
+                raf.writeInt(Integer.reverseBytes((int) targetReserve));
+            }
+
+            log("  patched " + exe.getParentFile().getName() + "/" + exe.getName()
+                    + " — " + (currentReserve / 1024 / 1024) + "MB → " + (targetReserve / 1024 / 1024) + "MB");
+            return true;
+        } finally {
+            raf.close();
+        }
     }
 
     private static File safePath(File prefix, String name) {
