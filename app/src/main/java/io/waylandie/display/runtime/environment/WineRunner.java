@@ -1593,6 +1593,13 @@ public final class WineRunner {
         if (!winePrefix.exists()) winePrefix.mkdirs();
         env.put("WINEPREFIX", winePrefix.getAbsolutePath());
         env.put("WINEDLLOVERRIDES", "d3d9,d3d10core,d3d11,dxgi=native;winex11.drv=d;winewayland.drv=b,native");
+        // CRITICAL: Increase Wine's kernel/pthread stack from 1MB to 8MB.
+        // Wine's thread creation uses: pthread_attr_setstack(attr, kernel_stack, kernel_stack_size)
+        // The default kernel_stack_size is 0x100000 (1MB). FEX's libarm64ecfex.dll DllMain
+        // + Wine's loader consume nearly 1MB → stack overflow at 432 bytes from the bottom.
+        // Setting WINE_KERNEL_STACK_SIZE=8192 (8MB in KB) gives every thread 8MB of stack.
+        // This is read by dlls/ntdll/unix/loader.c and applied before any thread starts.
+        env.put("WINE_KERNEL_STACK_SIZE", "8192");
         // === WINEDEBUG ===
         // Selective Wine debug channels — NOT +all (which produces GB of output
         // and deadlocks the stderr pipe). We redirect stderr to a FILE (see

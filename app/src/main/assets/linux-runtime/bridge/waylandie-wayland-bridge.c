@@ -4011,6 +4011,11 @@ static void seat_get_pointer(struct wl_client *client, struct wl_resource *resou
            same_client, total_pointers,
            state->pointer_x, state->pointer_y);
     fflush(stdout);
+    input_debug_log("seat-get-pointer ptr=%p focused=%p same-client=%d total=%d pointer_x=%.1f pointer_y=%.1f",
+           (void *)pointer_resource,
+           (void *)state->focused_surface,
+           same_client, total_pointers,
+           state->pointer_x, state->pointer_y);
     if (same_client) {
         uint32_t enter_serial = next_input_serial(state);
         wl_pointer_send_enter(
@@ -4117,6 +4122,11 @@ static void bind_seat(struct wl_client *client, void *data, uint32_t version, ui
            !!(caps & WL_SEAT_CAPABILITY_KEYBOARD),
            !!(caps & WL_SEAT_CAPABILITY_TOUCH));
     fflush(stdout);
+    input_debug_log("bind-seat client=%p version=%u bind_version=%u caps=%u (ptr=%d kb=%d touch=%d)",
+           (void *)client, version, bind_version, caps,
+           !!(caps & WL_SEAT_CAPABILITY_POINTER),
+           !!(caps & WL_SEAT_CAPABILITY_KEYBOARD),
+           !!(caps & WL_SEAT_CAPABILITY_TOUCH));
     /* Only send name if the CLIENT bound with version >= 7.
      * Wine's winewayland.drv caps at version 5 (see wayland.c:
      *   wl_registry_bind(..., version < 5 ? version : 5)
