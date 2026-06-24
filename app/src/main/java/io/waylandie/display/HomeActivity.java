@@ -465,42 +465,39 @@ public final class HomeActivity extends Activity {
             runningWineProcess = null;
             winePid = -1;
         }
-        // Also kill wineserver to ensure clean state for next launch
+        // Delete the Wine server socket directory so the next launch starts
+        // a FRESH wineserver (with patched PE headers → 8MB native stack).
+        // This is simpler and more reliable than wineserver -k.
         try {
-            File protonDir = new File(getFilesDir(), "contents/proton/active");
-            File wineserverBin = new File(protonDir, "bin/wineserver");
-            if (!wineserverBin.exists()) {
-                wineserverBin = new File(protonDir, "lib/wine/aarch64-unix/wineserver");
-            }
             File rootDir = new File(getFilesDir(), "imagefs");
-            File linker = new File(rootDir, "usr/lib/ld-linux-aarch64.so.1");
-            if (!linker.exists()) {
-                linker = new File(rootDir, "lib/ld-linux-aarch64.so.1");
-            }
-            String libPath = new File(rootDir, "usr/local/lib").getAbsolutePath() + ":"
-                    + new File(protonDir, "lib").getAbsolutePath() + ":"
-                    + new File(protonDir, "files/lib").getAbsolutePath() + ":"
-                    + "/system/lib64";
-            // DO NOT create libc.so symlink — rootfs glibc 2.31 is incompatible with proton wineserver
-            if (wineserverBin.exists() && linker.exists()) {
-                ProcessBuilder pb = new ProcessBuilder(
-                        linker.getAbsolutePath(),
-                        "--library-path", libPath,
-                        wineserverBin.getAbsolutePath(), "-k");
-                pb.environment().put("LD_LIBRARY_PATH", libPath);
-                pb.environment().put("WINEPREFIX", new File(rootDir, "home/xuser/.wine").getAbsolutePath());
-                pb.environment().put("HOME", new File(rootDir, "home/xuser").getAbsolutePath());
-                pb.redirectErrorStream(true);
-                Process p = pb.start();
-                p.waitFor(3, java.util.concurrent.TimeUnit.SECONDS);
-                log("Killed wineserver");
+            File winePrefix = new File(rootDir, "home/xuser/.wine");
+            File[] files = winePrefix.listFiles();
+            if (files != null) {
+                for (File f : files) {
+                    if (f.getName().startsWith("server-") && f.isDirectory()) {
+                        deleteDirRecursive(f);
+                        log("Deleted wineserver socket dir: " + f.getName());
+                    }
+                }
             }
         } catch (Exception e) {
-            log("wineserver kill failed: " + e.getMessage());
+            log("Server socket cleanup failed: " + e.getMessage());
         }
         BridgeKeepAliveService.stop(this);
         releaseWakeLock();
         refreshBridgeStatus();
+    }
+
+    private static void deleteDirRecursive(File file) {
+        if (file.isDirectory()) {
+            File[] children = file.listFiles();
+            if (children != null) {
+                for (File child : children) {
+                    deleteDirRecursive(child);
+                }
+            }
+        }
+        file.delete();
     }
 
     // --- Steam ---

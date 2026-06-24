@@ -1767,66 +1767,51 @@ public final class WineRunner {
         Log.i(TAG, "=== Stale process cleanup ===");
         installerDiagnostics.append("[cleanup] Stale process cleanup starting\n");
 
-        // 0. Kill wineserver explicitly — it's a persistent daemon that survives
-        // between Wine launches. If we don't kill it, the second launch connects
-        // to the stale wineserver, which has old state → desktop doesn't render.
-        // wineserver is glibc-linked and can't run directly under bionic.
-        // We run it via the glibc linker (ld-linux-aarch64.so.1) with BOTH
-        // --library-path flag AND LD_LIBRARY_PATH env var to maximize the
-        // chance of finding all glibc libraries (libc.so, libdl.so, etc.).
+        // 0. Delete the Wine server socket directory. This forces Wine to start
+        // a FRESH wineserver on next launch. The stale wineserver (if any) is
+        // orphaned — it can't be contacted via the deleted socket.
+        //
+        // This is MUCH simpler and more reliable than `wineserver -k`:
+        // - No glibc linker needed
+        // - No library path issues (libc.so, libdl.so version mismatches)
+        // - No binary compatibility concerns
+        // - Works regardless of proton build version
+        //
+        // The fresh wineserver reads the PATCHED PE headers (8MB stack) from
+        // the exe files we patched. This gives FEX's DllMain 8MB of native
+        // stack instead of 1MB → no stack overflow → desktop renders.
         try {
-            File protonDir = new File(context.getFilesDir(), "contents/proton/active");
-            File wineserverBin = new File(protonDir, "bin/wineserver");
-            if (!wineserverBin.exists()) {
-                wineserverBin = new File(protonDir, "lib/wine/aarch64-unix/wineserver");
-            }
-            File linker = new File(rootDir, "usr/lib/ld-linux-aarch64.so.1");
-            if (!linker.exists()) {
-                linker = new File(rootDir, "lib/ld-linux-aarch64.so.1");
-            }
-            // Build the library path — use the SAME path Wine uses (from the launcher)
-            // DO NOT include rootfs/usr/lib/aarch64-linux-gnu — it has glibc 2.31
-            // which is INCOMPATIBLE with the proton-armec wineserver (needs newer glibc).
-            // Wine's own LD_LIBRARY_PATH is: imagefs/usr/local/lib:proton/lib:proton/files/lib:/system/lib64
-            String libPath = new File(rootDir, "usr/local/lib").getAbsolutePath() + ":"
-                    + new File(protonDir, "lib").getAbsolutePath() + ":"
-                    + new File(protonDir, "files/lib").getAbsolutePath() + ":"
-                    + "/system/lib64";
-            // DO NOT create libc.so symlink — the rootfs libc is glibc 2.31 which is
-            // INCOMPATIBLE with proton-armec's wineserver. The glibc linker will find
-            // the correct libc via its built-in search path (same as Wine itself).
-            if (wineserverBin.exists() && linker.exists()) {
-                Log.i(TAG, "[cleanup] Killing wineserver via: " + linker.getAbsolutePath() + " --library-path " + libPath + " " + wineserverBin.getAbsolutePath() + " -k");
-                installerDiagnostics.append("[cleanup] Running wineserver -k (via glibc linker + LD_LIBRARY_PATH)\n");
-                ProcessBuilder pbKill = new ProcessBuilder(
-                        linker.getAbsolutePath(),
-                        "--library-path", libPath,
-                        wineserverBin.getAbsolutePath(), "-k");
-                Map<String, String> killEnv = pbKill.environment();
-                // Set LD_LIBRARY_PATH env var TOO (in addition to --library-path flag)
-                killEnv.put("LD_LIBRARY_PATH", libPath);
-                killEnv.put("WINEPREFIX", new File(rootDir, "home/xuser/.wine").getAbsolutePath());
-                killEnv.put("HOME", new File(rootDir, "home/xuser").getAbsolutePath());
-                pbKill.redirectErrorStream(true);
-                Process killProc = pbKill.start();
-                try (java.io.BufferedReader r = new java.io.BufferedReader(
-                        new java.io.InputStreamReader(killProc.getInputStream()))) {
-                    String line;
-                    while ((line = r.readLine()) != null) {
-                        installerDiagnostics.append("[cleanup] wineserver: ").append(line).append('\n');
+            File winePrefix = new File(rootDir, "home/xuser/.wine");
+            File serverDir = new File(winePrefix, ".wine");
+            // Wine's server socket is at: WINEPREFIX/.wine/server-<hostname>/
+            // But some Wine versions use: WINEPREFIX/server-<hostname>/
+            // Check both locations.
+            File[] winePrefixFiles = winePrefix.listFiles();
+            if (winePrefixFiles != null) {
+                for (File f : winePrefixFiles) {
+                    if (f.getName().startsWith("server-") && f.isDirectory()) {
+                        Log.i(TAG, "[cleanup] Deleting wineserver socket dir: " + f.getAbsolutePath());
+                        installerDiagnostics.append("[cleanup] Deleting server dir: ").append(f.getName()).append('\n');
+                        deleteRecursive(f);
                     }
                 }
-                try { killProc.waitFor(5, java.util.concurrent.TimeUnit.SECONDS); }
-                catch (Exception ignored) {}
-                int exitCode = killProc.exitValue();
-                Log.i(TAG, "[cleanup] wineserver -k exit code: " + exitCode);
-                installerDiagnostics.append("[cleanup] wineserver -k exit code: ").append(exitCode).append('\n');
-            } else {
-                installerDiagnostics.append("[cleanup] wineserver or linker not found\n");
+            }
+            // Also check WINEPREFIX/.wine/ for server dirs (nested .wine)
+            if (serverDir.isDirectory()) {
+                File[] innerFiles = serverDir.listFiles();
+                if (innerFiles != null) {
+                    for (File f : innerFiles) {
+                        if (f.getName().startsWith("server-") && f.isDirectory()) {
+                            Log.i(TAG, "[cleanup] Deleting inner wineserver socket dir: " + f.getAbsolutePath());
+                            installerDiagnostics.append("[cleanup] Deleting inner server dir: ").append(f.getName()).append('\n');
+                            deleteRecursive(f);
+                        }
+                    }
+                }
             }
         } catch (Exception e) {
-            Log.w(TAG, "[cleanup] wineserver -k failed: " + e.getMessage());
-            installerDiagnostics.append("[cleanup] wineserver -k failed: ")
+            Log.w(TAG, "[cleanup] Server socket delete failed: " + e.getMessage());
+            installerDiagnostics.append("[cleanup] Server socket delete failed: ")
                 .append(e.getMessage()).append('\n');
         }
 
@@ -1962,6 +1947,19 @@ public final class WineRunner {
             installerDiagnostics.append("[adrenotools] FAILED to sync driver: ")
                 .append(e.getMessage()).append('\n');
         }
+    }
+
+    /** Recursively delete a directory and all its contents. */
+    private static void deleteRecursive(File file) {
+        if (file.isDirectory()) {
+            File[] children = file.listFiles();
+            if (children != null) {
+                for (File child : children) {
+                    deleteRecursive(child);
+                }
+            }
+        }
+        file.delete();
     }
 
     private static void copyFile(File src, File dst) throws IOException {
