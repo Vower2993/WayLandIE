@@ -131,7 +131,7 @@ public final class MainActivity extends Activity
     private static final long EXTERNAL_PRESENT_UI_UPDATE_INTERVAL_NANOS = 500_000_000L;
     private static final long BRIDGE_PRESENTER_WAIT_TIMEOUT_MS = 60L * 60L * 1000L;
     private static final long BRIDGE_WINDOW_WAIT_TIMEOUT_MS = 5000L;
-    private static final float BRIDGE_CURSOR_SIZE_PX = 26.0f;
+    private static final float BRIDGE_CURSOR_SIZE_PX = 32.0f;
     private static final long BRIDGE_TOUCH_CURSOR_HIDE_DELAY_MS = 800L;
     private static final long BRIDGE_CONTROLLER_CURSOR_HIDE_DELAY_MS = 1400L;
     private static final float CONTROLLER_MOUSE_DEADZONE = 0.18f;
@@ -4934,9 +4934,10 @@ public final class MainActivity extends Activity
         if (cursor == null) {
             return;
         }
-        float halfSize = BRIDGE_CURSOR_SIZE_PX * 0.5f;
-        cursor.setTranslationX(bridgeCursorX - halfSize);
-        cursor.setTranslationY(bridgeCursorY - halfSize);
+        // Arrow cursor hotspot is at top-left (0,0), not center.
+        // Position the cursor so its top-left corner is at the touch point.
+        cursor.setTranslationX(bridgeCursorX);
+        cursor.setTranslationY(bridgeCursorY);
         cursor.bringToFront();
         cursor.setVisibility(View.VISIBLE);
         drawBridgeCursorSurface();
@@ -4968,15 +4969,43 @@ public final class MainActivity extends Activity
                 return;
             }
             canvas.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR);
+
+            // Draw a standard Windows-style arrow cursor
             Paint cursorPaint = smallPaint;
+            float w = BRIDGE_CURSOR_SIZE_PX;
+            float h = BRIDGE_CURSOR_SIZE_PX;
+
+            // Arrow path: standard arrow cursor shape
+            android.graphics.Path arrowPath = new android.graphics.Path();
+            // Start at top-left (hotspot position)
+            arrowPath.moveTo(0, 0);
+            // Go right along the top edge
+            arrowPath.lineTo(w * 0.65f, 0);
+            // Diagonal down-right to the point
+            arrowPath.lineTo(w * 0.35f, h * 0.30f);
+            // Right edge of the stem
+            arrowPath.lineTo(w * 0.55f, h * 0.30f);
+            // Down to the bottom-right of the stem
+            arrowPath.lineTo(w * 0.25f, h * 0.65f);
+            // Left edge of the stem
+            arrowPath.lineTo(w * 0.15f, h * 0.55f);
+            // Up to the bottom-left of the arrowhead
+            arrowPath.lineTo(0, h * 0.45f);
+            // Close back to start
+            arrowPath.close();
+
+            // Draw white fill
             cursorPaint.setStyle(Paint.Style.FILL);
-            cursorPaint.setColor(Color.argb(235, 0, 210, 255));
-            float center = BRIDGE_CURSOR_SIZE_PX * 0.5f;
-            canvas.drawCircle(center, center, center - 2.0f, cursorPaint);
-            cursorPaint.setStyle(Paint.Style.STROKE);
-            cursorPaint.setStrokeWidth(3.0f);
             cursorPaint.setColor(Color.WHITE);
-            canvas.drawCircle(center, center, center - 4.0f, cursorPaint);
+            cursorPaint.setAntiAlias(true);
+            canvas.drawPath(arrowPath, cursorPaint);
+
+            // Draw black outline
+            cursorPaint.setStyle(Paint.Style.STROKE);
+            cursorPaint.setStrokeWidth(2.0f);
+            cursorPaint.setColor(Color.BLACK);
+            canvas.drawPath(arrowPath, cursorPaint);
+
             cursorPaint.setStyle(Paint.Style.FILL);
         } finally {
             if (canvas != null) {

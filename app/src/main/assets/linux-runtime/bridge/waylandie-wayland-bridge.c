@@ -215,6 +215,13 @@ struct server_state {
     struct wl_list touch_resources;
     struct wl_resource *focused_surface;
     struct wl_client *focused_client; /* survives surface destruction */
+    /* Cursor tracking — Wine calls wl_pointer_set_cursor to set the
+     * cursor surface + hotspot. We track the surface so we can extract
+     * its buffer when it commits, and send the cursor image to Java. */
+    struct wl_resource *cursor_surface;
+    int32_t cursor_hotspot_x;
+    int32_t cursor_hotspot_y;
+    int cursor_visible;
     Display *xtest_display;
     Window xtest_window;
     Atom xtest_utf8_atom;
@@ -3962,7 +3969,44 @@ static void pointer_set_cursor(
         struct wl_resource *surface,
         int32_t hotspot_x,
         int32_t hotspot_y) {
-    (void)client; (void)resource; (void)serial; (void)surface; (void)hotspot_x; (void)hotspot_y;
+    struct input_resource_state *input = wl_resource_get_user_data(resource);
+    if (input == NULL || input->server == NULL) return;
+    struct server_state *state = input->server;
+
+    if (surface == NULL) {
+        /* Wine is hiding the cursor */
+        state->cursor_surface = NULL;
+        state->cursor_visible = 0;
+        printf("wayland-shm-ahb cursor-hide\n");
+        fflush(stdout);
+        /* Notify Java to hide cursor */
+        if (state->input_sock >= 0) {
+            char msg[256];
+            int len = snprintf(msg, sizeof(msg), "input-v1 kind=cursor action=hide\n");
+            write(state->input_sock, msg, len);
+        }
+        return;
+    }
+
+    /* Wine is showing a cursor on 'surface' with hotspot (hotspot_x, hotspot_y) */
+    state->cursor_surface = surface;
+    state->cursor_hotspot_x = hotspot_x;
+    state->cursor_hotspot_y = hotspot_y;
+    state->cursor_visible = 1;
+    printf("wayland-shm-ahb cursor-set surface=%p hotspot=(%d,%d)\n",
+           (void *)surface, hotspot_x, hotspot_y);
+    fflush(stdout);
+
+    /* The cursor surface will commit a buffer. When it does, the commit
+     * handler will detect it as the cursor surface and send the image to Java.
+     * For now, notify Java that a cursor is visible with the hotspot. */
+    if (state->input_sock >= 0) {
+        char msg[256];
+        int len = snprintf(msg, sizeof(msg),
+                "input-v1 kind=cursor action=set hotspot_x=%d hotspot_y=%d\n",
+                hotspot_x, hotspot_y);
+        write(state->input_sock, msg, len);
+    }
 }
 
 static void pointer_release(struct wl_client *client, struct wl_resource *resource) {
