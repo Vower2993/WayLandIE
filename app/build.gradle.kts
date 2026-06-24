@@ -6,6 +6,28 @@ android {
     namespace = "io.waylandie.display"
     compileSdk = 34
 
+    // =================================================================
+    // SIGNING CONFIG — use the repo's debug.keystore so ALL CI builds
+    // are signed with the SAME key. Without this, each CI runner
+    // auto-generates its own debug keystore, and Android refuses to
+    // install a new APK over an existing one ("app not installed")
+    // because the signatures don't match.
+    //
+    // The keystore at app/keystore/debug.keystore is committed to the
+    // repo (see .gitignore — it's explicitly whitelisted with !app/keystore/debug.keystore).
+    // It uses the standard Android debug keystore credentials:
+    //   alias: androiddebugkey
+    //   password: android
+    // =================================================================
+    signingConfigs {
+        getByName("debug") {
+            storeFile = file("keystore/debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
+    }
+
     defaultConfig {
         applicationId = "io.waylandie.display"
         // CRITICAL: targetSdk MUST be 28 (Android 9).
@@ -29,7 +51,14 @@ android {
         // All API 33+ features are guarded with Build.VERSION.SDK_INT checks.
         minSdk = 26
         targetSdk = 28
-        versionCode = 1
+        // Bump versionCode with each build so Android always treats new CL
+        // builds as an update (not a same-version install which some Android
+        // versions reject). Use a timestamp-based code that always increases.
+        // Format: YYMMDDHH (e.g. 26062403 = 2026-06-24 03:xx)
+        // Uses System.currentTimeMillis() which is available in Kotlin DSL
+        // without imports. Divides by 3600000 (ms per hour) to get an
+        // always-increasing hour-based version code.
+        versionCode = (System.currentTimeMillis() / 3600000).toInt()
         versionName = "0.2.0-no-root"
 
         // Pin the NDK version so AGP doesn't try to auto-download a
