@@ -477,14 +477,28 @@ public final class HomeActivity extends Activity {
             if (!linker.exists()) {
                 linker = new File(rootDir, "lib/ld-linux-aarch64.so.1");
             }
+            String libPath = new File(rootDir, "usr/lib").getAbsolutePath() + ":"
+                    + new File(rootDir, "usr/lib/aarch64-linux-gnu").getAbsolutePath() + ":"
+                    + new File(rootDir, "usr/local/lib").getAbsolutePath() + ":"
+                    + new File(protonDir, "lib").getAbsolutePath() + ":"
+                    + new File(protonDir, "files/lib").getAbsolutePath();
+            // Create libc.so/libdl.so symlinks if missing
+            File libcSo = new File(rootDir, "usr/lib/aarch64-linux-gnu/libc.so");
+            File libcSo6 = new File(rootDir, "usr/lib/aarch64-linux-gnu/libc.so.6");
+            if (!libcSo.exists() && libcSo6.exists()) {
+                try { java.nio.file.Files.createSymbolicLink(libcSo.toPath(), libcSo6.toPath()); } catch (Exception ignored) {}
+            }
+            File libdlSo = new File(rootDir, "usr/lib/aarch64-linux-gnu/libdl.so");
+            File libdlSo2 = new File(rootDir, "usr/lib/aarch64-linux-gnu/libdl.so.2");
+            if (!libdlSo.exists() && libdlSo2.exists()) {
+                try { java.nio.file.Files.createSymbolicLink(libdlSo.toPath(), libdlSo2.toPath()); } catch (Exception ignored) {}
+            }
             if (wineserverBin.exists() && linker.exists()) {
                 ProcessBuilder pb = new ProcessBuilder(
                         linker.getAbsolutePath(),
-                        "--library-path", new File(rootDir, "usr/lib").getAbsolutePath() + ":"
-                                + new File(rootDir, "usr/lib/aarch64-linux-gnu").getAbsolutePath() + ":"
-                                + new File(rootDir, "usr/local/lib").getAbsolutePath() + ":"
-                                + new File(protonDir, "lib").getAbsolutePath(),
+                        "--library-path", libPath,
                         wineserverBin.getAbsolutePath(), "-k");
+                pb.environment().put("LD_LIBRARY_PATH", libPath);
                 pb.environment().put("WINEPREFIX", new File(rootDir, "home/xuser/.wine").getAbsolutePath());
                 pb.environment().put("HOME", new File(rootDir, "home/xuser").getAbsolutePath());
                 pb.redirectErrorStream(true);

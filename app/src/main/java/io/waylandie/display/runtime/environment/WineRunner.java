@@ -1771,29 +1771,53 @@ public final class WineRunner {
         // between Wine launches. If we don't kill it, the second launch connects
         // to the stale wineserver, which has old state → desktop doesn't render.
         // wineserver is glibc-linked and can't run directly under bionic.
-        // We run it via the glibc linker (ld-linux-aarch64.so.1).
+        // We run it via the glibc linker (ld-linux-aarch64.so.1) with BOTH
+        // --library-path flag AND LD_LIBRARY_PATH env var to maximize the
+        // chance of finding all glibc libraries (libc.so, libdl.so, etc.).
         try {
             File protonDir = new File(context.getFilesDir(), "contents/proton/active");
             File wineserverBin = new File(protonDir, "bin/wineserver");
             if (!wineserverBin.exists()) {
                 wineserverBin = new File(protonDir, "lib/wine/aarch64-unix/wineserver");
             }
-            // Find the glibc linker
             File linker = new File(rootDir, "usr/lib/ld-linux-aarch64.so.1");
             if (!linker.exists()) {
                 linker = new File(rootDir, "lib/ld-linux-aarch64.so.1");
             }
+            // Build the library path — include ALL directories that might have glibc libs
+            String libPath = new File(rootDir, "usr/lib").getAbsolutePath() + ":"
+                    + new File(rootDir, "usr/lib/aarch64-linux-gnu").getAbsolutePath() + ":"
+                    + new File(rootDir, "usr/local/lib").getAbsolutePath() + ":"
+                    + new File(protonDir, "lib").getAbsolutePath() + ":"
+                    + new File(protonDir, "files/lib").getAbsolutePath();
+            // Create libc.so → libc.so.6 symlink if missing (wineserver links against unversioned libc.so)
+            File libcSo = new File(rootDir, "usr/lib/aarch64-linux-gnu/libc.so");
+            File libcSo6 = new File(rootDir, "usr/lib/aarch64-linux-gnu/libc.so.6");
+            if (!libcSo.exists() && libcSo6.exists()) {
+                try {
+                    java.nio.file.Files.createSymbolicLink(libcSo.toPath(), libcSo6.toPath());
+                    Log.i(TAG, "[cleanup] Created libc.so → libc.so.6 symlink");
+                } catch (Exception ignored) {}
+            }
+            // Also create libdl.so → libdl.so.2 symlink
+            File libdlSo = new File(rootDir, "usr/lib/aarch64-linux-gnu/libdl.so");
+            File libdlSo2 = new File(rootDir, "usr/lib/aarch64-linux-gnu/libdl.so.2");
+            if (!libdlSo.exists() && libdlSo2.exists()) {
+                try {
+                    java.nio.file.Files.createSymbolicLink(libdlSo.toPath(), libdlSo2.toPath());
+                    Log.i(TAG, "[cleanup] Created libdl.so → libdl.so.2 symlink");
+                } catch (Exception ignored) {}
+            }
             if (wineserverBin.exists() && linker.exists()) {
-                Log.i(TAG, "[cleanup] Killing wineserver via: " + linker.getAbsolutePath() + " " + wineserverBin.getAbsolutePath() + " -k");
-                installerDiagnostics.append("[cleanup] Running wineserver -k (via glibc linker)\n");
+                Log.i(TAG, "[cleanup] Killing wineserver via: " + linker.getAbsolutePath() + " --library-path " + libPath + " " + wineserverBin.getAbsolutePath() + " -k");
+                installerDiagnostics.append("[cleanup] Running wineserver -k (via glibc linker + LD_LIBRARY_PATH)\n");
                 ProcessBuilder pbKill = new ProcessBuilder(
                         linker.getAbsolutePath(),
-                        "--library-path", new File(rootDir, "usr/lib").getAbsolutePath() + ":"
-                                + new File(rootDir, "usr/lib/aarch64-linux-gnu").getAbsolutePath() + ":"
-                                + new File(rootDir, "usr/local/lib").getAbsolutePath() + ":"
-                                + new File(protonDir, "lib").getAbsolutePath(),
+                        "--library-path", libPath,
                         wineserverBin.getAbsolutePath(), "-k");
                 Map<String, String> killEnv = pbKill.environment();
+                // Set LD_LIBRARY_PATH env var TOO (in addition to --library-path flag)
+                killEnv.put("LD_LIBRARY_PATH", libPath);
                 killEnv.put("WINEPREFIX", new File(rootDir, "home/xuser/.wine").getAbsolutePath());
                 killEnv.put("HOME", new File(rootDir, "home/xuser").getAbsolutePath());
                 pbKill.redirectErrorStream(true);
