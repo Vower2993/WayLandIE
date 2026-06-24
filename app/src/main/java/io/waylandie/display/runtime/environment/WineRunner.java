@@ -1614,7 +1614,7 @@ public final class WineRunner {
         File winePrefix = new File(homeDir, ".wine");
         if (!winePrefix.exists()) winePrefix.mkdirs();
         env.put("WINEPREFIX", winePrefix.getAbsolutePath());
-        env.put("WINEDLLOVERRIDES", "d3d9,d3d10core,d3d11,dxgi=native;winex11.drv=d;winewayland.drv=b,native;mscoree=d;mshtml=d");
+        env.put("WINEDLLOVERRIDES", "d3d9,d3d10core,d3d11,dxgi=native;winex11.drv=d;winewayland.drv=b,native");
         // CRITICAL: Increase Wine's kernel/pthread stack from 1MB to 8MB.
         // Wine's thread creation uses: pthread_attr_setstack(attr, kernel_stack, kernel_stack_size)
         // The default kernel_stack_size is 0x100000 (1MB). FEX's libarm64ecfex.dll DllMain

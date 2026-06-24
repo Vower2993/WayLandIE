@@ -115,35 +115,19 @@ public final class WaylandDriverInstaller {
                 log("  WARNING: arm64ec ntdll.dll is suspiciously small — FEX may still crash");
             }
 
-            // === Patch PE headers of exe files to set SizeOfStackReserve = 8MB ===
-            // FEX's libarm64ecfex.dll DllMain consumes ~1MB of stack. Wine's default
-            // thread stack is 1MB (from the exe's PE header). By patching the
-            // SizeOfStackReserve field in the PE Optional Header to 8MB, all threads
-            // spawned by Wine get 8MB of stack — enough for FEX + Wine's loader.
+            // === PE header patching REMOVED ===
+            // d37a675 proved that WINE_KERNEL_STACK_SIZE=8192 alone is sufficient
+            // to prevent the FEX DllMain stack overflow. PE header patching was
+            // added in commit 303a802 and REINTRODUCED the stack overflow.
+            // The patcher modifies SizeOfStackReserve in exe files, but the
+            // user's custom proton-armec ntdll.so appears to ignore or cap
+            // the value, causing Wine to fall back to 1MB native stack.
+            // With WINE_KERNEL_STACK_SIZE=8192 (kernel stack = 8MB), FEX's
+            // DllMain runs on the kernel stack during initial process startup,
+            // which has enough space. The native stack is only used later
+            // (after FEX has already initialized).
             //
-            // We patch exes in TWO locations:
-            //   1. proton/lib/wine/{arch}-windows/ — builtin exes (fallback)
-            //   2. wineprefix/drive_c/windows/{system32,syswow64}/ — prefix exes
-            //      (these are the ones Wine ACTUALLY loads first; the builtin
-            //      versions are only used if the prefix copy doesn't exist)
-            //
-            // This is safe because:
-            //   - PE files don't have a protocol version (only Unix ELF .so files do)
-            //   - We're only changing one number in the header, no code changes
-            //   - 8MB is virtual-reserved, physical memory is committed on demand
-            log("=== Patching PE headers for 8MB stack ===");
-            patchExeStackReserve(prefix);
-
-            // Also patch the Wine prefix exes — these are the ones Wine actually loads
-            File rootDir = new File(ctx.getFilesDir(), "imagefs");
-            File winePrefix = new File(rootDir, "home/xuser/.wine");
-            File prefixSystem32 = new File(winePrefix, "drive_c/windows/system32");
-            File prefixSyswow64 = new File(winePrefix, "drive_c/windows/syswow64");
-            log("  Wine prefix: " + winePrefix.getAbsolutePath());
-            log("  system32 exists: " + prefixSystem32.isDirectory());
-            log("  syswow64 exists: " + prefixSyswow64.isDirectory());
-            patchExeStackReserveInDir(prefixSystem32);
-            patchExeStackReserveInDir(prefixSyswow64);
+            // DO NOT re-enable PE patching — it causes the regression.
 
             return true;
         } catch (IOException ioe) {
