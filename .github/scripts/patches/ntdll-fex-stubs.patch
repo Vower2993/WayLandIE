@@ -1,0 +1,54 @@
+diff --git a/dlls/ntdll/signal_arm64.c b/dlls/ntdll/signal_arm64.c
+index 7eddc57..32ee2b8 100644
+--- a/dlls/ntdll/signal_arm64.c
++++ b/dlls/ntdll/signal_arm64.c
+@@ -992,4 +992,49 @@ __ASM_GLOBAL_FUNC( DbgUserBreakPoint, "brk #0xf000; ret"
+                     "\n\tnop; nop; nop; nop; nop; nop; nop; nop"
+                     "\n\tnop; nop; nop; nop; nop; nop" );
+ 
++/*
++ * FEX compatibility stubs — provide ARM64EC-only exports for native ARM64 builds.
++ *
++ * Background: FEX's libarm64ecfex.dll imports RtlIsEcCode + ProcessPending-
++ * CrossProcessEmulatorWork from ntdll.dll. These are defined in signal_arm64ec.c
++ * (only compiled when __arm64ec__ is defined). The Wine spec marks them with
++ * -arch=arm64ec, but Wine's import resolver only checks the STANDARD PE export
++ * directory, not the CHPE metadata export table where ARM64EC-specific exports
++ * land for ARM64X hybrid binaries. Result: FEX's imports fail → stub to 0x10000
++ * → SIGSEGV → recursion → stack overflow → FEX never inits.
++ *
++ * Fix: provide stub implementations for the native ARM64 build, then change
++ * the spec to -arch=win64 so both exports land in the standard PE export
++ * directory. The stubs are no-ops (safe because native ARM64 processes don't
++ * have CHPE V2 process info).
++ */
++
++#ifndef __arm64ec__
++
++/**********************************************************************
++ *           RtlIsEcCode  (NTDLL.@)
++ *
++ * Stub for native ARM64 build. FEX requires this export to exist; the real
++ * implementation is in signal_arm64ec.c (only compiled for ARM64EC).
++ * For native ARM64 code, the answer is always "no, this is not EC code".
++ */
++BOOLEAN WINAPI RtlIsEcCode( ULONG_PTR ptr )
++{
++    return FALSE;
++}
++
++/**********************************************************************
++ *           ProcessPendingCrossProcessEmulatorWork  (NTDLL.@)
++ *
++ * Stub for native ARM64 build. The real implementation is in
++ * signal_arm64ec.c (only compiled for ARM64EC). For native ARM64 processes
++ * there is no CHPE V2 process info, so there's no work to process.
++ */
++void WINAPI ProcessPendingCrossProcessEmulatorWork(void)
++{
++    /* no-op — native ARM64 processes don't have CHPE V2 work pending */
++}
++
++#endif  /* !__arm64ec__ */
++
+ #endif  /* __aarch64__ */

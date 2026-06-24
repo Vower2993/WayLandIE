@@ -413,15 +413,29 @@ git apply "$WORKSPACE/.github/scripts/patches/add_esync_include.patch" 2>&1 || \
 # these symbols → Wine stubs them to 0x10000 → FEX's DllMain calls them → SIGSEGV →
 # exception handler re-enters FEX → recursion → stack overflow → FEX never inits.
 #
-# Fix: change -arch=arm64ec / -arch=x86_64 to -arch=win64 (which includes x86_64 + ARM64
-# + ARM64EC). This puts the functions in the STANDARD PE export directory, where Wine's
-# import_dll can find them. Side effect: ARM64 native processes also see these exports,
-# but since the functions are guarded by EcCodeBitMap checks internally, calling them from
-# native ARM64 code is safe (they'll just return false / no-op).
+# Fix is in TWO parts:
+#   1. ntdll-fex-stubs.patch — adds stub implementations of both functions to signal_arm64.c
+#      (compiled for native ARM64, where __arm64ec__ is NOT defined). Without these stubs,
+#      changing the spec to -arch=win64 would cause link errors (undefined symbol) for the
+#      native ARM64 build.
+#   2. ntdll-spec-fex-exports.patch — changes -arch=arm64ec / -arch=x86_64 to -arch=win64
+#      so the functions are exported from the STANDARD PE export directory (where Wine's
+#      import_dll can find them).
+#
+# Side effect: ARM64 native processes also see these exports. This is safe because:
+#   - RtlIsEcCode stub returns FALSE (no native ARM64 code is EC code)
+#   - ProcessPendingCrossProcessEmulatorWork stub is a no-op (no CHPE V2 work for native)
+echo "=== Applying custom patch: FEX ntdll stubs (signal_arm64.c) ==="
+git apply "$WORKSPACE/.github/scripts/patches/ntdll-fex-stubs.patch" 2>&1 || \
+  echo "  WARNING: ntdll-fex-stubs.patch failed (may already be applied)"
+
 echo "=== Applying custom patch: export FEX-required ntdll functions from all win64 archs ==="
 git apply "$WORKSPACE/.github/scripts/patches/ntdll-spec-fex-exports.patch" 2>&1 || \
   echo "  WARNING: ntdll-spec-fex-exports.patch failed (may already be applied)"
-# Verify the patch took effect
+# Verify both patches took effect
+echo "  Stub functions in signal_arm64.c:"
+grep -c "RtlIsEcCode\|ProcessPendingCrossProcessEmulatorWork" /tmp/proton-wine/dlls/ntdll/signal_arm64.c
+echo "  Spec entries:"
 grep -E "RtlIsEcCode|ProcessPendingCrossProcessEmulatorWork" /tmp/proton-wine/dlls/ntdll/ntdll.spec | head -5
 
 # Regenerate server_protocol.h after patches modified server/protocol.def.
