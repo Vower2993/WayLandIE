@@ -1,0 +1,13 @@
+diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
+index 6e16977..6032bf0 100644
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -4695,7 +4695,7 @@ NTSTATUS virtual_alloc_thread_stack( INITIAL_TEB *stack, ULONG_PTR limit_low, UL
+     if (!commit_size) commit_size = main_image_info.CommittedStackSize;
+ 
+     size = max( reserve_size, commit_size );
+-    if (size < 1024 * 1024) size = 1024 * 1024;  /* Xlib needs a large stack */
++    if (size < 8 * 1024 * 1024) size = 8 * 1024 * 1024;  /* Xlib needs a large stack; FEX DllMain needs even more */
+     size = ROUND_SIZE( 0, size, granularity_mask );
+ 
+     server_enter_uninterrupted_section( &virtual_mutex, &sigset );

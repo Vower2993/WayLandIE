@@ -438,6 +438,27 @@ grep -c "RtlIsEcCode\|ProcessPendingCrossProcessEmulatorWork" /tmp/proton-wine/d
 echo "  Spec entries:"
 grep -E "RtlIsEcCode|ProcessPendingCrossProcessEmulatorWork" /tmp/proton-wine/dlls/ntdll/ntdll.spec | head -5
 
+# Apply our custom patch: increase minimum thread stack from 1MB to 8MB.
+#
+# Background: FEX's libarm64ecfex.dll DllMain consumes nearly 1MB of stack during
+# PROCESS_ATTACH (JIT initialization, allocator setup, etc.). Wine's default
+# minimum thread stack is 1MB, so FEX's DllMain overflows the stack before it
+# can complete. The overflow hits the guard page, but by then there's only 432
+# bytes of stack left — not enough for Wine's exception handler to run →
+# 00fc:err:virtual:virtual_setup_exception stack overflow 432 bytes → abort.
+#
+# Fix: change the minimum from 1MB to 8MB in virtual_alloc_thread_stack().
+# This ensures ALL threads (including the initial process thread that loads
+# FEX) get at least 8MB of stack, which is enough for FEX's DllMain + Wine's
+# loader overhead. The 8MB is reserved but not committed, so the memory cost
+# is negligible (only the committed pages consume physical memory).
+echo "=== Applying custom patch: increase minimum thread stack to 8MB ==="
+git apply "$WORKSPACE/.github/scripts/patches/ntdll-stack-size.patch" 2>&1 || \
+  echo "  WARNING: ntdll-stack-size.patch failed (may already be applied)"
+# Verify the patch took effect
+echo "  Stack size minimum:"
+grep "size < 8 \* 1024 \* 1024" /tmp/proton-wine/dlls/ntdll/unix/virtual.c | head -1
+
 # Regenerate server_protocol.h after patches modified server/protocol.def.
 # autogen.sh ran BEFORE patches, so the generated header is stale.
 # tools/make_requests reads protocol.def and generates:
