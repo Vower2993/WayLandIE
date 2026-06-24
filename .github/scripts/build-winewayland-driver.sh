@@ -605,21 +605,29 @@ echo "=== [8/9] Build winewayland targets ==="
 #
 # Building ntdll from this proton_11.0 source tree gives us a fresh DLL
 # with both exports (see dlls/ntdll/signal_arm64ec.c:949 + :1400).
+#
+# ALSO build ntdll.so (the Unix-side ELF shared library). This contains
+# virtual_alloc_thread_stack() where our 8MB stack minimum patch lives.
+# Without rebuilding ntdll.so, the stack size patch has no effect — the
+# user's old ntdll.so (with 1MB minimum) continues to be loaded.
 make -j$(nproc) -k \
   dlls/winewayland.drv/aarch64-windows/winewayland.drv \
   dlls/winewayland.drv/winewayland.so \
   dlls/winewayland.drv/arm64ec-windows/winewayland.drv \
   dlls/ntdll/aarch64-windows/ntdll.dll \
   dlls/ntdll/arm64ec-windows/ntdll.dll \
+  dlls/ntdll/ntdll.so \
   2>&1 | tail -300 || true
 
 echo "=== Searching for built artifacts ==="
 find /tmp/proton-wine -name "winewayland*" -type f -newer /tmp/proton-wine/configure 2>/dev/null | head -20
 find /tmp/proton-wine -name "*.drv" -type f -newer /tmp/proton-wine/configure 2>/dev/null | head -10
 find /tmp/proton-wine -name "ntdll.dll" -type f -newer /tmp/proton-wine/configure 2>/dev/null | head -10
+find /tmp/proton-wine -name "ntdll.so" -type f -newer /tmp/proton-wine/configure 2>/dev/null | head -10
 ls -la /tmp/proton-wine/dlls/winewayland.drv/ 2>/dev/null
 ls -la /tmp/proton-wine/dlls/ntdll/aarch64-windows/ 2>/dev/null
 ls -la /tmp/proton-wine/dlls/ntdll/arm64ec-windows/ 2>/dev/null
+ls -la /tmp/proton-wine/dlls/ntdll/ntdll.so 2>/dev/null
 
 echo "=== [9/9] Collect + zip ==="
 for f in \
@@ -682,6 +690,40 @@ else
   echo "WARNING: ntdll.dll not built — FEX will still crash. Check make output above."
 fi
 
+# === Collect ntdll.so (Unix-side ELF) ===
+# This is CRITICAL for the 8MB stack patch to take effect. The stack size
+# minimum lives in virtual_alloc_thread_stack() which is in the Unix ntdll.so,
+# NOT the PE ntdll.dll. Without replacing ntdll.so, the user's old 1MB-minimum
+# version continues to be loaded and FEX's DllMain still overflows the stack.
+mkdir -p "$PROTON_OUT/lib/wine/aarch64-unix"
+NTDLL_SO_SRC=""
+for f in \
+  "/tmp/proton-wine/dlls/ntdll/ntdll.so" \
+  "/tmp/proton-wine/dlls/ntdll/ntdll.dll.so"; do
+  if [ -f "$f" ] && [ "$(stat -c%s "$f")" -gt 1000 ]; then
+    echo "Found ntdll ELF: $f ($(stat -c%s "$f") bytes)"
+    NTDLL_SO_SRC="$f"
+    break
+  fi
+done
+if [ -n "$NTDLL_SO_SRC" ]; then
+  cp "$NTDLL_SO_SRC" "$PROTON_OUT/lib/wine/aarch64-unix/ntdll.so"
+  echo "Copied ntdll.so to aarch64-unix/ ($(stat -c%s "$PROTON_OUT/lib/wine/aarch64-unix/ntdll.so") bytes)"
+  # Verify the 8MB stack patch is in the binary
+  if strings "$PROTON_OUT/lib/wine/aarch64-unix/ntdll.so" | grep -q "FEX DllMain needs even more"; then
+    echo "  ✓ 8MB stack patch comment found in ntdll.so"
+  else
+    echo "  WARNING: 8MB stack patch comment not found — patch may not have applied"
+  fi
+  # Also check for the actual 8MB constant (0x800000 = 8388608)
+  if strings "$PROTON_OUT/lib/wine/aarch64-unix/ntdll.so" | grep -q "8388608"; then
+    echo "  ✓ 8MB stack constant found in ntdll.so"
+  fi
+else
+  echo "WARNING: ntdll.so not built — 8MB stack patch will NOT take effect."
+  echo "  FEX DllMain will still overflow the 1MB stack. Check make output above."
+fi
+
 # Verify the new ntdll has the FEX-required exports
 echo "=== Verifying ntdll exports ==="
 NTDLL_HYBRID="$PROTON_OUT/lib/wine/aarch64-windows/ntdll.dll"
@@ -704,10 +746,12 @@ DRV_SIZE=$(stat -c%s "$PROTON_OUT/lib/wine/aarch64-windows/winewayland.drv" 2>/d
 SO_SIZE=$(stat -c%s "$PROTON_OUT/lib/wine/aarch64-unix/winewayland.so" 2>/dev/null || echo 0)
 NTDLL_AA_SIZE=$(stat -c%s "$PROTON_OUT/lib/wine/aarch64-windows/ntdll.dll" 2>/dev/null || echo 0)
 NTDLL_EC_SIZE=$(stat -c%s "$PROTON_OUT/lib/wine/arm64ec-windows/ntdll.dll" 2>/dev/null || echo 0)
+NTDLL_SO_SIZE=$(stat -c%s "$PROTON_OUT/lib/wine/aarch64-unix/ntdll.so" 2>/dev/null || echo 0)
 echo "winewayland.drv: $DRV_SIZE bytes"
 echo "winewayland.so: $SO_SIZE bytes"
 echo "ntdll.dll (aarch64): $NTDLL_AA_SIZE bytes"
 echo "ntdll.dll (arm64ec): $NTDLL_EC_SIZE bytes"
+echo "ntdll.so (Unix ELF): $NTDLL_SO_SIZE bytes"
 
 if [ "$DRV_SIZE" -lt 1000 ]; then
   echo "FATAL: winewayland.drv missing or too small"

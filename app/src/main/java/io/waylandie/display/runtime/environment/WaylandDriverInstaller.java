@@ -56,6 +56,7 @@ public final class WaylandDriverInstaller {
         File soCheck = new File(prefix, "lib/wine/aarch64-unix/winewayland.so");
         File ntdllAarch64Check = new File(prefix, "lib/wine/aarch64-windows/ntdll.dll");
         File ntdllArm64ecCheck = new File(prefix, "lib/wine/arm64ec-windows/ntdll.dll");
+        File ntdllSoCheck = new File(prefix, "lib/wine/aarch64-unix/ntdll.so");
         if (drvCheck.exists()) {
             log("  deleting old winewayland.drv (" + drvCheck.length() + " bytes)");
             drvCheck.delete();
@@ -75,6 +76,14 @@ public final class WaylandDriverInstaller {
         if (ntdllArm64ecCheck.exists()) {
             log("  deleting old arm64ec-windows/ntdll.dll (" + ntdllArm64ecCheck.length() + " bytes)");
             ntdllArm64ecCheck.delete();
+        }
+        // Delete old ntdll.so (Unix-side ELF). This is CRITICAL for the 8MB
+        // stack patch — virtual_alloc_thread_stack() lives in ntdll.so, not
+        // ntdll.dll. Without replacing ntdll.so, the old 1MB-minimum version
+        // continues to be loaded and FEX's DllMain still overflows the stack.
+        if (ntdllSoCheck.exists()) {
+            log("  deleting old aarch64-unix/ntdll.so (" + ntdllSoCheck.length() + " bytes)");
+            ntdllSoCheck.delete();
         }
 
         // Extract
@@ -105,8 +114,13 @@ public final class WaylandDriverInstaller {
             log("  exists=" + ntdllAarch64Check.exists() + " size=" + (ntdllAarch64Check.exists() ? ntdllAarch64Check.length() : 0));
             log("  ntdll.dll (arm64ec) at: " + ntdllArm64ecCheck);
             log("  exists=" + ntdllArm64ecCheck.exists() + " size=" + (ntdllArm64ecCheck.exists() ? ntdllArm64ecCheck.length() : 0));
+            log("  ntdll.so (Unix ELF) at: " + ntdllSoCheck);
+            log("  exists=" + ntdllSoCheck.exists() + " size=" + (ntdllSoCheck.exists() ? ntdllSoCheck.length() : 0));
             if (ntdllArm64ecCheck.exists() && ntdllArm64ecCheck.length() < 100000) {
                 log("  WARNING: arm64ec ntdll.dll is suspiciously small — FEX may still crash");
+            }
+            if (!ntdllSoCheck.exists()) {
+                log("  WARNING: ntdll.so not installed — 8MB stack patch will NOT take effect");
             }
             return true;
         } catch (IOException ioe) {
