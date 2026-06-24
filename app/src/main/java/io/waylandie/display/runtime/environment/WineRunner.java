@@ -1784,30 +1784,17 @@ public final class WineRunner {
             if (!linker.exists()) {
                 linker = new File(rootDir, "lib/ld-linux-aarch64.so.1");
             }
-            // Build the library path — include ALL directories that might have glibc libs
-            String libPath = new File(rootDir, "usr/lib").getAbsolutePath() + ":"
-                    + new File(rootDir, "usr/lib/aarch64-linux-gnu").getAbsolutePath() + ":"
-                    + new File(rootDir, "usr/local/lib").getAbsolutePath() + ":"
+            // Build the library path — use the SAME path Wine uses (from the launcher)
+            // DO NOT include rootfs/usr/lib/aarch64-linux-gnu — it has glibc 2.31
+            // which is INCOMPATIBLE with the proton-armec wineserver (needs newer glibc).
+            // Wine's own LD_LIBRARY_PATH is: imagefs/usr/local/lib:proton/lib:proton/files/lib:/system/lib64
+            String libPath = new File(rootDir, "usr/local/lib").getAbsolutePath() + ":"
                     + new File(protonDir, "lib").getAbsolutePath() + ":"
-                    + new File(protonDir, "files/lib").getAbsolutePath();
-            // Create libc.so → libc.so.6 symlink if missing (wineserver links against unversioned libc.so)
-            File libcSo = new File(rootDir, "usr/lib/aarch64-linux-gnu/libc.so");
-            File libcSo6 = new File(rootDir, "usr/lib/aarch64-linux-gnu/libc.so.6");
-            if (!libcSo.exists() && libcSo6.exists()) {
-                try {
-                    java.nio.file.Files.createSymbolicLink(libcSo.toPath(), libcSo6.toPath());
-                    Log.i(TAG, "[cleanup] Created libc.so → libc.so.6 symlink");
-                } catch (Exception ignored) {}
-            }
-            // Also create libdl.so → libdl.so.2 symlink
-            File libdlSo = new File(rootDir, "usr/lib/aarch64-linux-gnu/libdl.so");
-            File libdlSo2 = new File(rootDir, "usr/lib/aarch64-linux-gnu/libdl.so.2");
-            if (!libdlSo.exists() && libdlSo2.exists()) {
-                try {
-                    java.nio.file.Files.createSymbolicLink(libdlSo.toPath(), libdlSo2.toPath());
-                    Log.i(TAG, "[cleanup] Created libdl.so → libdl.so.2 symlink");
-                } catch (Exception ignored) {}
-            }
+                    + new File(protonDir, "files/lib").getAbsolutePath() + ":"
+                    + "/system/lib64";
+            // DO NOT create libc.so symlink — the rootfs libc is glibc 2.31 which is
+            // INCOMPATIBLE with proton-armec's wineserver. The glibc linker will find
+            // the correct libc via its built-in search path (same as Wine itself).
             if (wineserverBin.exists() && linker.exists()) {
                 Log.i(TAG, "[cleanup] Killing wineserver via: " + linker.getAbsolutePath() + " --library-path " + libPath + " " + wineserverBin.getAbsolutePath() + " -k");
                 installerDiagnostics.append("[cleanup] Running wineserver -k (via glibc linker + LD_LIBRARY_PATH)\n");

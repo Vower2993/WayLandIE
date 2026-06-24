@@ -46,7 +46,7 @@ public final class GameLaunchTracer {
     // 300 seconds (5 minutes) — Wine is hanging for 180+ seconds before
     // rendering its first frame. We need a longer window to see if Wine
     // eventually recovers or if it's permanently stuck.
-    private static final long MONITOR_DURATION_MS = 300_000L;
+    private static final long MONITOR_DURATION_MS = 60_000L;
     private static final long MONITOR_INTERVAL_MS = 1_000L;
 
     private final Context context;
