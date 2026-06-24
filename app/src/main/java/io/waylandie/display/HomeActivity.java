@@ -472,16 +472,20 @@ public final class HomeActivity extends Activity {
             if (!wineserverBin.exists()) {
                 wineserverBin = new File(protonDir, "lib/wine/aarch64-unix/wineserver");
             }
-            if (wineserverBin.exists()) {
-                File rootDir = new File(getFilesDir(), "imagefs");
-                ProcessBuilder pb = new ProcessBuilder(wineserverBin.getAbsolutePath(), "-k");
+            File rootDir = new File(getFilesDir(), "imagefs");
+            File linker = new File(rootDir, "usr/lib/ld-linux-aarch64.so.1");
+            if (!linker.exists()) {
+                linker = new File(rootDir, "lib/ld-linux-aarch64.so.1");
+            }
+            if (wineserverBin.exists() && linker.exists()) {
+                ProcessBuilder pb = new ProcessBuilder(
+                        linker.getAbsolutePath(),
+                        "--library-path", new File(rootDir, "usr/lib").getAbsolutePath() + ":"
+                                + new File(rootDir, "usr/lib/aarch64-linux-gnu").getAbsolutePath() + ":"
+                                + new File(rootDir, "usr/local/lib").getAbsolutePath() + ":"
+                                + new File(protonDir, "lib").getAbsolutePath(),
+                        wineserverBin.getAbsolutePath(), "-k");
                 pb.environment().put("WINEPREFIX", new File(rootDir, "home/xuser/.wine").getAbsolutePath());
-                pb.environment().put("LD_LIBRARY_PATH",
-                        new File(rootDir, "usr/lib").getAbsolutePath() + ":"
-                        + new File(rootDir, "usr/lib/aarch64-linux-gnu").getAbsolutePath() + ":"
-                        + new File(rootDir, "usr/local/lib").getAbsolutePath() + ":"
-                        + new File(protonDir, "lib").getAbsolutePath() + ":"
-                        + "/system/lib64");
                 pb.environment().put("HOME", new File(rootDir, "home/xuser").getAbsolutePath());
                 pb.redirectErrorStream(true);
                 Process p = pb.start();

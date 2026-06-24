@@ -1770,31 +1770,34 @@ public final class WineRunner {
         // 0. Kill wineserver explicitly — it's a persistent daemon that survives
         // between Wine launches. If we don't kill it, the second launch connects
         // to the stale wineserver, which has old state → desktop doesn't render.
-        // We use 'wineserver -k' (kill) via the proton bin, then fall back to
-        // process name matching.
+        // wineserver is glibc-linked and can't run directly under bionic.
+        // We run it via the glibc linker (ld-linux-aarch64.so.1).
         try {
             File protonDir = new File(context.getFilesDir(), "contents/proton/active");
             File wineserverBin = new File(protonDir, "bin/wineserver");
             if (!wineserverBin.exists()) {
                 wineserverBin = new File(protonDir, "lib/wine/aarch64-unix/wineserver");
             }
-            if (wineserverBin.exists()) {
-                Log.i(TAG, "[cleanup] Killing wineserver via: " + wineserverBin.getAbsolutePath() + " -k");
-                installerDiagnostics.append("[cleanup] Running wineserver -k\n");
-                ProcessBuilder pbKill = new ProcessBuilder(wineserverBin.getAbsolutePath(), "-k");
-                // wineserver needs the same env as wine — WINEPREFIX, LD_LIBRARY_PATH, etc.
+            // Find the glibc linker
+            File linker = new File(rootDir, "usr/lib/ld-linux-aarch64.so.1");
+            if (!linker.exists()) {
+                linker = new File(rootDir, "lib/ld-linux-aarch64.so.1");
+            }
+            if (wineserverBin.exists() && linker.exists()) {
+                Log.i(TAG, "[cleanup] Killing wineserver via: " + linker.getAbsolutePath() + " " + wineserverBin.getAbsolutePath() + " -k");
+                installerDiagnostics.append("[cleanup] Running wineserver -k (via glibc linker)\n");
+                ProcessBuilder pbKill = new ProcessBuilder(
+                        linker.getAbsolutePath(),
+                        "--library-path", new File(rootDir, "usr/lib").getAbsolutePath() + ":"
+                                + new File(rootDir, "usr/lib/aarch64-linux-gnu").getAbsolutePath() + ":"
+                                + new File(rootDir, "usr/local/lib").getAbsolutePath() + ":"
+                                + new File(protonDir, "lib").getAbsolutePath(),
+                        wineserverBin.getAbsolutePath(), "-k");
                 Map<String, String> killEnv = pbKill.environment();
                 killEnv.put("WINEPREFIX", new File(rootDir, "home/xuser/.wine").getAbsolutePath());
-                killEnv.put("LD_LIBRARY_PATH",
-                        new File(rootDir, "usr/lib").getAbsolutePath() + ":"
-                        + new File(rootDir, "usr/lib/aarch64-linux-gnu").getAbsolutePath() + ":"
-                        + new File(rootDir, "usr/local/lib").getAbsolutePath() + ":"
-                        + new File(protonDir, "lib").getAbsolutePath() + ":"
-                        + "/system/lib64");
                 killEnv.put("HOME", new File(rootDir, "home/xuser").getAbsolutePath());
                 pbKill.redirectErrorStream(true);
                 Process killProc = pbKill.start();
-                // Read output to prevent pipe deadlock
                 try (java.io.BufferedReader r = new java.io.BufferedReader(
                         new java.io.InputStreamReader(killProc.getInputStream()))) {
                     String line;
@@ -1808,7 +1811,7 @@ public final class WineRunner {
                 Log.i(TAG, "[cleanup] wineserver -k exit code: " + exitCode);
                 installerDiagnostics.append("[cleanup] wineserver -k exit code: ").append(exitCode).append('\n');
             } else {
-                installerDiagnostics.append("[cleanup] wineserver binary not found at ").append(wineserverBin.getAbsolutePath()).append('\n');
+                installerDiagnostics.append("[cleanup] wineserver or linker not found\n");
             }
         } catch (Exception e) {
             Log.w(TAG, "[cleanup] wineserver -k failed: " + e.getMessage());

@@ -190,28 +190,46 @@ public final class WaylandDriverInstaller {
      */
     private static void patchExeStackReserve(File prefix) {
         final long TARGET_STACK_RESERVE = 0x800000L; // 8MB
-        File[] archDirs = {
-            new File(prefix, "lib/wine/aarch64-windows"),
-            new File(prefix, "lib/wine/arm64ec-windows"),
-            new File(prefix, "lib/wine/x86_64-windows"),
-            new File(prefix, "lib/wine/i386-windows"),
-        };
+        // Collect ALL proton directories that might contain exes.
+        // Wine may load exes from proton/active/ OR proton/proton-armec/
+        // (they can be different directories). Scan both + any proton-*/ dirs.
+        java.util.List<File> protonDirs = new java.util.ArrayList<>();
+        protonDirs.add(prefix);
+        File protonParent = prefix.getParentFile(); // contents/proton/
+        if (protonParent != null && protonParent.isDirectory()) {
+            File[] siblings = protonParent.listFiles();
+            if (siblings != null) {
+                for (File s : siblings) {
+                    if (s.isDirectory() && !s.equals(prefix)) {
+                        protonDirs.add(s);
+                    }
+                }
+            }
+        }
         int patched = 0;
         int skipped = 0;
-        for (File archDir : archDirs) {
-            if (!archDir.isDirectory()) continue;
-            File[] exes = archDir.listFiles((d, name) -> name.endsWith(".exe"));
-            if (exes == null) continue;
-            for (File exe : exes) {
-                try {
-                    if (patchOneExe(exe, TARGET_STACK_RESERVE)) {
-                        patched++;
-                    } else {
+        for (File protonDir : protonDirs) {
+            File[] archDirs = {
+                new File(protonDir, "lib/wine/aarch64-windows"),
+                new File(protonDir, "lib/wine/arm64ec-windows"),
+                new File(protonDir, "lib/wine/x86_64-windows"),
+                new File(protonDir, "lib/wine/i386-windows"),
+            };
+            for (File archDir : archDirs) {
+                if (!archDir.isDirectory()) continue;
+                File[] exes = archDir.listFiles((d, name) -> name.endsWith(".exe"));
+                if (exes == null) continue;
+                for (File exe : exes) {
+                    try {
+                        if (patchOneExe(exe, TARGET_STACK_RESERVE)) {
+                            patched++;
+                        } else {
+                            skipped++;
+                        }
+                    } catch (Exception e) {
+                        log("  PATCH FAIL: " + exe.getName() + " — " + e.getMessage());
                         skipped++;
                     }
-                } catch (Exception e) {
-                    log("  PATCH FAIL: " + exe.getName() + " — " + e.getMessage());
-                    skipped++;
                 }
             }
         }
