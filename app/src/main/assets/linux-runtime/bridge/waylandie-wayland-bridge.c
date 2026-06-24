@@ -214,6 +214,7 @@ struct server_state {
     struct wl_list pointer_resources;
     struct wl_list touch_resources;
     struct wl_resource *focused_surface;
+    struct wl_client *focused_client; /* survives surface destruction */
     Display *xtest_display;
     Window xtest_window;
     Atom xtest_utf8_atom;
@@ -3008,6 +3009,7 @@ static void send_surface_focus(
     }
     struct wl_resource *old_focus = state->focused_surface;
     state->focused_surface = surface_resource;
+    state->focused_client = wl_resource_get_client(surface_resource);
     int pointers_total = input_resource_count(&state->pointer_resources);
     int keyboards_total = input_resource_count(&state->keyboard_resources);
     int touches_total = input_resource_count(&state->touch_resources);
@@ -3581,8 +3583,8 @@ static void maybe_send_pointer_frame(struct wl_resource *resource) {
 }
 
 static void emit_pointer_enter_if_needed(struct server_state *state, struct wl_resource *pointer_resource) {
-    if (state->focused_surface == NULL || !resource_same_client(pointer_resource, state->focused_surface)) {
-        printf("wayland-shm-ahb pointer-enter skip focused=%p ptr=%p same-client=0 pointers=%d\n",
+    if (state->focused_client == NULL || wl_resource_get_client(pointer_resource) != state->focused_client) {
+        printf("wayland-shm-ahb pointer-enter skip focused=%p client=%p ptr=%p same-client=0 pointers=%d\n",
                 (void *)state->focused_surface,
                 (void *)pointer_resource,
                 input_resource_count(&state->pointer_resources));
@@ -3609,8 +3611,8 @@ static void emit_pointer_enter_if_needed(struct server_state *state, struct wl_r
 
 static void emit_pointer_motion(struct server_state *state, double x, double y, uint32_t time_ms) {
     int total_pointers = input_resource_count(&state->pointer_resources);
-    if (state->focused_surface == NULL) {
-        printf("wayland-shm-ahb pointer-motion drop=no-focus x=%.1f y=%.1f pointers=%d\n",
+    if (state->focused_client == NULL) {
+        printf("wayland-shm-ahb pointer-motion drop=no-focus-client x=%.1f y=%.1f pointers=%d\n",
                 x, y, total_pointers);
         fflush(stdout);
         return;
@@ -3643,8 +3645,8 @@ static void emit_pointer_motion(struct server_state *state, double x, double y, 
 
 static void emit_pointer_button(struct server_state *state, const char *button_state, uint32_t time_ms) {
     int total_pointers = input_resource_count(&state->pointer_resources);
-    if (state->focused_surface == NULL) {
-        printf("wayland-shm-ahb pointer-button drop=no-focus state=%s pointers=%d time=%u\n",
+    if (state->focused_client == NULL) {
+        printf("wayland-shm-ahb pointer-button drop=no-focus-client state=%s pointers=%d time=%u\n",
                 button_state, total_pointers, time_ms);
         fflush(stdout);
         return;
@@ -3657,7 +3659,7 @@ static void emit_pointer_button(struct server_state *state, const char *button_s
     int skipped = 0;
     struct input_resource_state *pointer;
     wl_list_for_each(pointer, &state->pointer_resources, link) {
-        if (!resource_same_client(pointer->resource, state->focused_surface)) {
+        if (wl_resource_get_client(pointer->resource) != state->focused_client) {
             skipped++;
             continue;
         }
@@ -3803,10 +3805,10 @@ static void handle_input_line(struct server_state *state, const char *line) {
     int pointers_total = input_resource_count(&state->pointer_resources);
     int keyboards_total = input_resource_count(&state->keyboard_resources);
     int touches_total = input_resource_count(&state->touch_resources);
-    printf("wayland-shm-ahb input-line kind=%s action=%s pre_map=(%.1f,%.1f) post_map=(%.1f,%.1f) iw=%.0f ih=%.0f focused=%p pointers=%d keyboards=%d touches=%d time=%d\n",
+    printf("wayland-shm-ahb input-line kind=%s action=%s pre_map=(%.1f,%.1f) post_map=(%.1f,%.1f) iw=%.0f ih=%.0f focused=%p client=%p pointers=%d keyboards=%d touches=%d time=%d\n",
             kind, action, pre_map_x, pre_map_y, x, y,
             input_width, input_height,
-            (void *)state->focused_surface,
+            (void *)state->focused_surface, (void *)state->focused_client,
             pointers_total, keyboards_total, touches_total, event_time);
     fflush(stdout);
     input_debug_log(
@@ -3827,8 +3829,8 @@ static void handle_input_line(struct server_state *state, const char *line) {
                 && input_token_string(line, "state", button_state, sizeof(button_state))) {
             // Log EVERY input-button event (no cap) — this is the entry point
             // for tap-to-click and is critical for diagnosing click failures.
-            printf("wayland-shm-ahb input-button state=%s x=%.1f y=%.1f focused=%p pointers=%d time=%d\n",
-                   button_state, x, y, (void*)state->focused_surface,
+            printf("wayland-shm-ahb input-button state=%s x=%.1f y=%.1f focused=%p client=%p pointers=%d time=%d\n",
+                   button_state, x, y, (void*)state->focused_surface, (void*)state->focused_client,
                    pointers_total, event_time);
             fflush(stdout);
             emit_pointer_motion(state, x, y, (uint32_t)event_time);
@@ -4165,9 +4167,19 @@ static void destroy_surface_resource(struct wl_resource *resource) {
             child->is_subsurface = 0;
         }
         if (surface->server != NULL && surface->server->focused_surface == surface->resource) {
+            /* Don't clear focused_client — it survives surface destruction.
+             * Input events use focused_client for the same-client check,
+             * so they'll still be delivered to pointers from the same Wine
+             * process even after the focused surface is destroyed.
+             * When a new surface from the same client commits a buffer,
+             * send_surface_focus will update focused_surface. */
             surface->server->focused_surface = NULL;
             surface->server->focused_surface_width = 0;
             surface->server->focused_surface_height = 0;
+            /* focused_client is KEPT — this is the key fix for cursor */
+            printf("wayland-shm-ahb focus-surface-destroyed surface=%p client=%p (focus preserved)\n",
+                   (void *)surface->resource, (void *)surface->server->focused_client);
+            fflush(stdout);
         }
         close_android_window_for_surface(surface);
         send_surface_presentation_feedback(surface, 0);
