@@ -4109,14 +4109,30 @@ static void bind_seat(struct wl_client *client, void *data, uint32_t version, ui
         return;
     }
     wl_resource_set_implementation(resource, &seat_impl, data, NULL);
-    wl_seat_send_capabilities(
-            resource,
-            WL_SEAT_CAPABILITY_POINTER | WL_SEAT_CAPABILITY_KEYBOARD | WL_SEAT_CAPABILITY_TOUCH);
+    uint32_t caps = WL_SEAT_CAPABILITY_POINTER | WL_SEAT_CAPABILITY_KEYBOARD | WL_SEAT_CAPABILITY_TOUCH;
+    wl_seat_send_capabilities(resource, caps);
+    printf("wayland-shm-ahb bind-seat client=%p version=%u bind_version=%u id=%u caps=%u (ptr=%d kb=%d touch=%d)\n",
+           (void *)client, version, bind_version, id, caps,
+           !!(caps & WL_SEAT_CAPABILITY_POINTER),
+           !!(caps & WL_SEAT_CAPABILITY_KEYBOARD),
+           !!(caps & WL_SEAT_CAPABILITY_TOUCH));
+    fflush(stdout);
+    /* Only send name if the CLIENT bound with version >= 7.
+     * Wine's winewayland.drv caps at version 5 (see wayland.c:
+     *   wl_registry_bind(..., version < 5 ? version : 5)
+     * Sending wl_seat.name (opcode 2, added in v7) to a v5 client
+     * causes the client to misparse the event stream — the name event
+     * gets interpreted as a different opcode, and subsequent events
+     * (including capabilities re-sends) are missed. This prevents
+     * Wine from calling wl_seat_get_pointer, which is why pointer
+     * events never reach Wine (the cursor/arrow cursor bug). */
     if (bind_version >= 7) {
-        /* wl_seat_send_name was added in v7 (wayland 1.20) — NOT v4.
-         * Calling it on v4-v6 resources sends an event the client doesn't
-         * expect, causing strict clients to disconnect. */
         wl_seat_send_name(resource, "waylandie-android-seat");
+        printf("wayland-shm-ahb bind-seat name-sent (v>=7)\n");
+        fflush(stdout);
+    } else {
+        printf("wayland-shm-ahb bind-seat name-skipped (v=%u < 7)\n", bind_version);
+        fflush(stdout);
     }
 }
 

@@ -1738,6 +1738,35 @@ public final class WineRunner {
         Log.i(TAG, "=== Stale process cleanup ===");
         installerDiagnostics.append("[cleanup] Stale process cleanup starting\n");
 
+        // 0. Kill wineserver explicitly — it's a persistent daemon that survives
+        // between Wine launches. If we don't kill it, the second launch connects
+        // to the stale wineserver, which has old state → desktop doesn't render.
+        // We use 'wineserver -k' (kill) via the proton bin, then fall back to
+        // process name matching.
+        try {
+            File protonDir = new File(context.getFilesDir(), "contents/proton/active");
+            File wineserverBin = new File(protonDir, "bin/wineserver");
+            if (!wineserverBin.exists()) {
+                wineserverBin = new File(protonDir, "lib/wine/aarch64-unix/wineserver");
+            }
+            if (wineserverBin.exists()) {
+                Log.i(TAG, "[cleanup] Killing wineserver via: " + wineserverBin.getAbsolutePath() + " -k");
+                installerDiagnostics.append("[cleanup] Running wineserver -k\n");
+                ProcessBuilder pbKill = new ProcessBuilder(wineserverBin.getAbsolutePath(), "-k");
+                pbKill.environment().put("WINEPREFIX",
+                        new File(rootDir, "home/xuser/.wine").getAbsolutePath());
+                pbKill.redirectErrorStream(true);
+                Process killProc = pbKill.start();
+                try { killProc.waitFor(3, java.util.concurrent.TimeUnit.SECONDS); }
+                catch (Exception ignored) {}
+                Log.i(TAG, "[cleanup] wineserver -k exit code: " + killProc.exitValue());
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "[cleanup] wineserver -k failed: " + e.getMessage());
+            installerDiagnostics.append("[cleanup] wineserver -k failed: ")
+                .append(e.getMessage()).append('\n');
+        }
+
         // 1. Kill previous Wine process (tracked in HomeActivity)
         // We can't directly access HomeActivity's runningWineProcess here,
         // but we can kill any process running "wine" or "waylandie-wayland-bridge"
