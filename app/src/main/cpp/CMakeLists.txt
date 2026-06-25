@@ -180,50 +180,5 @@ add_library(fakeinput SHARED
 target_compile_options(fakeinput PRIVATE -Wall -Wextra -fvisibility=hidden)
 target_link_libraries(fakeinput log dl)
 
-# === WaylandIE Bridge (DISABLED — needs wayland headers + bionic-libs) ===
+# WaylandIE Bridge target disabled — needs wayland headers + bionic-libs
 # Will be re-enabled once bionic-libs build is integrated into CI.
-
-
-add_library(waylandie_bridge SHARED
-    waylandie-wayland-bridge.c
-    waylandie_display_native.c
-    surface_control_cpp_shim.cpp
-    crash_handler.c
-    generated/xdg-shell-protocol.c
-    generated/linux-dmabuf-unstable-v1-protocol.c
-    generated/presentation-time-protocol.c
-    generated/viewporter-protocol.c
-    generated/relative-pointer-unstable-v1-protocol.c
-    generated/pointer-constraints-unstable-v1-protocol.c
-)
-
-target_include_directories(waylandie_bridge PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}
-    ${CMAKE_CURRENT_SOURCE_DIR}/generated
-)
-
-target_compile_definitions(waylandie_bridge PRIVATE
-    WAYLANDIE_NO_XTEST
-    _WAYLAND_SERVER_NOPLUGINS
-    _GNU_SOURCE
-)
-
-target_compile_options(waylandie_bridge PRIVATE
-    -fPIC -O2 -Wno-unused-function -Wno-implicit-function-declaration
-)
-
-# Link against bionic libs (Android NDK)
-find_library(log-lib log)
-find_library(android-lib android)
-target_link_libraries(waylandie_bridge
-    ${log-lib}
-    ${android-lib}
-    EGL
-    GLESv3
-    vulkan
-    android-hardware-buffer
-    ahardware_buffer
-    -Wl,--whole-archive
-    # bionic-libs (built by CI if not present)
-    -Wl,--no-whole-archive
-)
