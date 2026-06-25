@@ -481,7 +481,7 @@ public class Container {
                     setCPUListWoW64(data.getString(key));
                     break;
                 case "displayMode" :
-                    this.displayMode = value.toString(); break;
+                    this.displayMode = data.getString(key); break;
                 case "graphicsDriver" :
                     setGraphicsDriver(data.getString(key));
                     break;
