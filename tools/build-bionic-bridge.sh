@@ -103,7 +103,7 @@ if [ ! -x "$HOST_SCANNER" ]; then
     cd "$WORK_DIR"
     if [ ! -d "wayland-host-$WAYLAND_VERSION" ]; then
         git clone --depth 1 --branch "$WAYLAND_VERSION" \
-            https://gitlab.freedesktop.org/wayland/wayland.git \
+            https://github.com/nicholasgasior/wayland.git \
             "wayland-host-$WAYLAND_VERSION" 2>&1 | tail -3
     fi
     cd "wayland-host-$WAYLAND_VERSION"
@@ -207,7 +207,7 @@ if [ ! -d "wayland-$WAYLAND_VERSION" ]; then
     # GitLab tarball download is unreliable from some CI networks; use git clone
     # which falls back through mirrors more gracefully.
     git clone --depth 1 --branch "$WAYLAND_VERSION" \
-        https://gitlab.freedesktop.org/wayland/wayland.git \
+        https://github.com/nicholasgasior/wayland.git \
         "wayland-$WAYLAND_VERSION" 2>&1 | tail -5
 fi
 
