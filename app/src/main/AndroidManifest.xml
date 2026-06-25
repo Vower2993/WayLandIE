@@ -1,0 +1,231 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- Declare features that might be needed -->
+    <uses-feature
+        android:glEsVersion="0x00020000"
+        android:required="true" />
+    <!-- USB host for GameSir GCM vendor rumble (e.g. G8+); optional so non-OTG devices still install -->
+    <uses-feature
+        android:name="android.hardware.usb.host"
+        android:required="false" />
+    <!-- Permissions -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Bluetooth LE for GameSir GCM rumble (e.g. X5s) -->
+    <uses-permission android:name="android.permission.BLUETOOTH" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-permission
+        android:name="android.permission.BLUETOOTH_SCAN"
+        android:usesPermissionFlags="neverForLocation" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE"/>
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE"/>
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" tools:ignore="ScopedStorage" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/>
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS"/>
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" tools:ignore="ScopedStorage" />
+    <uses-permission android:name="com.android.launcher.permission.INSTALL_SHORTCUT" />
+    <uses-permission android:name="android.permission.HIGH_SAMPLING_RATE_SENSORS" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission
+        android:name="android.permission.WRITE_SECURE_SETTINGS"
+        tools:ignore="ProtectedPermissions" />
+
+    <application
+        android:name="com.winlator.cmod.app.PluviaApp"
+        android:label="@string/common_ui_app_name"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:theme="@style/AppTheme"
+        android:enableOnBackInvokedCallback="true"
+        android:appCategory="game"
+        android:isGame="true"
+        android:allowBackup="false"
+        android:allowAudioPlaybackCapture="true"
+        android:hardwareAccelerated="true"
+        android:localeConfig="@xml/locales_config"
+        android:supportsRtl="true"
+        tools:ignore="DataExtractionRules,GoogleAppIndexingWarning">
+
+        <!-- Setup Wizard (first launch entry point) -->
+        <activity
+            android:name="com.winlator.cmod.feature.setup.SetupWizardActivity"
+            android:theme="@style/AppThemeFullscreenDarkNoAnimation"
+            android:screenOrientation="sensorLandscape"
+            android:exported="false"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|screenLayout|smallestScreenSize|density|navigation" />
+
+        <!-- Unified Activity -->
+        <activity
+            android:name="com.winlator.cmod.app.shell.UnifiedActivity"
+            android:theme="@style/AppThemeUnifiedDarkNoAnimation"
+            android:screenOrientation="sensorLandscape"
+            android:exported="true"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|screenLayout|smallestScreenSize|density|navigation">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name="com.winlator.cmod.feature.stores.steam.SteamLoginActivity"
+            android:theme="@style/AppThemeFullscreen.Dark"
+            android:screenOrientation="sensorLandscape"
+            android:exported="false"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|screenLayout|smallestScreenSize|density|navigation" />
+
+        <activity
+            android:name="com.winlator.cmod.feature.stores.epic.ui.auth.EpicOAuthActivity"
+            android:theme="@style/AppTheme.Dark"
+            android:screenOrientation="sensor"
+            android:exported="false" />
+
+        <activity
+            android:name="com.winlator.cmod.feature.stores.gog.ui.auth.GOGOAuthActivity"
+            android:theme="@style/AppTheme.Dark"
+            android:screenOrientation="sensor"
+            android:exported="false" />
+
+        <activity
+            android:name="com.winlator.cmod.runtime.display.XServerDisplayActivity"
+            android:theme="@style/AppThemeFullscreen"
+            android:launchMode="singleTask"
+            android:supportsPictureInPicture="true"
+            android:screenOrientation="sensorLandscape"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|screenLayout|smallestScreenSize|density|navigation"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="file" />
+                <data android:scheme="content" />
+                <data android:mimeType="application/x-desktop" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="file" />
+                <data android:scheme="content" />
+                <data android:host="*" />
+                <data android:pathPattern=".*\\.desktop" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name="com.winlator.cmod.runtime.input.ControlsEditorActivity"
+            android:theme="@style/AppThemeFullscreen.Dark"
+            android:screenOrientation="sensorLandscape"
+            android:exported="false" />
+
+        <receiver
+            android:name="com.winlator.cmod.feature.shortcuts.ShortcutBroadcastReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="${applicationId}.SHORTCUT_ADDED" />
+                <action android:name="${applicationId}.PIN_SHORTCUT_RESULT" />
+            </intent-filter>
+        </receiver>
+
+        <service
+            android:name="com.winlator.cmod.feature.stores.steam.service.SteamService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
+        <service
+            android:name="com.winlator.cmod.feature.stores.epic.service.EpicService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
+        <service
+            android:name="com.winlator.cmod.feature.stores.gog.service.GOGService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
+        <!-- Need for keep the container alive when the process is paused,
+             also required to prevent the system from killing a component download/install
+             is in flight. -->
+        <service
+            android:name="com.winlator.cmod.runtime.system.SessionKeepAliveService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="specialUse|dataSync"
+            android:stopWithTask="false">
+
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Required to prevent the container from closing even when the process is paused."/>
+        </service>
+
+        <!-- AppCompat per-app language backport storage (pre-Android 13) -->
+        <service
+            android:name="androidx.appcompat.app.AppLocalesMetadataHolderService"
+            android:enabled="false"
+            android:exported="false">
+            <meta-data
+                android:name="autoStoreLocales"
+                android:value="true" />
+        </service>
+
+        <!-- FileProvider for sharing files -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.tileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
+        <!-- Provider for Winlator’s DocumentProvider or similar usage -->
+        <provider
+            android:name="com.winlator.cmod.app.provider.WinlatorFilesProvider"
+            android:authorities="${applicationId}.provider.WinlatorFilesProvider"
+            android:exported="true"
+            android:grantUriPermissions="true"
+            android:permission="android.permission.MANAGE_DOCUMENTS">
+            <intent-filter>
+                <action android:name="android.content.action.DOCUMENTS_PROVIDER" />
+            </intent-filter>
+        </provider>
+
+        <meta-data
+            android:name="com.samsung.android.multidisplay.keep_process_alive"
+            android:value="false"/>
+        <meta-data
+            android:name="android.allow_multiple_resumed_activities"
+            android:value="true" />
+
+        <meta-data
+            android:name="com.google.android.gms.games.APP_ID"
+            android:value="@string/play_games_app_id" />
+        <meta-data
+            android:name="com.google.android.gms.games.should_auto_sign_in"
+            android:value="false" />
+
+        <provider
+            android:name="com.google.android.gms.games.provider.PlayGamesInitProvider"
+            tools:node="remove" />
+
+        <receiver
+            android:name="com.winlator.cmod.feature.stores.steam.service.HybridModeReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.winnative.cmod.action.HYBRID_MODE" />
+            </intent-filter>
+        </receiver>
+
+    </application>
+</manifest>

@@ -1,0 +1,22 @@
+diff --git a/dlls/ntdll/ntdll.spec b/dlls/ntdll/ntdll.spec
+index 32b1d5e..3673f2d 100644
+--- a/dlls/ntdll/ntdll.spec
++++ b/dlls/ntdll/ntdll.spec
+@@ -469,7 +469,7 @@
+ @ stub PfxInitialize
+ @ stub PfxInsertPrefix
+ @ stub PfxRemovePrefix
+-@ stdcall -arch=arm64ec ProcessPendingCrossProcessEmulatorWork()
++@ stdcall -arch=win64 ProcessPendingCrossProcessEmulatorWork()
+ # @ stub PropertyLengthAsVariant
+ @ stub RtlAbortRXact
+ @ stdcall RtlAbsoluteToSelfRelativeSD(ptr ptr ptr)
+@@ -858,7 +858,7 @@
+ @ stdcall RtlIsCurrentProcess(long)
+ @ stdcall RtlIsCurrentThread(long)
+ @ stdcall RtlIsDosDeviceName_U(wstr)
+-@ stdcall -arch=x86_64 -norelay RtlIsEcCode(ptr)
++@ stdcall -arch=win64 -norelay RtlIsEcCode(ptr)
+ @ stdcall RtlIsGenericTableEmpty(ptr)
+ # @ stub RtlIsGenericTableEmptyAvl
+ @ stdcall RtlIsNameLegalDOS8Dot3(ptr ptr ptr)

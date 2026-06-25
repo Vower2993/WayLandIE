@@ -1,0 +1,326 @@
+plugins {
+    alias(libs.plugins.androidApplication)
+    alias(libs.plugins.kotlinAndroid)
+    alias(libs.plugins.kotlinCompose)
+    alias(libs.plugins.ksp)
+    alias(libs.plugins.hiltAndroid)
+    alias(libs.plugins.kotlinSerialization)
+    alias(libs.plugins.spotless)
+}
+
+/*
+abstract class InstallVulkanValidationLayerTask extends DefaultTask {
+    @Input
+    abstract Property<String> getLayerVersion()
+
+    @OutputFile
+    abstract RegularFileProperty getOutputFile()
+
+    @TaskAction
+    void install() {
+        def version = layerVersion.get()
+        def zipFile = new File(temporaryDir, "android-binaries-${version}.zip")
+        if (!zipFile.exists()) {
+            temporaryDir.mkdirs()
+            def url = new URL("https://github.com/KhronosGroup/Vulkan-ValidationLayers/releases/download/vulkan-sdk-${version}/android-binaries-${version}.zip")
+            url.withInputStream { input ->
+                zipFile.withOutputStream { output -> output << input }
+            }
+        }
+
+        def targetFile = outputFile.get().asFile
+        targetFile.parentFile.mkdirs()
+        new java.util.zip.ZipFile(zipFile).withCloseable { zip ->
+            def entry = zip.entries().find {
+                it.name.endsWith("/arm64-v8a/libVkLayer_khronos_validation.so")
+            }
+            if (entry == null) {
+                throw new GradleException("arm64-v8a Vulkan validation layer not found in ${zipFile.name}")
+            }
+            zip.getInputStream(entry).withCloseable { input ->
+                targetFile.withOutputStream { output -> output << input }
+            }
+        }
+    }
+}
+*/
+
+task checkSubmodules {
+    // Keep the execution closure configuration-cache friendly.
+    def submodulePath = file("src/main/cpp/adrenotools").absolutePath
+
+    doFirst {
+        def adrenotoolsDir = new File(submodulePath)
+        if (adrenotoolsDir.exists() && adrenotoolsDir.isDirectory() && (adrenotoolsDir.list()?.length ?: 0) == 0) {
+            throw new GradleException("Native submodules are missing! Please run 'git submodule update --init --recursive' in your terminal before building.")
+        }
+    }
+}
+
+preBuild.dependsOn(checkSubmodules)
+
+/*
+def installVulkanValidationLayer = tasks.register("installVulkanValidationLayer", InstallVulkanValidationLayerTask) {
+    layerVersion.set("1.4.341.0")
+    outputFile.set(layout.projectDirectory.file("src/debug/jniLibs/arm64-v8a/libVkLayer_khronos_validation.so"))
+}
+*/
+
+ksp {
+    arg("room.schemaLocation", "$projectDir/schemas")
+}
+
+def appVersionName = providers.gradleProperty("VERSION_NAME")
+        .orElse(providers.environmentVariable("VERSION_NAME"))
+        .getOrElse("Nightly")
+
+def coldClientVersionFile = rootProject.file("tools/gbe_fork.version")
+def coldClientVersion = coldClientVersionFile.exists() ? coldClientVersionFile.text.trim() : "unknown"
+
+android {
+    namespace 'com.winlator.cmod'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId "com.winnative.cmod"
+        minSdk 26
+        targetSdk 28
+        versionCode 1
+        versionName appVersionName
+
+        externalNativeBuild {
+            cmake {
+                cppFlags ''
+                arguments "-DCMAKE_SHARED_LINKER_FLAGS=-Wl,-z,max-page-size=16384",
+                          "-DCMAKE_EXE_LINKER_FLAGS=-Wl,-z,max-page-size=16384",
+                          "-DANDROID_STL=c++_shared"
+            }
+        }
+
+        ndk {
+            abiFilters 'arm64-v8a'
+        }
+
+        resConfigs "en", "da", "de", "es", "fr", "hi", "it", "ko", "pl", "pt-rBR", "ro", "ru", "uk", "zh-rCN", "zh-rTW"
+
+        buildConfigField("String", "COLD_CLIENT_VERSION", "\"${coldClientVersion}\"")
+    }
+
+    androidResources {
+        noCompress += ['tzst', 'txz']
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    kotlinOptions {
+        jvmTarget = '17'
+    }
+
+    signingConfigs {
+        release {
+            def props = new Properties()
+            def propsFile = rootProject.file('signing.properties')
+            if (propsFile.exists()) {
+                props.load(new FileInputStream(propsFile))
+            }
+
+            def ksFile = System.getenv("KEYSTORE_FILE") ?: props.getProperty("storeFile", "")
+            if (ksFile != null && !ksFile.isEmpty()) {
+                storeFile rootProject.file(ksFile)
+            }
+            storePassword System.getenv("KEYSTORE_PASSWORD") ?: props.getProperty("storePassword", "")
+            keyAlias System.getenv("KEY_ALIAS") ?: props.getProperty("keyAlias", "")
+            keyPassword System.getenv("KEY_PASSWORD") ?: props.getProperty("keyPassword", "")
+        }
+    }
+
+    buildTypes {
+        debug {
+            minifyEnabled false
+            proguardFiles 'proguard-rules.pro'
+            // Prefer release signing when configured.
+            signingConfig signingConfigs.release.storeFile != null ? signingConfigs.release : signingConfigs.debug
+        }
+        release {
+            minifyEnabled true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'),
+                          'proguard-rules.pro'
+            signingConfig signingConfigs.release
+        }
+    }
+
+    flavorDimensions "branding"
+
+    productFlavors {
+        standard {
+            dimension "branding"
+            applicationId "com.winnative.cmod"
+        }
+        ludashi {
+            dimension "branding"
+            applicationId "com.ludashi.benchmark"
+        }
+        pubg {
+            dimension "branding"
+            applicationId "com.tencent.ig"
+        }
+    }
+
+    ndkVersion '27.3.13750724'
+
+    externalNativeBuild {
+        cmake {
+            path 'src/main/cpp/CMakeLists.txt'
+        }
+    }
+
+    packagingOptions {
+        resources {
+            excludes += "/DebugProbesKt.bin"
+            excludes += "META-INF/versions/9/OSGI-INF/MANIFEST.MF"
+        }
+        jniLibs {
+            useLegacyPackaging = true
+            excludes += [
+                    "lib/arm64-v8a/libltdl.so",
+                    "lib/arm64-v8a/libpulseaudio.so",
+                    "lib/arm64-v8a/libpulse.so",
+                    "lib/arm64-v8a/libpulsecommon-13.0.so",
+                    "lib/arm64-v8a/libpulsecore-13.0.so",
+                    "lib/arm64-v8a/libsndfile.so"
+            ]
+        }
+    }
+
+    buildFeatures {
+        compose true
+        viewBinding true
+        buildConfig true
+        prefab true   // native Steam/runtime components link OpenSSL + curl via NDK Prefab AARs
+    }
+
+    sourceSets {
+        main {
+            java.srcDirs = [
+                    'src/main/app',
+                    'src/main/feature',
+                    'src/main/sharedmemory',
+                    'src/main/runtime',
+                    'src/main/shared'
+            ]
+        }
+    }
+
+    applicationVariants.configureEach { variant ->
+        if (variant.buildType.name == "debug") {
+/*
+            tasks.named("pre${variant.name.capitalize()}Build").configure {
+                dependsOn installVulkanValidationLayer
+            }
+*/
+            variant.outputs.configureEach { output ->
+                output.outputFileName = "${variant.flavorName}.apk"
+            }
+        }
+    }
+}
+
+dependencies {
+    // debugImplementation "com.squareup.leakcanary:leakcanary-android:2.14"
+
+    implementation libs.okhttp
+    implementation libs.okhttpDnsOverHttps
+    implementation libs.serializationJson
+    implementation 'org.yaml:snakeyaml:2.2'
+
+    implementation libs.jwtDecode
+    implementation libs.securityCrypto
+
+    implementation libs.hiltAndroid
+    ksp libs.hiltCompiler
+
+    implementation libs.roomKtx
+    implementation libs.roomRuntime
+    ksp libs.roomCompiler
+
+    implementation platform(libs.composeBom)
+    implementation libs.composeUi
+    implementation libs.composeUiGraphics
+    implementation libs.composeUiToolingPreview
+    implementation libs.composeMaterial3
+    implementation libs.composeMaterialIconsExtended
+    implementation libs.activityCompose
+    implementation libs.navigationCompose
+    implementation libs.lifecycleViewmodelCompose
+    implementation libs.composeUiTextGoogleFonts
+    implementation libs.coilCompose
+
+    implementation libs.coroutinesAndroid
+    implementation libs.timber
+    implementation libs.zxingCore
+    implementation libs.commonsIo
+    implementation libs.commonsLang3
+    implementation("com.github.luben:zstd-jni:${libs.versions.zstdJni.get()}@aar")
+    implementation libs.flexbox
+
+    implementation libs.appcompat
+    implementation libs.preference
+    implementation libs.material
+    implementation libs.xz
+    implementation libs.commonsCompress
+    implementation libs.activityKtx
+    implementation libs.fragmentKtx
+    implementation libs.fragmentCompose
+    implementation files('libs/MidiSynth/MidiSynth.jar')
+    implementation libs.recyclerview
+    implementation libs.coreKtx
+
+
+    implementation 'com.android.ndk.thirdparty:openssl:1.1.1q-beta-1'
+    implementation 'com.android.ndk.thirdparty:curl:7.85.0-beta-1'
+
+    implementation libs.playServicesGamesV2
+
+    implementation libs.workRuntimeKtx
+}
+
+spotless {
+    java {
+        target "src/main/**/*.java"
+        googleJavaFormat("1.35.0")
+        formatAnnotations()
+    }
+
+    kotlin {
+        target "src/main/**/*.kt"
+        ktlint("1.8.0")
+    }
+
+}
+
+tasks.register("formatJavaOnly") {
+    group = "formatting"
+    description = "Applies Java formatting only."
+    dependsOn("spotlessJavaApply")
+}
+
+tasks.register("checkJavaFormatOnly") {
+    group = "verification"
+    description = "Checks Java formatting only."
+    dependsOn("spotlessJavaCheck")
+}
+
+tasks.register("formatKotlinOnly") {
+    group = "formatting"
+    description = "Applies Kotlin formatting only."
+    dependsOn("spotlessKotlinApply")
+}
+
+tasks.register("checkKotlinFormatOnly") {
+    group = "verification"
+    description = "Checks Kotlin formatting only."
+    dependsOn("spotlessKotlinCheck")
+}
