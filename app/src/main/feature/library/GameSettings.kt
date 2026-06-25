@@ -293,6 +293,8 @@ class GameSettingsStateHolder {
     // Audio
     val audioDriverEntries = mutableStateOf<List<String>>(emptyList())
     val selectedAudioDriver = mutableIntStateOf(0)
+    val displayModeEntries = mutableStateOf<List<String>>(emptyList())
+    val selectedDisplayMode = mutableIntStateOf(0)
     val midiSoundFontEntries = mutableStateOf<List<String>>(emptyList())
     val selectedMidiSoundFont = mutableIntStateOf(0)
 
