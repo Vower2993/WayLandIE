@@ -238,6 +238,7 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/bionic-libs/lib/libwayland-server.a")
         GLESv3
         vulkan
         android
+        unwind
         -Wl,--whole-archive
         ${CMAKE_CURRENT_SOURCE_DIR}/bionic-libs/lib/libwayland-server.a
         ${CMAKE_CURRENT_SOURCE_DIR}/bionic-libs/lib/libffi.a
