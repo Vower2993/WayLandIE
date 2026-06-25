@@ -199,6 +199,8 @@ public class GuestProgramLauncherComponent extends EnvironmentComponent {
     envVars.put("FONTCONFIG_PATH", imageFs.getRootDir().getPath() + "/usr/etc/fonts");
     // Env vars required for shell commands under the Bionic program launcher
     envVars.put("WINE_NO_DUPLICATE_EXPLORER", "1");
+        // Performance: hint Android to use performance CPU cores
+        if (!envVars.has("WINE_ADPF")) envVars.put("WINE_ADPF", "1");
         // Performance: disable verbose logging
         if (!envVars.has("DXVK_LOG_LEVEL")) envVars.put("DXVK_LOG_LEVEL", "none");
         if (!envVars.has("DXVK_HUD")) envVars.put("DXVK_HUD", "0");
@@ -226,6 +228,9 @@ public class GuestProgramLauncherComponent extends EnvironmentComponent {
       Log.d("GuestLauncher", "execShellCommand LD_PRELOAD=" + ldPreload.toString());
     }
     if (!"1".equals(envVars.get("PROTON_NO_ESYNC"))) envVars.put("WINEESYNC_WINLATOR", "1");
+        // Performance: increase ADPF thread hints for better game performance
+        if (!envVars.has("WINE_ADPF_N_THREADS")) envVars.put("WINE_ADPF_N_THREADS", "4");
+        if (!envVars.has("WINE_ADPF_TARGET_NS")) envVars.put("WINE_ADPF_TARGET_NS", "8000000");
     mergeExternalEnvVars(
         envVars,
         envVars.get("LD_PRELOAD"),
@@ -899,6 +904,8 @@ public class GuestProgramLauncherComponent extends EnvironmentComponent {
     envVars.put("WRAPPER_LAYER_PATH", rootDir.getPath() + "/usr/lib");
     envVars.put("WRAPPER_CACHE_PATH", rootDir.getPath() + "/usr/var/cache");
     envVars.put("WINE_NO_DUPLICATE_EXPLORER", "1");
+        // Performance: hint Android to use performance CPU cores
+        if (!envVars.has("WINE_ADPF")) envVars.put("WINE_ADPF", "1");
         // Performance: disable verbose logging
         if (!envVars.has("DXVK_LOG_LEVEL")) envVars.put("DXVK_LOG_LEVEL", "none");
         if (!envVars.has("DXVK_HUD")) envVars.put("DXVK_HUD", "0");
