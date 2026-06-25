@@ -111,9 +111,11 @@ jobs:
 
     - name: Build winewayland driver (winewayland.drv + winewayland.so + ntdll.dll + FEXCore DLL)
       run: |
-        export ANDROID_HOME=${{ env.ANDROID_HOME }}
+        export ANDROID_HOME=/usr/local/lib/android/sdk
         export ANDROID_NDK_HOME=$(ls -d $ANDROID_HOME/ndk/* 2>/dev/null | head -1)
+        export NDK_ROOT=$ANDROID_NDK_HOME
         export WORKSPACE=${{ github.workspace }}
+        echo "Using NDK: $NDK_ROOT"
         bash .github/scripts/build-winewayland-driver.sh || echo "WARNING: winewayland driver build failed"
 
     - name: Set up JDK 17
