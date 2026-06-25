@@ -690,15 +690,6 @@ public abstract class WineUtils {
       setWindowMetrics(registryEditor);
     }
 
-    // Install winewayland.drv + winewayland.so + FEXCore DLL from APK assets
-    // Must run BEFORE copyWineDllsToContainer (which skips for arm64ec)
-    try {
-      File prefixDir = new File(rootDir, ImageFs.WINEPREFIX);
-      com.winlator.cmod.runtime.wine.WaylandDriverInstaller.install(
-          android.app.AppGlobals.getInitialApplication(), prefixDir);
-    } catch (Exception e) {
-      android.util.Log.w("WineUtils", "WaylandDriverInstaller failed: " + e.getMessage());
-    }
     // Copy critical DLLs from wine installation to container
     copyWineDllsToContainer(rootDir, wineInfo);
   }
