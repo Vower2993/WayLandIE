@@ -47,10 +47,41 @@ public final class WaylandDriverInstaller {
                 copyIfExists(prefix, "lib/wine/aarch64-windows/libarm64ecfex.dll", system32);
                 copyIfExists(prefix, "lib/wine/aarch64-windows/ntdll.dll", system32);
             }
+            // Set GraphicsDriver=winewayland.drv in system.reg
+            // Wine reads this to decide which display driver to load.
+            // Without this, Wine defaults to winex11.drv even if
+            // winewayland.drv is installed in system32/.
+            setGraphicsDriver(prefix);
             return true;
         } catch (IOException e) {
             Log.e(TAG, "Install failed", e);
             return false;
+        }
+    }
+
+    private static void setGraphicsDriver(File prefix) {
+        File systemReg = new File(prefix, "system.reg");
+        if (!systemReg.exists()) {
+            Log.w(TAG, "system.reg not found — skipping GraphicsDriver");
+            return;
+        }
+        try {
+            String reg = new String(java.nio.file.Files.readAllBytes(systemReg.toPath()));
+            String videoKey = "[System\\\\CurrentControlSet\\\\Control\\\\Video\\\\{00000000-0000-0000-0000-000000000000}\\\\0000]";
+            String graphicsValue = "\"GraphicsDriver\"=\"winewayland.drv\"";
+
+            // Remove old GraphicsDriver entries
+            reg = reg.replaceAll("\"GraphicsDriver\"=\"[^"]*\"\n?", "");
+
+            if (reg.contains(videoKey)) {
+                reg = reg.replace(videoKey, videoKey + "\n" + graphicsValue);
+            } else {
+                reg += "\n" + videoKey + "\n" + graphicsValue + "\n";
+            }
+            java.nio.file.Files.write(systemReg.toPath(), reg.getBytes());
+            Log.i(TAG, "Set system.reg: GraphicsDriver=winewayland.drv");
+        } catch (Exception e) {
+            Log.w(TAG, "Failed to set GraphicsDriver: " + e.getMessage());
         }
     }
 
