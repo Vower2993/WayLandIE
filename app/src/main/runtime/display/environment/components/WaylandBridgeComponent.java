@@ -2,6 +2,7 @@ package com.winlator.cmod.runtime.display.environment.components;
 
 import com.winlator.cmod.runtime.display.environment.EnvironmentComponent;
 import com.winlator.cmod.runtime.display.environment.ImageFs;
+import com.winlator.cmod.runtime.display.environment.XEnvironment;
 
 import android.content.Context;
 import android.util.Log;
@@ -17,8 +18,6 @@ import java.util.Map;
  * to Android's SurfaceFlinger via AHB (zero-copy).
  *
  * Replaces XServerComponent for the Wayland display path.
- * The bridge is a bionic-compiled native binary (libwaylandie_bridge.so) that
- * runs as a separate process, creating the wayland-0 socket for Wine to connect.
  */
 public class WaylandBridgeComponent extends EnvironmentComponent {
     private static final String TAG = "WaylandBridgeComponent";
@@ -28,8 +27,13 @@ public class WaylandBridgeComponent extends EnvironmentComponent {
 
     @Override
     public void start() {
-        Context context = getEnvironment().getContext();
-        ImageFs imageFs = getEnvironment().getImageFs();
+        XEnvironment env = environment;
+        if (env == null) {
+            Log.e(TAG, "Environment not set");
+            return;
+        }
+        Context context = env.getContext();
+        ImageFs imageFs = env.getImageFs();
         File rootDir = imageFs.getRootDir();
         String nativeLibDir = context.getApplicationInfo().nativeLibraryDir;
 
@@ -51,32 +55,31 @@ public class WaylandBridgeComponent extends EnvironmentComponent {
 
         List<String> cmd = new ArrayList<>();
         cmd.add(bridgeBin.getAbsolutePath());
-        cmd.add("waylandie.display.bridge.v1");  // Android bridge socket
-        cmd.add("1");                              // target_commits
-        cmd.add(socketNameFile.getAbsolutePath()); // socket file
-        cmd.add("15000");                          // timeout_ms
-        cmd.add("0");                              // clear_ahb_outside
-        cmd.add("0");                              // accept_client_complete
-        cmd.add("2992");                           // output_width
-        cmd.add("1440");                           // output_height
+        cmd.add("waylandie.display.bridge.v1");
+        cmd.add("1");
+        cmd.add(socketNameFile.getAbsolutePath());
+        cmd.add("15000");
+        cmd.add("0");
+        cmd.add("0");
+        cmd.add("2992");
+        cmd.add("1440");
 
         ProcessBuilder pb = new ProcessBuilder(cmd);
         pb.directory(rootDir);
         pb.redirectErrorStream(true);
 
-        Map<String, String> env = pb.environment();
-        env.clear();
-        env.put("WAYLAND_DISPLAY", "wayland-0");
-        env.put("XDG_RUNTIME_DIR", runtimeDir.getAbsolutePath());
-        env.put("HOME", new File(rootDir, "home/xuser").getAbsolutePath());
-        env.put("TMPDIR", new File(rootDir, "usr/tmp").getAbsolutePath());
-        env.put("PATH", "/system/bin:/system/lib64");
+        Map<String, String> envVars = pb.environment();
+        envVars.clear();
+        envVars.put("WAYLAND_DISPLAY", "wayland-0");
+        envVars.put("XDG_RUNTIME_DIR", runtimeDir.getAbsolutePath());
+        envVars.put("HOME", new File(rootDir, "home/xuser").getAbsolutePath());
+        envVars.put("TMPDIR", new File(rootDir, "usr/tmp").getAbsolutePath());
+        envVars.put("PATH", "/system/bin:/system/lib64");
 
         try {
             bridgeProcess = pb.start();
-            Log.i(TAG, "Bridge translator started (pid=" + bridgeProcess.pid() + ")");
+            Log.i(TAG, "Bridge translator started");
 
-            // Capture bridge output
             new Thread(() -> {
                 try (java.io.BufferedReader reader = new java.io.BufferedReader(
                         new java.io.InputStreamReader(bridgeProcess.getInputStream()))) {
@@ -89,7 +92,6 @@ public class WaylandBridgeComponent extends EnvironmentComponent {
                 }
             }, "wl-bridge-output").start();
 
-            // Wait for socket
             Thread.sleep(2000);
             if (socketNameFile.exists()) {
                 String socketName = new String(java.nio.file.Files.readAllBytes(socketNameFile.toPath())).trim();
@@ -109,16 +111,5 @@ public class WaylandBridgeComponent extends EnvironmentComponent {
         if (socketNameFile != null) {
             socketNameFile.delete();
         }
-        // Clean up sockets
-        if (getEnvironment() != null) {
-            File runtimeDir = new File(new File(getEnvironment().getImageFs().getRootDir(), "usr/tmp"), "runtime");
-            new File(runtimeDir, "wayland-0").delete();
-            new File(runtimeDir, "wayland-0.lock").delete();
-        }
-    }
-
-    @Override
-    public boolean isReady() {
-        return bridgeProcess != null && bridgeProcess.isAlive();
     }
 }
