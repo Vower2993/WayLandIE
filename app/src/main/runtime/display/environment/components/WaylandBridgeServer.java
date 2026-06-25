@@ -115,7 +115,11 @@ public class WaylandBridgeServer {
                 java.io.FileDescriptor[] ancillary = client.getAncillaryFileDescriptors();
                 int dmabufFd = -1;
                 if (ancillary != null && ancillary.length > 0) {
-                    dmabufFd = getIntFd(ancillary[0]);
+                    try {
+                        dmabufFd = android.os.ParcelFileDescriptor.fromFd(ancillary[0]).getFd();
+                    } catch (Exception e) {
+                        Log.w(TAG, "Failed to get ancillary fd", e);
+                    }
                     Log.i(TAG, "Received dmabuf fd=" + dmabufFd);
                 }
 
@@ -231,22 +235,6 @@ public class WaylandBridgeServer {
             Log.i(TAG, "Created presentLayer: " + w + "x" + h);
         } catch (Exception e) {
             Log.e(TAG, "Failed to create presentLayer", e);
-        }
-    }
-
-    private static int getIntFd(java.io.FileDescriptor fd) {
-        try {
-            java.lang.reflect.Field field = java.io.FileDescriptor.class.getDeclaredField("descriptor");
-            field.setAccessible(true);
-            return field.getInt(fd);
-        } catch (Exception e) {
-            // Fallback: use ParcelFileDescriptor
-            try {
-                return android.os.ParcelFileDescriptor.fromFd(fd).getFd();
-            } catch (Exception e2) {
-                Log.e(TAG, "Failed to get fd int", e2);
-                return -1;
-            }
         }
     }
 
