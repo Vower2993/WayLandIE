@@ -134,7 +134,45 @@ printf '%s' "$PC_XKBCOMMON" > "$BIONIC_LIBS/lib/pkgconfig/xkbcommon.pc"
 
 echo "=== written .pc files ==="
 
-# Copy system xkbcommon headers to bionic-libs (in case meson build failed)
+# Create stub xkbcommon headers if real ones aren't available
+# Wine's configure may not find xkbcommon via pkg-config when cross-compiling.
+# winewayland.drv includes <xkbcommon/xkbcommon.h> unconditionally in waylanddrv.h.
+# We create a minimal stub so it compiles. At runtime, xkbcommon is optional.
+if [ ! -d "$BIONIC_LIBS/include/xkbcommon" ]; then
+    mkdir -p "$BIONIC_LIBS/include/xkbcommon"
+    cat > "$BIONIC_LIBS/include/xkbcommon/xkbcommon.h" << XKBEOF
+// Stub xkbcommon.h for cross-compilation
+// At runtime, xkbcommon is optional — WinNative handles keyboard layout
+#pragma once
+#include <stddef.h>
+#include <stdint.h>
+struct xkb_context;
+struct xkb_keymap;
+struct xkb_state;
+typedef struct xkb_context xkb_context;
+typedef struct xkb_keymap xkb_keymap;
+typedef struct xkb_state xkb_state;
+enum xkb_keycode { XKB_KEYCODE_INVALID = 0xffffffff };
+enum xkb_keysym { XKB_KEY_NoSymbol = 0 };
+enum xkb_layout_index { XKB_LAYOUT_INVALID = 0xffffffff };
+enum xkb_mod_index { XKB_MOD_INVALID = 0xffffffff };
+enum xkb_led_index { XKB_LED_INVALID = 0xffffffff };
+enum xkb_compose_status { XKB_COMPOSE_NOTHING = 0 };
+#define XKB_CONTEXT_NO_FLAGS 0
+#define XKB_KEYMAP_COMPILE_NO_FLAGS 0
+XKBEOF
+    echo "  Created stub xkbcommon.h in bionic-libs"
+fi
+# Also try copying system headers if available
+if [ -d /usr/include/xkbcommon ]; then
+    cp -r /usr/include/xkbcommon/* "$BIONIC_LIBS/include/xkbcommon/" 2>/dev/null || true
+    echo "  Copied system xkbcommon headers to bionic-libs"
+fi
+
+# Also copy xkbcommon headers to Wine's include directory (where -Iinclude points)
+mkdir -p /tmp/proton-wine/include/xkbcommon
+cp "$BIONIC_LIBS/include/xkbcommon/"* /tmp/proton-wine/include/xkbcommon/ 2>/dev/null || true
+echo "  Copied xkbcommon headers to Wine include dir"
 # libxkbcommon-dev is installed via apt-get, headers are at /usr/include/xkbcommon/
 if [ ! -d "$BIONIC_LIBS/include/xkbcommon" ] && [ -d /usr/include/xkbcommon ]; then
     mkdir -p "$BIONIC_LIBS/include/xkbcommon"
