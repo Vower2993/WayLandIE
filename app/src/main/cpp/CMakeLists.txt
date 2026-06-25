@@ -196,7 +196,6 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/bionic-libs/lib/libwayland-server.a")
         waylandie-wayland-bridge.c
         waylandie_display_native.c
         surface_control_cpp_shim.cpp
-        crash_handler.c
         generated/xdg-shell-protocol.c
         generated/linux-dmabuf-unstable-v1-protocol.c
         generated/presentation-time-protocol.c
@@ -238,7 +237,6 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/bionic-libs/lib/libwayland-server.a")
         GLESv3
         vulkan
         android
-        unwind
         -Wl,--whole-archive
         ${CMAKE_CURRENT_SOURCE_DIR}/bionic-libs/lib/libwayland-server.a
         ${CMAKE_CURRENT_SOURCE_DIR}/bionic-libs/lib/libffi.a
