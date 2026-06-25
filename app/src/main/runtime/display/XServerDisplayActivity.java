@@ -6232,7 +6232,6 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
                     envVars.put("WINEDLLOVERRIDES", wlOverrides);
                     Log.d("XServerDisplayActivity", "WINEDLLOVERRIDES with Wayland: " + wlOverrides);
                     // Original code:
-                    // envVars.put("WINEDLLOVERRIDES", planWOverride);
                     } else if (!currentOverrides.contains("lsteamclient=")) {
                         // Ensure winewayland.drv is enabled and winex11.drv is disabled
                     String wlOverrides = envVars.get("WINEDLLOVERRIDES");
@@ -6246,8 +6245,6 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
                     envVars.put("WINEDLLOVERRIDES", wlOverrides);
                     Log.d("XServerDisplayActivity", "WINEDLLOVERRIDES with Wayland: " + wlOverrides);
                     // Original code:
-                    // envVars.put("WINEDLLOVERRIDES",
-                                currentOverrides + ";" + planWOverride);
                     }
                     Log.i("XServerDisplayActivity",
                             "Steam Launcher: WINEDLLOVERRIDES set to '"
