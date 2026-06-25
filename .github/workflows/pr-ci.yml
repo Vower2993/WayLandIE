@@ -100,15 +100,16 @@ jobs:
         restore-keys: bionic-libs-v2-
 
     - name: Build bionic-bridge deps (libffi + libwayland-server)
-      if: steps.cache-bionic-libs.outputs.cache-hit != 'true'
       run: |
         if [ ! -d app/src/main/cpp/bionic-libs/lib ] || [ ! -f app/src/main/cpp/bionic-libs/lib/libwayland-server.a ]; then
-          export ANDROID_HOME=${{ env.ANDROID_HOME }}
+          export ANDROID_HOME=/usr/local/lib/android/sdk
           export ANDROID_NDK_HOME=$(ls -d $ANDROID_HOME/ndk/* 2>/dev/null | head -1)
           export NDK_ROOT=$ANDROID_NDK_HOME
+          echo "Using NDK: $NDK_ROOT"
           bash tools/build-bionic-bridge.sh
+        else
+          echo "bionic-libs already present — skipping build"
         fi
-
     - name: Build winewayland driver (winewayland.drv + winewayland.so + ntdll.dll + FEXCore DLL)
       run: |
         export ANDROID_HOME=/usr/local/lib/android/sdk
