@@ -1,0 +1,254 @@
+package com.winlator.cmod.app
+import android.app.Activity
+import android.app.Application
+import android.os.Bundle
+import android.util.Log
+import com.winlator.cmod.app.db.PluviaDatabase
+import com.winlator.cmod.app.update.UpdateChecker
+import com.winlator.cmod.feature.stores.gog.service.GOGAuthManager
+import com.winlator.cmod.feature.stores.gog.service.GOGConstants
+import com.winlator.cmod.feature.stores.steam.events.EventDispatcher
+import com.winlator.cmod.feature.stores.steam.service.SteamService
+import com.winlator.cmod.feature.stores.steam.utils.PrefManager
+import com.winlator.cmod.runtime.display.XServerDisplayActivity
+import com.winlator.cmod.shared.android.RefreshRateUtils
+import dagger.hilt.android.HiltAndroidApp
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.File
+
+@HiltAndroidApp
+class PluviaApp : Application() {
+    private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+
+    override fun onCreate() {
+        super.onCreate()
+        instance = this
+
+        // Cached probe for devices whose native stack still needs system libjpeg preloaded.
+        preloadSystemLibraries()
+
+        registerRefreshRateLifecycleCallbacks()
+
+        PrefManager.install(this)
+        GOGConstants.init(this)
+
+        com.winlator.cmod.app.service.NetworkMonitor
+            .init(this)
+        scheduleColdStartWarmups()
+
+        Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+            Log.e("PluviaApp", "CRASH in thread ${thread.name}", throwable)
+        }
+    }
+
+    companion object {
+        private const val STARTUP_PROBES_PREFS = "startup_probes"
+        private const val KEY_SYSTEM_JPEG_PRELOAD_STATE = "system_jpeg_preload_state"
+        private const val KEY_SYSTEM_JPEG_PRELOAD_VERSION = "system_jpeg_preload_version"
+        private const val SYSTEM_JPEG_PRELOAD_UNKNOWN = 0
+        private const val SYSTEM_JPEG_PRELOAD_SUCCESS = 1
+        private const val SYSTEM_JPEG_PRELOAD_UNSUPPORTED = 2
+
+        lateinit var instance: PluviaApp
+            private set
+
+        @Volatile
+        var currentForegroundActivity: Activity? = null
+            private set
+
+        @JvmField
+        val events = EventDispatcher()
+
+        // Visible activity count; mutated only on the main thread.
+        @Volatile
+        private var startedActivityCount = 0
+
+        // Live game windows, including backgrounded sessions.
+        @Volatile
+        private var gameActivityCount = 0
+
+        fun isGameSessionActive(): Boolean = gameActivityCount > 0
+    }
+
+    private fun preloadSystemLibraries() {
+        val prefs = getSharedPreferences(STARTUP_PROBES_PREFS, MODE_PRIVATE)
+        val currentVersion = currentVersionCode()
+        val state =
+            if (prefs.getLong(KEY_SYSTEM_JPEG_PRELOAD_VERSION, -1L) == currentVersion) {
+                prefs.getInt(KEY_SYSTEM_JPEG_PRELOAD_STATE, SYSTEM_JPEG_PRELOAD_UNKNOWN)
+            } else {
+                SYSTEM_JPEG_PRELOAD_UNKNOWN
+            }
+
+        if (state == SYSTEM_JPEG_PRELOAD_UNSUPPORTED) return
+
+        val is64 = android.os.Build.SUPPORTED_64_BIT_ABIS.isNotEmpty()
+        val candidates = if (is64) {
+            listOf("/system/lib64/libjpeg.so", "/system/lib/libjpeg.so")
+        } else {
+            listOf("/system/lib/libjpeg.so", "/system/lib64/libjpeg.so")
+        }
+        for (path in candidates) {
+            if (!File(path).exists()) continue
+            try {
+                System.load(path)
+                prefs.edit()
+                    .putInt(KEY_SYSTEM_JPEG_PRELOAD_STATE, SYSTEM_JPEG_PRELOAD_SUCCESS)
+                    .putLong(KEY_SYSTEM_JPEG_PRELOAD_VERSION, currentVersion)
+                    .apply()
+                Log.i("PluviaApp", "Preloaded $path")
+                return
+            } catch (t: Throwable) {
+                if (isPermanentSystemLibraryPreloadFailure(t)) {
+                    prefs.edit()
+                        .putInt(KEY_SYSTEM_JPEG_PRELOAD_STATE, SYSTEM_JPEG_PRELOAD_UNSUPPORTED)
+                        .putLong(KEY_SYSTEM_JPEG_PRELOAD_VERSION, currentVersion)
+                        .apply()
+                    Log.i("PluviaApp", "Skipping future system libjpeg preload attempts: ${t.message}")
+                    return
+                }
+                Log.w("PluviaApp", "Preload $path failed: ${t.message}")
+            }
+        }
+    }
+
+    private fun isPermanentSystemLibraryPreloadFailure(error: Throwable): Boolean {
+        val message = error.message.orEmpty()
+        return message.contains("not accessible for the namespace", ignoreCase = true) ||
+            message.contains("is not accessible", ignoreCase = true)
+    }
+
+    private fun currentVersionCode(): Long {
+        return runCatching {
+            val info = packageManager.getPackageInfo(packageName, 0)
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+                info.longVersionCode
+            } else {
+                @Suppress("DEPRECATION")
+                info.versionCode.toLong()
+            }
+        }.getOrDefault(0L)
+    }
+
+    private fun registerRefreshRateLifecycleCallbacks() {
+        registerActivityLifecycleCallbacks(
+            object : ActivityLifecycleCallbacks {
+                override fun onActivityCreated(
+                    activity: Activity,
+                    savedInstanceState: Bundle?,
+                ) {
+                    if (activity is XServerDisplayActivity) {
+                        gameActivityCount++
+                    }
+                    if (shouldManageAppRefreshRate(activity)) {
+                        RefreshRateUtils.onActivityCreated(activity)
+                    }
+                }
+
+                override fun onActivityResumed(activity: Activity) {
+                    currentForegroundActivity = activity
+                    if (shouldManageAppRefreshRate(activity)) {
+                        RefreshRateUtils.onActivityResumed(activity)
+                    }
+                }
+
+                override fun onActivityStarted(activity: Activity) {
+                    if (startedActivityCount++ == 0) {
+                        SteamService.onAppForegrounded()
+                    }
+                }
+
+                override fun onActivityPaused(activity: Activity) {
+                    if (currentForegroundActivity === activity) {
+                        currentForegroundActivity = null
+                    }
+                }
+
+                override fun onActivityStopped(activity: Activity) {
+                    startedActivityCount = (startedActivityCount - 1).coerceAtLeast(0)
+                    if (startedActivityCount == 0) {
+                        SteamService.onAppBackgrounded()
+                    }
+                }
+
+                override fun onActivitySaveInstanceState(
+                    activity: Activity,
+                    outState: Bundle,
+                ) {}
+
+                override fun onActivityDestroyed(activity: Activity) {
+                    if (shouldManageAppRefreshRate(activity)) {
+                        RefreshRateUtils.onActivityDestroyed(activity)
+                    }
+                    if (currentForegroundActivity === activity) {
+                        currentForegroundActivity = null
+                    }
+                    if (activity is XServerDisplayActivity) {
+                        gameActivityCount = (gameActivityCount - 1).coerceAtLeast(0)
+                        // If the last game window ends while backgrounded, let Steam sleep.
+                        if (gameActivityCount == 0 && startedActivityCount == 0) {
+                            SteamService.onAppBackgrounded()
+                        }
+                    }
+                }
+            },
+        )
+    }
+
+    private fun shouldManageAppRefreshRate(activity: Activity): Boolean {
+        // Game windows own per-title refresh policy.
+        return activity !is XServerDisplayActivity
+    }
+
+    private fun scheduleColdStartWarmups() {
+        appScope.launch {
+            // Release the main thread for Activity launch and first Compose work.
+            withContext(Dispatchers.IO) {
+                GOGAuthManager.updateLoginStatus(this@PluviaApp)
+
+                // Keep encrypted prefs setup off launcher auth checks.
+                val steamLogsEnabled =
+                    runCatching {
+                        PrefManager.init(this@PluviaApp)
+                        PrefManager.libraryLayoutMode
+                        PrefManager.enableSteamLogs
+                    }.getOrElse {
+                        Log.e("PluviaApp", "PrefManager warmup failed", it)
+                        false
+                    }
+
+                if (UpdateChecker.isEnabled(this@PluviaApp)) {
+                    UpdateChecker.refreshInstallTimestamp(this@PluviaApp)
+                }
+
+                runCatching { PluviaDatabase.init(this@PluviaApp) }
+                    .onFailure { Log.e("PluviaApp", "Database warmup failed", it) }
+
+                // Restore interrupted downloads after DB/coordinator startup.
+                runCatching {
+                    val db = PluviaDatabase.getInstance(this@PluviaApp)
+                    com.winlator.cmod.app.service.download.DownloadCoordinator.init(db)
+                    com.winlator.cmod.app.service.download.DownloadCoordinator
+                        .attemptStartupRestoration()
+                }.onFailure { Log.e("PluviaApp", "DownloadCoordinator startup failed", it) }
+
+                com.winlator.cmod.runtime.system.LogManager
+                    .rotateLogsOnAppStart(this@PluviaApp)
+                com.winlator.cmod.runtime.system.LogManager
+                    .startAppLogging(this@PluviaApp)
+
+                if (steamLogsEnabled) {
+                    withContext(Dispatchers.Main.immediate) {
+                        if (timber.log.Timber.forest().none { it is timber.log.Timber.DebugTree }) {
+                            timber.log.Timber.plant(timber.log.Timber.DebugTree())
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

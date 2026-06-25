@@ -1,0 +1,199 @@
+package com.winlator.cmod.shared.ui.dialog;
+
+import android.app.Activity;
+import android.app.Dialog;
+import android.os.Handler;
+import android.os.Looper;
+import android.view.View;
+import android.view.ViewGroup;
+import android.view.Window;
+import android.view.WindowManager;
+import androidx.compose.ui.platform.ComposeView;
+import androidx.core.view.WindowCompat;
+import androidx.core.view.WindowInsetsCompat;
+import androidx.core.view.WindowInsetsControllerCompat;
+
+public class PreloaderDialog {
+  private final Activity activity;
+  private Dialog dialog;
+  private final Handler uiHandler = new Handler(Looper.getMainLooper());
+  private final PreloaderDialogState composeState = new PreloaderDialogState();
+
+  public PreloaderDialog(Activity activity) {
+    this.activity = activity;
+  }
+
+  private void create() {
+    if (dialog != null || isHostActivityInvalid()) return;
+    dialog = new Dialog(activity, android.R.style.Theme_Translucent_NoTitleBar_Fullscreen);
+    dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
+    dialog.setCancelable(false);
+    dialog.setCanceledOnTouchOutside(false);
+
+    Window window = dialog.getWindow();
+    if (window != null) {
+      window.clearFlags(WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE);
+      window.clearFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE);
+      // Edge-to-edge: hide system bars
+      WindowCompat.setDecorFitsSystemWindows(window, false);
+      window.setFlags(
+          WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+          WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS);
+      View decorView = window.getDecorView();
+      WindowInsetsControllerCompat controller = new WindowInsetsControllerCompat(window, decorView);
+      controller.hide(WindowInsetsCompat.Type.systemBars());
+      controller.setSystemBarsBehavior(
+          WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+    }
+
+    ComposeView composeView = new ComposeView(activity);
+    composeView.setLayoutParams(
+        new ViewGroup.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+    PreloaderDialogContentKt.setupPreloaderComposeView(composeView, composeState, activity);
+    dialog.setContentView(composeView);
+  }
+
+  private boolean isHostActivityInvalid() {
+    return activity.isFinishing() || activity.isDestroyed();
+  }
+
+  private void showDialogSafely() {
+    if (dialog == null || isShowing() || isHostActivityInvalid()) return;
+
+    try {
+      dialog.show();
+    } catch (WindowManager.BadTokenException | IllegalStateException ignored) {
+    }
+  }
+
+  private void clearLaunchMetadata() {
+    composeState.setTitle("");
+    composeState.setBadge("");
+    composeState.setSubtitle("");
+    composeState.setStableContentLayout(false);
+  }
+
+  public synchronized void show(int textResId) {
+    show(textResId, true);
+  }
+
+  public synchronized void show(int textResId, boolean indeterminate) {
+    if (dialog == null) create();
+    if (dialog == null) return;
+    clearLaunchMetadata();
+    composeState.setText(activity.getString(textResId));
+    composeState.setIndeterminate(indeterminate);
+    if (!indeterminate) {
+      composeState.setProgress(0);
+    }
+    showDialogSafely();
+  }
+
+  public synchronized void show(String text) {
+    if (dialog == null) create();
+    if (dialog == null) return;
+    clearLaunchMetadata();
+    composeState.setText(text);
+    composeState.setIndeterminate(true);
+    showDialogSafely();
+  }
+
+  public synchronized void show(String text, String title, String badge, String subtitle) {
+    if (dialog == null) create();
+    if (dialog == null) return;
+    composeState.setText(text);
+    composeState.setTitle(title != null ? title : "");
+    composeState.setBadge(badge != null ? badge : "");
+    composeState.setSubtitle(subtitle != null ? subtitle : "");
+    composeState.setStableContentLayout(true);
+    composeState.setIndeterminate(true);
+    showDialogSafely();
+  }
+
+  public synchronized void show(int textResId, String title, String badge, String subtitle) {
+    show(activity.getString(textResId), title, badge, subtitle);
+  }
+
+  public synchronized void setProgress(int percent) {
+    if (dialog == null) return;
+    composeState.setProgress(percent);
+  }
+
+  public synchronized void setIndeterminate(boolean indeterminate) {
+    if (dialog == null) return;
+    composeState.setIndeterminate(indeterminate);
+  }
+
+  public void setProgressOnUiThread(final int percent) {
+    uiHandler.post(() -> setProgress(percent));
+  }
+
+  public void setIndeterminateOnUiThread(final boolean indeterminate) {
+    uiHandler.post(() -> setIndeterminate(indeterminate));
+  }
+
+  public void showOnUiThread(final int textResId) {
+    uiHandler.post(() -> show(textResId));
+  }
+
+  public void showOnUiThread(final String text) {
+    uiHandler.post(() -> show(text));
+  }
+
+  public void showOnUiThread(
+      final String text, final String title, final String badge, final String subtitle) {
+    uiHandler.post(() -> show(text, title, badge, subtitle));
+  }
+
+  public void showProgressOnUiThread(
+      final String text,
+      final String title,
+      final String badge,
+      final String subtitle,
+      final int percent) {
+    uiHandler.post(
+        () -> {
+          show(text, title, badge, subtitle);
+          composeState.setIndeterminate(false);
+          composeState.setProgress(percent);
+        });
+  }
+
+  public void setStepOnUiThread(final String step) {
+    uiHandler.post(
+        () -> {
+          if (dialog != null) composeState.setText(step);
+        });
+  }
+
+  public void setStepOnUiThread(final int stepResId) {
+    setStepOnUiThread(activity.getString(stepResId));
+  }
+
+  public void setStepOnUiThread(final int stepResId, Object... formatArgs) {
+    setStepOnUiThread(activity.getString(stepResId, formatArgs));
+  }
+
+  public synchronized void close() {
+    try {
+      if (dialog != null) {
+        dialog.dismiss();
+      }
+    } catch (Exception e) {
+    }
+  }
+
+  public synchronized void closeWithDelay(long delayMs) {
+    uiHandler.postDelayed(this::close, delayMs);
+  }
+
+  public void closeOnUiThread() {
+    uiHandler.post(this::close);
+  }
+
+  public boolean isShowing() {
+    return dialog != null && dialog.isShowing();
+  }
+}
