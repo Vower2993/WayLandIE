@@ -39,7 +39,7 @@ WORK_DIR="${WORK_DIR:-/tmp/bionic-bridge-build}"
 OUTPUT_DIR="${OUTPUT_DIR:-/tmp/bionic-libs}"
 
 # NDK r26d paths
-NDK_ROOT="${NDK_ROOT:-${ANDROID_HOME:-$HOME/.local/android-sdk}/ndk/26.1.10909125}"
+NDK_ROOT="${NDK_ROOT:-$(ls -d ${ANDROID_HOME:-/usr/local/lib/android/sdk}/ndk/* 2>/dev/null | head -1)}"
 NDK_BIN="$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin"
 SYSROOT="$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
 CC="$NDK_BIN/aarch64-linux-android33-clang"

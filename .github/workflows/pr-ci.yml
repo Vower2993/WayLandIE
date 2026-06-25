@@ -92,6 +92,11 @@ jobs:
         sudo apt-get install -y -qq meson ninja-build libwayland-bin wayland-protocols libffi-dev libexpat1-dev pkg-config
         pip3 install --user meson 2>/dev/null || true
 
+    - name: Ensure NDK is installed
+      run: |
+        yes | /usr/local/lib/android/sdk/cmdline-tools/latest/bin/sdkmanager "ndk;27.3.13750724" 2>/dev/null || true
+        ls /usr/local/lib/android/sdk/ndk/
+
     - name: Cache bionic-bridge deps
       uses: actions/cache@v5
       with:
