@@ -199,6 +199,9 @@ public class GuestProgramLauncherComponent extends EnvironmentComponent {
     envVars.put("FONTCONFIG_PATH", imageFs.getRootDir().getPath() + "/usr/etc/fonts");
     // Env vars required for shell commands under the Bionic program launcher
     envVars.put("WINE_NO_DUPLICATE_EXPLORER", "1");
+        // Performance: disable verbose logging
+        if (!envVars.containsKey("DXVK_LOG_LEVEL")) envVars.put("DXVK_LOG_LEVEL", "none");
+        if (!envVars.containsKey("DXVK_HUD")) envVars.put("DXVK_HUD", "0");
     envVars.put("PREFIX", imageFs.getRootDir().getPath() + "/usr");
     envVars.put("WINE_DISABLE_FULLSCREEN_HACK", "1");
     envVars.put("SteamGameId", "0");
@@ -896,6 +899,9 @@ public class GuestProgramLauncherComponent extends EnvironmentComponent {
     envVars.put("WRAPPER_LAYER_PATH", rootDir.getPath() + "/usr/lib");
     envVars.put("WRAPPER_CACHE_PATH", rootDir.getPath() + "/usr/var/cache");
     envVars.put("WINE_NO_DUPLICATE_EXPLORER", "1");
+        // Performance: disable verbose logging
+        if (!envVars.containsKey("DXVK_LOG_LEVEL")) envVars.put("DXVK_LOG_LEVEL", "none");
+        if (!envVars.containsKey("DXVK_HUD")) envVars.put("DXVK_HUD", "0");
     envVars.put("PREFIX", rootDir.getPath() + "/usr");
     envVars.put("DISPLAY", ":0");
         envVars.put("WAYLAND_DISPLAY", "wayland-0");

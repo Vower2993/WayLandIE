@@ -6196,7 +6196,7 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
                 envVars.put("ValvePlatformMutex", "c:\\Program Files (x86)\\Steam/");
                 String currentWineDebug = envVars.get("WINEDEBUG");
                 if (currentWineDebug == null || currentWineDebug.equals("-all")) {
-                    envVars.put("WINEDEBUG", "+module,+loaddll");
+                    envVars.put("WINEDEBUG", "-all");  // Performance: disable Wine debug logging
                 }
                 Log.i("XServerDisplayActivity",
                         "Bionic Steam: published bridge env (Steam3Master=127.0.0.1:57343, appId="
