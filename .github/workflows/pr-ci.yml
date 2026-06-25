@@ -48,15 +48,33 @@ jobs:
         fetch-depth: 1
         persist-credentials: false
 
-    - name: Cache LFS
-      uses: actions/cache@v5
-      with:
-        path: .git/lfs
-        key: lfs-${{ hashFiles('**/*.txz', '**/*.tzst') }}
-        restore-keys: lfs-
-
-    - name: Pull LFS files
-      run: git lfs pull
+    - name: Download LFS assets from WinNative release
+      run: |
+        # Download the LFS-tracked files that we couldn't push via git
+        # These are large binary files from WinNative's repo
+        pip install huggingface_hub 2>/dev/null || true
+        
+        # Try to download from WinNative's GitHub LFS
+        cd app/src/main/assets
+        
+        # proton-9.0-arm64ec.txz (64MB)
+        if [ -f proton-9.0-arm64ec.txz ] && head -1 proton-9.0-arm64ec.txz | grep -q "DOWNLOAD_FROM_CI"; then
+          echo "Downloading proton-9.0-arm64ec.txz from WinNative repo..."
+          curl -sL "https://github.com/WinNative-Emu/WinNative/raw/main/app/src/main/assets/proton-9.0-arm64ec.txz" -o proton-9.0-arm64ec.txz || true
+          # If still a pointer, try the LFS media endpoint
+          if head -1 proton-9.0-arm64ec.txz | grep -q "version https://git-lfs"; then
+            echo "LFS pointer detected, trying media endpoint..."
+            curl -sL "https://media.githubusercontent.com/media/WinNative-Emu/WinNative/main/app/src/main/assets/proton-9.0-arm64ec.txz" -o proton-9.0-arm64ec.txz || true
+          fi
+          echo "proton size: $(wc -c < proton-9.0-arm64ec.txz)"
+        fi
+        
+        # imagefs.tzst (large)
+        if [ -f imagefs.tzst ] && head -1 imagefs.tzst | grep -q "DOWNLOAD_FROM_CI"; then
+          echo "Downloading imagefs.tzst from WinNative repo..."
+          curl -sL "https://media.githubusercontent.com/media/WinNative-Emu/WinNative/main/app/src/main/assets/imagefs.tzst" -o imagefs.tzst || true
+          echo "imagefs size: $(wc -c < imagefs.tzst)"
+        fi
 
     - name: Cache NDK build outputs
       uses: actions/cache@v5
