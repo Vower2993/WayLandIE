@@ -180,22 +180,81 @@ add_library(fakeinput SHARED
 target_compile_options(fakeinput PRIVATE -Wall -Wextra -fvisibility=hidden)
 target_link_libraries(fakeinput log dl)
 
-# WaylandIE Bridge target disabled — needs wayland headers + bionic-libs
-# Will be re-enabled once bionic-libs build is integrated into CI.
-
 # === WaylandIE Bridge ===
-# Bionic-compiled Wayland compositor bridge
-# Only build if bionic-libs are available (built by CI)
+# Bionic-compiled Wayland compositor bridge + JNI display native library.
+# Only build if bionic-libs are available (built by CI).
+#
+# We build TWO separate targets:
+#   1. waylandie_display_native — SHARED library loaded by the JVM via
+#      System.loadLibrary("waylandie_display_native"). Contains JNI_OnLoad
+#      and the nativePresentAhbVkDmaBufFrame JNI method. Links against
+#      vulkan / EGL / android (the JNI side does NOT need wayland-server).
+#
+#   2. waylandie_bridge_exe — EXECUTABLE (output named libwaylandie_bridge_exe.so
+#      so Android's packaging system includes it in the APK's lib/ dir).
+#      Contains main() — the standalone Wayland compositor process. Links
+#      against libwayland-server.a + libffi.a. WaylandBridgeComponent.java
+#      launches this as a subprocess.
+#
+# WHY SPLIT: Previously both were compiled into one SHARED library
+# (libwaylandie_bridge.so). That was fundamentally broken:
+#   - WaylandBridgeComponent tried to exec libwaylandie_bridge.so as a
+#     binary, but a SHARED library is not a valid ELF executable — the
+#     kernel rejects it with ENOEXEC, so the bridge process never started.
+#   - The JVM loaded the same .so via System.loadLibrary for JNI, which
+#     worked, but the main() symbol was dead weight.
+# Splitting into SHARED (JNI) + EXECUTABLE (bridge) is the only correct
+# arrangement.
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/bionic-libs/lib/libwayland-server.a")
-    message(STATUS "bionic-libs found — building waylandie_bridge")
+    message(STATUS "bionic-libs found — building waylandie_display_native + waylandie_bridge_exe")
 
     set(WAYLANDIE_NO_XTEST 1)
     set(_WAYLAND_SERVER_NOPLUGINS 1)
 
-    add_library(waylandie_bridge SHARED
-        waylandie-wayland-bridge.c
+    # ------------------------------------------------------------------
+    # Target 1: waylandie_display_native (SHARED, JNI side)
+    # ------------------------------------------------------------------
+    add_library(waylandie_display_native SHARED
         waylandie_display_native.c
         surface_control_cpp_shim.cpp
+    )
+
+    target_include_directories(waylandie_display_native PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated
+    )
+
+    target_compile_definitions(waylandie_display_native PRIVATE
+        WAYLANDIE_NO_XTEST
+        _GNU_SOURCE
+        __ANDROID_MIN_SDK_VERSION__=31
+    )
+
+    target_compile_options(waylandie_display_native PRIVATE
+        -fPIC -O2 -Wno-unused-function -Wno-implicit-function-declaration
+        -D__ANDROID_MIN_SDK_VERSION__=31
+        -include ${CMAKE_CURRENT_SOURCE_DIR}/android_api_override.h
+    )
+
+    find_library(log-lib log)
+    find_library(android-lib android)
+    target_link_libraries(waylandie_display_native
+        ${log-lib}
+        ${android-lib}
+        EGL
+        GLESv3
+        vulkan
+        android
+    )
+
+    # ------------------------------------------------------------------
+    # Target 2: waylandie_bridge_exe (EXECUTABLE, the compositor process)
+    # Output name is libwaylandie_bridge_exe.so so that Android's gradle
+    # packaging system picks it up and ships it inside the APK lib/ dir.
+    # At runtime WaylandBridgeComponent marks it executable + exec's it.
+    # ------------------------------------------------------------------
+    add_executable(waylandie_bridge_exe
+        waylandie-wayland-bridge.c
         generated/xdg-shell-protocol.c
         generated/linux-dmabuf-unstable-v1-protocol.c
         generated/presentation-time-protocol.c
@@ -204,44 +263,39 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/bionic-libs/lib/libwayland-server.a")
         generated/pointer-constraints-unstable-v1-protocol.c
     )
 
-    target_include_directories(waylandie_bridge PRIVATE
+    set_target_properties(waylandie_bridge_exe PROPERTIES
+        OUTPUT_NAME "waylandie_bridge_exe"
+        # On Android executables must be PIE.
+        POSITION_INDEPENDENT_CODE ON
+    )
+
+    target_include_directories(waylandie_bridge_exe PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
         ${CMAKE_CURRENT_SOURCE_DIR}/generated
         ${CMAKE_CURRENT_SOURCE_DIR}/bionic-libs/include
     )
 
-    target_compile_definitions(waylandie_bridge PRIVATE
+    target_compile_definitions(waylandie_bridge_exe PRIVATE
         WAYLANDIE_NO_XTEST
         _WAYLAND_SERVER_NOPLUGINS
         _GNU_SOURCE
         __ANDROID_MIN_SDK_VERSION__=31
     )
 
-    # The bridge uses API 29-31 functions. The NDK enforces availability
-    # via __attribute__((unavailable)) which is a hard error.
-    # We can't override this per-target, so we add the availability
-    # macro manually to tell the compiler these are OK.
-    # See: https://github.com/android-ndk/ndk/issues/1185
-    target_compile_options(waylandie_bridge PRIVATE
+    target_compile_options(waylandie_bridge_exe PRIVATE
         -fPIC -O2 -Wno-unused-function -Wno-implicit-function-declaration
         -D__ANDROID_MIN_SDK_VERSION__=31
         -include ${CMAKE_CURRENT_SOURCE_DIR}/android_api_override.h
     )
 
-    find_library(log-lib log)
-    find_library(android-lib android)
-    target_link_libraries(waylandie_bridge
-        ${log-lib}
-        ${android-lib}
-        EGL
-        GLESv3
-        vulkan
-        android
+    find_library(log-lib-exe log)
+    target_link_libraries(waylandie_bridge_exe
+        ${log-lib-exe}
         -Wl,--whole-archive
         ${CMAKE_CURRENT_SOURCE_DIR}/bionic-libs/lib/libwayland-server.a
         ${CMAKE_CURRENT_SOURCE_DIR}/bionic-libs/lib/libffi.a
         -Wl,--no-whole-archive
     )
 else()
-    message(STATUS "bionic-libs NOT found — skipping waylandie_bridge (will use X11 fallback)")
+    message(STATUS "bionic-libs NOT found — skipping waylandie targets (will use X11 fallback)")
 endif()

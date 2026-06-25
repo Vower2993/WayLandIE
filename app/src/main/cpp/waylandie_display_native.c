@@ -36,10 +36,19 @@
 /* ------------------------------------------------------------------
  * JNI_OnLoad — installs the native crash handler (sigaction + sigaltstack)
  * as soon as the library is loaded. The crash directory is obtained from
- * WayLandIEApplication.getNativeCrashDir() via JNI so we don't hardcode
- * the path. If the Java call fails (early load, context not ready), we
- * fall back to /data/data/io.waylandie.display/files/logs/ which is the
+ * PluviaApp.getNativeCrashDir() via JNI so we don't hardcode the path.
+ * If the Java call fails (early load, context not ready, method missing),
+ * we fall back to /data/data/com.winnative.cmod/files/logs/ which is the
  * app-private path that always exists.
+ *
+ * CRITICAL: Every FindClass / GetStaticMethodID call that fails leaves a
+ * pending exception in the JNIEnv. If JNI_OnLoad returns with a pending
+ * exception, the JVM propagates it through System.loadLibrary() — and
+ * since the static initializer in WaylandBridgeServer.java only catches
+ * UnsatisfiedLinkError (not NoClassDefFoundError / NoSuchMethodError),
+ * the uncaught exception becomes ExceptionInInitializerError and crashes
+ * the activity instantly with no log captured. We MUST ExceptionClear()
+ * after every JNI call that may fail.
  * ------------------------------------------------------------------ */
 JNIEXPORT jint JNICALL
 JNI_OnLoad(JavaVM *vm, void *reserved) {
@@ -52,15 +61,25 @@ JNI_OnLoad(JavaVM *vm, void *reserved) {
     const char *crash_dir = NULL;
     jstring crash_dir_jstr = NULL;
 
-    /* Try to fetch the crash dir from WayLandIEApplication. */
+    /* Try to fetch the crash dir from PluviaApp (WinNative's Application class). */
     jclass appClass = (*env)->FindClass(env,
-            "io/waylandie/display/WayLandIEApplication");
+            "com/winlator/cmod/app/PluviaApp");
+    if ((*env)->ExceptionCheck(env)) {
+        (*env)->ExceptionClear(env);  /* Class not found — use fallback path */
+    }
     if (appClass != NULL) {
         jmethodID getter = (*env)->GetStaticMethodID(env, appClass,
                 "getNativeCrashDir", "()Ljava/lang/String;");
+        if ((*env)->ExceptionCheck(env)) {
+            (*env)->ExceptionClear(env);  /* Method not found — use fallback */
+        }
         if (getter != NULL) {
             crash_dir_jstr = (jstring)(*env)->CallStaticObjectMethod(env,
                     appClass, getter);
+            if ((*env)->ExceptionCheck(env)) {
+                (*env)->ExceptionClear(env);  /* Call failed — use fallback */
+                crash_dir_jstr = NULL;
+            }
         }
         (*env)->DeleteLocalRef(env, appClass);
     }
@@ -69,8 +88,8 @@ JNI_OnLoad(JavaVM *vm, void *reserved) {
     }
 
     if (crash_dir == NULL || crash_dir[0] == '\0') {
-        /* Fallback — app-private path always exists. */
-        crash_dir = "/data/data/io.waylandie.display/files/logs";
+        /* Fallback — app-private path always exists. Package is com.winnative.cmod. */
+        crash_dir = "/data/data/com.winnative.cmod/files/logs";
     }
 
     // install_native_crash_handler(crash_dir); // Disabled — crash_handler.c not compiled (no backtrace on Android)
@@ -2265,7 +2284,10 @@ static jobject make_ahb_cpu_frame(
         const char *status) {
     jclass frame_class = (*env)->FindClass(
             env,
-            "io/waylandie/display/MainActivity$AhbCpuFrame");
+            "com/winlator/cmod/runtime/display/XServerDisplayActivity$AhbCpuFrame");
+    if ((*env)->ExceptionCheck(env)) {
+        (*env)->ExceptionClear(env);  /* Class not found — return NULL */
+    }
     if (frame_class == NULL) {
         return NULL;
     }
@@ -2275,6 +2297,9 @@ static jobject make_ahb_cpu_frame(
             frame_class,
             "<init>",
             "(Landroid/hardware/HardwareBuffer;IJLjava/lang/String;)V");
+    if ((*env)->ExceptionCheck(env)) {
+        (*env)->ExceptionClear(env);  /* Method not found — return NULL */
+    }
     if (constructor == NULL) {
         (*env)->DeleteLocalRef(env, frame_class);
         return NULL;

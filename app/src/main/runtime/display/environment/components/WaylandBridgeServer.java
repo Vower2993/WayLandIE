@@ -42,9 +42,9 @@ public class WaylandBridgeServer {
 
     static {
         try {
-            System.loadLibrary("waylandie_bridge");
+            System.loadLibrary("waylandie_display_native");
         } catch (UnsatisfiedLinkError e) {
-            Log.e(TAG, "Failed to load waylandie_bridge", e);
+            Log.e(TAG, "Failed to load waylandie_display_native", e);
         }
     }
 
@@ -178,7 +178,7 @@ public class WaylandBridgeServer {
             // Get paths for native present
             String tmpDir = "/data/local/tmp";
             String hookLibDir = "/system/lib64";
-            String driverDir = "/data/user/0/io.waylandie.display/files/adrenotools-driver";
+            String driverDir = "/data/user/0/com.winnative.cmod/files/adrenotools-driver";
             if (driverName == null || driverName.isEmpty()) {
                 driverName = "vulkan.waylandie.a8xx.so";
             }

@@ -1,4 +1,5 @@
-// Override Android API availability checks for the waylandie_bridge target.
+// Override Android API availability checks for the waylandie_display_native
+// and waylandie_bridge_exe targets.
 // The NDK uses __ANDROID_MIN_SDK_VERSION__ to gate function availability.
 // WinNative targets API 26 globally, but our bridge needs API 31+.
 // At runtime, these functions are safe — S24 runs Android 14+ (API 34+).

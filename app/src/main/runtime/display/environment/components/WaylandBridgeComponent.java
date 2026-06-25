@@ -37,7 +37,7 @@ public class WaylandBridgeComponent extends EnvironmentComponent {
         File rootDir = imageFs.getRootDir();
         String nativeLibDir = context.getApplicationInfo().nativeLibraryDir;
 
-        File bridgeBin = new File(nativeLibDir, "libwaylandie_bridge.so");
+        File bridgeBin = new File(nativeLibDir, "libwaylandie_bridge_exe.so");
         if (!bridgeBin.exists()) {
             Log.e(TAG, "Bridge binary not found at " + bridgeBin);
             return;

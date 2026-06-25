@@ -7,9 +7,11 @@
 #   1. libffi 3.4.4     → /tmp/bionic-libs/lib/libffi.a
 #   2. libwayland 1.22  → /tmp/bionic-libs/lib/libwayland-server.a
 #
-# The bridge itself (libwaylandie_bridge.so) is compiled by the regular
-# Gradle externalNativeBuildDebug task — it picks up these static libs via
-# CMakeLists.txt. See app/src/main/cpp/CMakeLists.txt.
+# The bridge itself (libwaylandie_bridge_exe.so — an executable renamed
+# for APK packaging) and the JNI side (libwaylandie_display_native.so)
+# are compiled by the regular Gradle externalNativeBuildDebug task — it
+# picks up these static libs via CMakeLists.txt.
+# See app/src/main/cpp/CMakeLists.txt.
 #
 # Why this exists:
 #   The bridge was previously compiled inside the Ubuntu Focal rootfs using
@@ -305,4 +307,5 @@ echo "  include/ffi.h              : $([ -f "$OUTPUT_DIR/include/ffi.h" ] && ech
 echo ""
 echo "=== ✓ Bionic bridge dependencies ready ==="
 echo "The CMake build (externalNativeBuildDebug) will pick these up via the"
-echo "waylandie_bridge target in app/src/main/cpp/CMakeLists.txt."
+echo "waylandie_bridge_exe + waylandie_display_native targets in"
+echo "app/src/main/cpp/CMakeLists.txt."

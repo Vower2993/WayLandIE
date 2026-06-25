@@ -105,6 +105,7 @@ class ShortcutSettingsComposeDialog private constructor(
     private var gestureProfileManager: GestureProfileManager = GestureProfileManager(context)
     private var contentsManager: ContentsManager = ContentsManager(context)
     private var isArm64EC = false
+    private var displayModeValues: List<String> = listOf("x11", "wayland")
 
 
     // Preset ID lists (parallel to display name lists)
@@ -450,6 +451,14 @@ class ShortcutSettingsComposeDialog private constructor(
         state.screenSizeEntries.value = screenSizeArr
         val screenSize = getShortcutSetting("screenSize", container.getScreenSize())
         selectScreenSize(screenSize)
+
+        // Display mode (X11 / Wayland)
+        val displayModeArr = context.resources.getStringArray(R.array.display_mode_entries).toList()
+        state.displayModeEntries.value = displayModeArr
+        val displayModeValArr = context.resources.getStringArray(R.array.display_mode_values).toList()
+        this.displayModeValues = displayModeValArr
+        val currentDisplayMode = getShortcutSetting("displayMode", container.getDisplayMode())
+        state.selectedDisplayMode.intValue = displayModeValArr.indexOf(currentDisplayMode).coerceAtLeast(0)
 
         // Container selection
         loadContainerList()
@@ -996,7 +1005,7 @@ class ShortcutSettingsComposeDialog private constructor(
             val graphicsDriver = getIdentifierFromEntries(
                 state.graphicsDriverEntries.value, state.selectedGraphicsDriver.intValue
             )
-            val displayMode = getShortcutSetting("displayMode", container.getDisplayMode())
+            val displayMode = this.displayModeValues.getOrElse(state.selectedDisplayMode.intValue) { container.getDisplayMode() }
             saveOverride("displayMode", displayMode, container.getDisplayMode())
             hasContainerOverride = hasContainerOverride or saveOverride("graphicsDriver", graphicsDriver, container.getGraphicsDriver())
 
