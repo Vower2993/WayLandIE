@@ -174,6 +174,8 @@ public class GuestProgramLauncherComponent extends EnvironmentComponent {
     envVars.put("USER", ImageFs.USER);
     envVars.put("TMPDIR", imageFs.getRootDir().getPath() + "/tmp");
     envVars.put("DISPLAY", ":0");
+        envVars.put("WAYLAND_DISPLAY", "wayland-0");
+        envVars.put("XDG_RUNTIME_DIR", imageFs.getRootDir().getPath() + "/usr/tmp/runtime");
 
     String winePath =
         wineProfile == null
@@ -896,6 +898,8 @@ public class GuestProgramLauncherComponent extends EnvironmentComponent {
     envVars.put("WINE_NO_DUPLICATE_EXPLORER", "1");
     envVars.put("PREFIX", rootDir.getPath() + "/usr");
     envVars.put("DISPLAY", ":0");
+        envVars.put("WAYLAND_DISPLAY", "wayland-0");
+        envVars.put("XDG_RUNTIME_DIR", imageFs.getRootDir().getPath() + "/usr/tmp/runtime");
     envVars.put("WINE_DISABLE_FULLSCREEN_HACK", "1");
     envVars.put("GST_PLUGIN_FEATURE_RANK", "ximagesink:3000");
     envVars.put(
