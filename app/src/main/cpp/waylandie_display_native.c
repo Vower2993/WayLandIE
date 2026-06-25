@@ -73,7 +73,7 @@ JNI_OnLoad(JavaVM *vm, void *reserved) {
         crash_dir = "/data/data/io.waylandie.display/files/logs";
     }
 
-    install_native_crash_handler(crash_dir);
+    // install_native_crash_handler(crash_dir); // Disabled — crash_handler.c not compiled (no backtrace on Android)
 
     if (crash_dir_jstr != NULL && crash_dir != NULL) {
         (*env)->ReleaseStringUTFChars(env, crash_dir_jstr, crash_dir);
