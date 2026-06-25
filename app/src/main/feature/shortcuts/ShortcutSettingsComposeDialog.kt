@@ -996,10 +996,9 @@ class ShortcutSettingsComposeDialog private constructor(
             val graphicsDriver = getIdentifierFromEntries(
                 state.graphicsDriverEntries.value, state.selectedGraphicsDriver.intValue
             )
-            hasContainerOverride =
-                val displayMode = getShortcutSetting("displayMode", container.getDisplayMode())
+            val displayMode = getShortcutSetting("displayMode", container.getDisplayMode())
             saveOverride("displayMode", displayMode, container.getDisplayMode())
-            hasContainerOverride or saveOverride("graphicsDriver", graphicsDriver, container.getGraphicsDriver())
+            hasContainerOverride = hasContainerOverride or saveOverride("graphicsDriver", graphicsDriver, container.getGraphicsDriver())
 
             val graphicsDriverConfig = buildGraphicsDriverConfigFromState()
             hasContainerOverride = hasContainerOverride or saveOverride(
