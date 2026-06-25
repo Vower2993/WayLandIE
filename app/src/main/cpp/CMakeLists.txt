@@ -182,3 +182,61 @@ target_link_libraries(fakeinput log dl)
 
 # WaylandIE Bridge target disabled — needs wayland headers + bionic-libs
 # Will be re-enabled once bionic-libs build is integrated into CI.
+
+# === WaylandIE Bridge ===
+# Bionic-compiled Wayland compositor bridge
+# Only build if bionic-libs are available (built by CI)
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/bionic-libs/lib/libwayland-server.a")
+    message(STATUS "bionic-libs found — building waylandie_bridge")
+
+    set(WAYLANDIE_NO_XTEST 1)
+    set(_WAYLAND_SERVER_NOPLUGINS 1)
+
+    add_library(waylandie_bridge SHARED
+        waylandie-wayland-bridge.c
+        waylandie_display_native.c
+        surface_control_cpp_shim.cpp
+        crash_handler.c
+        generated/xdg-shell-protocol.c
+        generated/linux-dmabuf-unstable-v1-protocol.c
+        generated/presentation-time-protocol.c
+        generated/viewporter-protocol.c
+        generated/relative-pointer-unstable-v1-protocol.c
+        generated/pointer-constraints-unstable-v1-protocol.c
+    )
+
+    target_include_directories(waylandie_bridge PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated
+        ${CMAKE_CURRENT_SOURCE_DIR}/bionic-libs/include
+    )
+
+    target_compile_definitions(waylandie_bridge PRIVATE
+        WAYLANDIE_NO_XTEST
+        _WAYLAND_SERVER_NOPLUGINS
+        _GNU_SOURCE
+        __ANDROID_MIN_SDK_VERSION__=31
+    )
+
+    target_compile_options(waylandie_bridge PRIVATE
+        -fPIC -O2 -Wno-unused-function -Wno-implicit-function-declaration
+        -Wno-error=unguarded-availability
+    )
+
+    find_library(log-lib log)
+    find_library(android-lib android)
+    target_link_libraries(waylandie_bridge
+        ${log-lib}
+        ${android-lib}
+        EGL
+        GLESv3
+        vulkan
+        android
+        -Wl,--whole-archive
+        ${CMAKE_CURRENT_SOURCE_DIR}/bionic-libs/lib/libwayland-server.a
+        ${CMAKE_CURRENT_SOURCE_DIR}/bionic-libs/lib/libffi.a
+        -Wl,--no-whole-archive
+    )
+else()
+    message(STATUS "bionic-libs NOT found — skipping waylandie_bridge (will use X11 fallback)")
+endif()

@@ -154,6 +154,7 @@ import com.winlator.cmod.runtime.display.environment.components.PulseAudioCompon
 import com.winlator.cmod.runtime.display.environment.components.SteamClientComponent;
 import com.winlator.cmod.runtime.display.environment.components.SysVSharedMemoryComponent;
 import com.winlator.cmod.runtime.display.environment.components.XServerComponent;
+import com.winlator.cmod.runtime.display.environment.components.WaylandBridgeComponent;
 import com.winlator.cmod.runtime.display.xserver.Atom;
 import com.winlator.cmod.runtime.display.xserver.Pointer;
 import com.winlator.cmod.runtime.display.xserver.Property;
@@ -6134,6 +6135,10 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
         }
 
         // Wine cannot enumerate Android network interfaces; Steam treats that as offline.
+        // Start the WaylandIE bridge alongside the XServer.
+        // The bridge creates wayland-0 socket so Wine can use winewayland.drv
+        // for zero-copy AHB display output.
+        environment.addComponent(new WaylandBridgeComponent());
         environment.addComponent(new NetworkInfoUpdateComponent());
 
         if (shortcut != null && "STEAM".equals(shortcut.getExtra("game_source"))) {
