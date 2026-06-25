@@ -18,7 +18,7 @@ sudo apt-get install -y -qq \
   autoconf automake libtool bison flex gettext \
   pkg-config python3 python3-pip libffi-dev libexpat1-dev \
   libxml2-dev libxml2 libxkbcommon-dev wayland-protocols libwayland-bin libxkbregistry-dev
-pip3 install --user meson ninja 2>&1 | tail -3
+pip3 install --user --break-system-packages "meson>=1.4.0" ninja mako 2>&1 | tail -3
 export PATH="$HOME/.local/bin:$PATH"
 
 echo "=== [1b/9] Download llvm-mingw toolchain (arm64ec PE support) ==="

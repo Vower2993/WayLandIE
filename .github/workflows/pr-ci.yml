@@ -89,8 +89,9 @@ jobs:
 
     - name: Install meson + ninja + wayland-scanner deps
       run: |
-        sudo apt-get install -y -qq meson ninja-build libwayland-bin wayland-protocols libffi-dev libexpat1-dev pkg-config
-        pip3 install --user meson 2>/dev/null || true
+        sudo apt-get install -y -qq ninja-build libwayland-bin wayland-protocols libffi-dev libexpat1-dev pkg-config libxml2-dev libxkbcommon-dev
+        pip3 install --user --break-system-packages meson>=1.4.0 mako
+        echo "$HOME/.local/bin" >> $GITHUB_PATH
 
     - name: Ensure NDK is installed
       run: |
@@ -127,7 +128,7 @@ jobs:
         export NDK_ROOT=$ANDROID_NDK_HOME
         export WORKSPACE=${{ github.workspace }}
         echo "Using NDK: $NDK_ROOT"
-        bash .github/scripts/build-winewayland-driver.sh || echo "WARNING: winewayland driver build failed"
+        bash .github/scripts/build-winewayland-driver.sh 2>&1 || echo "WARNING: winewayland driver build failed (non-fatal)"
 
     - name: Set up JDK 17
       uses: actions/setup-java@v5
