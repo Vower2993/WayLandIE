@@ -6419,7 +6419,6 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
             // Keep winex11.drv enabled as fallback — don't disable it
             // If winewayland.drv loads successfully, it takes priority via GraphicsDriver
             // registry setting. If it fails, winex11.drv provides display output.
-            }
             envVars.put("WINEDLLOVERRIDES", wlOverrides);
             Log.d("XServerDisplayActivity", "WINEDLLOVERRIDES with Wayland: " + wlOverrides);
         }
