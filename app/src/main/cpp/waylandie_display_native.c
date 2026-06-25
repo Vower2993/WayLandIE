@@ -94,7 +94,7 @@ JNI_OnLoad(JavaVM *vm, void *reserved) {
  * reason in the log and Continue is refused — no force-close.
  * ------------------------------------------------------------------ */
 JNIEXPORT jstring JNICALL
-Java_io_waylandie_display_MainActivity_nativeProbeCompositor(JNIEnv *env, jclass clazz) {
+Java_com_winlator_cmod_runtime_display_environment_components_WaylandBridgeServer_nativeProbeCompositor(JNIEnv *env, jclass clazz) {
     (void)clazz;
 
     /* 1. libwaylandie_display_native.so is loaded (we're in it) — pass. */
@@ -170,7 +170,7 @@ Java_io_waylandie_display_MainActivity_nativeProbeCompositor(JNIEnv *env, jclass
 }
 
 JNIEXPORT jstring JNICALL
-Java_io_waylandie_display_MainActivity_nativeStatus(JNIEnv *env, jclass clazz) {
+Java_com_winlator_cmod_runtime_display_environment_components_WaylandBridgeServer_nativeStatus(JNIEnv *env, jclass clazz) {
     (void)clazz;
     return (*env)->NewStringUTF(env, "native-ok-arm64");
 }
@@ -346,7 +346,7 @@ static VkFormat map_drm_format_to_vk_format(uint32_t drm_format) {
 }
 
 JNIEXPORT jstring JNICALL
-Java_io_waylandie_display_MainActivity_nativeProbeKgslDmaBufImport(
+Java_com_winlator_cmod_runtime_display_environment_components_WaylandBridgeServer_nativeProbeKgslDmaBufImport(
         JNIEnv *env,
         jclass clazz,
         jint fd) {
@@ -419,7 +419,7 @@ Java_io_waylandie_display_MainActivity_nativeProbeKgslDmaBufImport(
 }
 
 JNIEXPORT jstring JNICALL
-Java_io_waylandie_display_MainActivity_nativeProbeDmaBufImport(
+Java_com_winlator_cmod_runtime_display_environment_components_WaylandBridgeServer_nativeProbeDmaBufImport(
         JNIEnv *env,
         jclass clazz,
         jint fd,
@@ -1171,7 +1171,7 @@ cleanup:
 }
 
 JNIEXPORT jstring JNICALL
-Java_io_waylandie_display_MainActivity_nativeProbeAhbExport(JNIEnv *env, jclass clazz, jint socket_fd) {
+Java_com_winlator_cmod_runtime_display_environment_components_WaylandBridgeServer_nativeProbeAhbExport(JNIEnv *env, jclass clazz, jint socket_fd) {
     (void)clazz;
 
     AHardwareBuffer_Desc desc = {
@@ -1245,7 +1245,7 @@ Java_io_waylandie_display_MainActivity_nativeProbeAhbExport(JNIEnv *env, jclass 
 }
 
 JNIEXPORT jstring JNICALL
-Java_io_waylandie_display_MainActivity_nativeVulkanProbe(JNIEnv *env, jclass clazz) {
+Java_com_winlator_cmod_runtime_display_environment_components_WaylandBridgeServer_nativeVulkanProbe(JNIEnv *env, jclass clazz) {
     (void)clazz;
 
     char status[512];
@@ -1501,7 +1501,7 @@ Java_io_waylandie_display_MainActivity_nativeVulkanProbe(JNIEnv *env, jclass cla
 }
 
 JNIEXPORT jstring JNICALL
-Java_io_waylandie_display_MainActivity_nativeProbeAdrenoTools(
+Java_com_winlator_cmod_runtime_display_environment_components_WaylandBridgeServer_nativeProbeAdrenoTools(
         JNIEnv *env,
         jclass clazz,
         jstring tmp_dir_string,
@@ -4652,7 +4652,7 @@ static int render_ahb_vk_slot(
 }
 
 JNIEXPORT jstring JNICALL
-Java_io_waylandie_display_MainActivity_nativeRenderProducerFrame(
+Java_com_winlator_cmod_runtime_display_environment_components_WaylandBridgeServer_nativeRenderProducerFrame(
         JNIEnv *env,
         jclass clazz,
         jobject surface,
@@ -4734,7 +4734,7 @@ Java_io_waylandie_display_MainActivity_nativeRenderProducerFrame(
 }
 
 JNIEXPORT jobject JNICALL
-Java_io_waylandie_display_MainActivity_nativeAcquireAhbCpuFrame(
+Java_com_winlator_cmod_runtime_display_environment_components_WaylandBridgeServer_nativeAcquireAhbCpuFrame(
         JNIEnv *env,
         jclass clazz,
         jint requested_width,
@@ -4926,7 +4926,7 @@ Java_io_waylandie_display_MainActivity_nativeAcquireAhbCpuFrame(
 }
 
 JNIEXPORT jstring JNICALL
-Java_io_waylandie_display_MainActivity_nativeExportAhbCpuSlot(
+Java_com_winlator_cmod_runtime_display_environment_components_WaylandBridgeServer_nativeExportAhbCpuSlot(
         JNIEnv *env,
         jclass clazz,
         jint socket_fd,
@@ -5015,7 +5015,7 @@ Java_io_waylandie_display_MainActivity_nativeExportAhbCpuSlot(
 }
 
 JNIEXPORT jobject JNICALL
-Java_io_waylandie_display_MainActivity_nativeAcquireAhbVkFrame(
+Java_com_winlator_cmod_runtime_display_environment_components_WaylandBridgeServer_nativeAcquireAhbVkFrame(
         JNIEnv *env,
         jclass clazz,
         jint requested_width,
@@ -5272,7 +5272,7 @@ static void native_ahb_vk_buffer_release(void *context, int release_fence_fd) {
 }
 
 JNIEXPORT jstring JNICALL
-Java_io_waylandie_display_MainActivity_nativePresentAhbVkDmaBufFrame(
+Java_com_winlator_cmod_runtime_display_environment_components_WaylandBridgeServer_nativePresentAhbVkDmaBufFrame(
         JNIEnv *env,
         jclass clazz,
         jobject surface_control_object,
@@ -5593,7 +5593,7 @@ Java_io_waylandie_display_MainActivity_nativePresentAhbVkDmaBufFrame(
 }
 
 JNIEXPORT jobject JNICALL
-Java_io_waylandie_display_MainActivity_nativeAcquireAhbVkDmaBufFrame(
+Java_com_winlator_cmod_runtime_display_environment_components_WaylandBridgeServer_nativeAcquireAhbVkDmaBufFrame(
         JNIEnv *env,
         jclass clazz,
         jint dmabuf_fd,
@@ -5819,7 +5819,7 @@ Java_io_waylandie_display_MainActivity_nativeAcquireAhbVkDmaBufFrame(
 }
 
 JNIEXPORT jstring JNICALL
-Java_io_waylandie_display_MainActivity_nativeReleaseAhbCpuSlot(
+Java_com_winlator_cmod_runtime_display_environment_components_WaylandBridgeServer_nativeReleaseAhbCpuSlot(
         JNIEnv *env,
         jclass clazz,
         jint slot_index,
@@ -5862,7 +5862,7 @@ Java_io_waylandie_display_MainActivity_nativeReleaseAhbCpuSlot(
 }
 
 JNIEXPORT jstring JNICALL
-Java_io_waylandie_display_MainActivity_nativeReleaseAhbVkSlot(
+Java_com_winlator_cmod_runtime_display_environment_components_WaylandBridgeServer_nativeReleaseAhbVkSlot(
         JNIEnv *env,
         jclass clazz,
         jint slot_index,
@@ -5907,7 +5907,7 @@ Java_io_waylandie_display_MainActivity_nativeReleaseAhbVkSlot(
 }
 
 JNIEXPORT void JNICALL
-Java_io_waylandie_display_MainActivity_nativeResetAhbCpuProducer(JNIEnv *env, jclass clazz) {
+Java_com_winlator_cmod_runtime_display_environment_components_WaylandBridgeServer_nativeResetAhbCpuProducer(JNIEnv *env, jclass clazz) {
     (void)env;
     (void)clazz;
 
@@ -5919,7 +5919,7 @@ Java_io_waylandie_display_MainActivity_nativeResetAhbCpuProducer(JNIEnv *env, jc
 }
 
 JNIEXPORT void JNICALL
-Java_io_waylandie_display_MainActivity_nativeResetAhbVkProducer(JNIEnv *env, jclass clazz) {
+Java_com_winlator_cmod_runtime_display_environment_components_WaylandBridgeServer_nativeResetAhbVkProducer(JNIEnv *env, jclass clazz) {
     (void)env;
     (void)clazz;
 
