@@ -112,6 +112,11 @@ jobs:
           export NDK_ROOT=$ANDROID_NDK_HOME
           echo "Using NDK: $NDK_ROOT"
           bash tools/build-bionic-bridge.sh
+          # Copy bionic-libs to the location CMakeLists.txt expects
+          mkdir -p app/src/main/cpp/bionic-libs
+          cp -r /tmp/bionic-libs/* app/src/main/cpp/bionic-libs/
+          echo "bionic-libs copied to app/src/main/cpp/bionic-libs/"
+          ls app/src/main/cpp/bionic-libs/lib/
         else
           echo "bionic-libs already present — skipping build"
         fi
