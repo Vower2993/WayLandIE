@@ -204,7 +204,7 @@ object ContainerCreation {
             // Install winewayland.drv + winewayland.so + FEXCore DLL
             try {
                 val prefixDir = java.io.File(it.rootDir, ".wine")
-                com.winlator.cmod.runtime.wine.WaylandDriverInstaller.install(context, prefixDir)
+                com.winlator.cmod.runtime.wine.WaylandDriverInstaller.install(context, prefixDir, it.getDisplayMode())
             } catch (e: Exception) {
                 android.util.Log.w("ContainerCreation", "WaylandDriverInstaller: ${e.message}")
             }

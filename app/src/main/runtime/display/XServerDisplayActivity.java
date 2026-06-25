@@ -280,6 +280,7 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
     private Shortcut shortcut;
     private boolean launchedFromPinnedShortcut = false;
     private String graphicsDriver = Container.DEFAULT_GRAPHICS_DRIVER;
+    private String displayMode = Container.DEFAULT_DISPLAY_MODE;
     private HashMap<String, String> graphicsDriverConfig;
     private String audioDriver = Container.DEFAULT_AUDIO_DRIVER;
     private String emulator = Container.DEFAULT_EMULATOR;
@@ -1268,6 +1269,8 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
         }
 
         graphicsDriver = container.getGraphicsDriver();
+        displayMode = getShortcutSetting("displayMode", container.getDisplayMode());
+        Log.d("XServerDisplayActivity", "Display mode: " + displayMode);
         String graphicsDriverConfig = container.getGraphicsDriverConfig();
         audioDriver = container.getAudioDriver();
         emulator = container.getEmulator();
@@ -6141,10 +6144,11 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
         }
 
         // Wine cannot enumerate Android network interfaces; Steam treats that as offline.
-        // Start the WaylandIE bridge alongside the XServer.
-        // The bridge creates wayland-0 socket so Wine can use winewayland.drv
-        // for zero-copy AHB display output.
-        environment.addComponent(new WaylandBridgeComponent());
+        // Start WaylandIE bridge only when display mode is "wayland"
+        if ("wayland".equals(displayMode)) {
+            Log.i("XServerDisplayActivity", "Wayland mode enabled — starting bridge");
+            environment.addComponent(new WaylandBridgeComponent());
+        }
         environment.addComponent(new NetworkInfoUpdateComponent());
 
         if (shortcut != null && "STEAM".equals(shortcut.getExtra("game_source"))) {
@@ -6415,18 +6419,15 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
             exit();
         });
 
-        // Ensure winewayland.drv is enabled and winex11.drv is disabled
-        {
+        // Set Wayland env vars only when display mode is "wayland"
+        if ("wayland".equals(displayMode)) {
             String wlOverrides = envVars.get("WINEDLLOVERRIDES");
             if (wlOverrides == null) wlOverrides = "";
             if (!wlOverrides.contains("winewayland.drv")) {
                 wlOverrides += (wlOverrides.isEmpty() ? "" : ";") + "winewayland.drv=b,native";
             }
-            // Keep winex11.drv enabled as fallback — don't disable it
-            // If winewayland.drv loads successfully, it takes priority via GraphicsDriver
-            // registry setting. If it fails, winex11.drv provides display output.
             envVars.put("WINEDLLOVERRIDES", wlOverrides);
-            Log.d("XServerDisplayActivity", "WINEDLLOVERRIDES with Wayland: " + wlOverrides);
+            Log.d("XServerDisplayActivity", "Wayland WINEDLLOVERRIDES: " + wlOverrides);
         }
         environment.addComponent(guestProgramLauncherComponent);
 
@@ -6460,9 +6461,11 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
         FrameLayout rootView = xServerDisplayFrame;
         xServerView = new XServerSurfaceView(this, xServer);
 
-        // Start the Wayland bridge server for dmabuf-present
-        waylandBridgeServer = new WaylandBridgeServer();
-        waylandBridgeServer.start(xServerView);
+        // Start Wayland bridge server only when display mode is "wayland"
+        if ("wayland".equals(displayMode)) {
+            waylandBridgeServer = new WaylandBridgeServer();
+            waylandBridgeServer.start(xServerView);
+        }
         final VulkanRenderer renderer = xServerView.getRenderer();
         // Match guest libvulkan so imported AHB tiling matches the producer.
         String compositorGraphicsDriver =

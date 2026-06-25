@@ -33,6 +33,7 @@ public class Container {
     public static final String DEFAULT_DDRAWRAPPER = "none";
     public static final String DEFAULT_WINCOMPONENTS = "direct3d=1,directsound=0,directmusic=0,directshow=0,directplay=0,xaudio=0,vcrun2010=1";
     public static final String FALLBACK_WINCOMPONENTS = "direct3d=1,directsound=1,directmusic=1,directshow=1,directplay=1,xaudio=1,vcrun2010=1";
+    public static final String DEFAULT_DISPLAY_MODE = "x11"; // "x11" or "wayland"
     public static final String DEFAULT_DRIVES = "D:" + Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS).getAbsolutePath() + "F:" + Environment.getExternalStorageDirectory().getAbsolutePath();
     public static final byte STARTUP_SELECTION_NORMAL = 0;
     public static final byte STARTUP_SELECTION_ESSENTIAL = 1;
@@ -43,6 +44,7 @@ public class Container {
     private String screenSize = DEFAULT_SCREEN_SIZE;
     private String envVars = DEFAULT_ENV_VARS;
     private String graphicsDriver = DEFAULT_GRAPHICS_DRIVER;
+    private String displayMode = DEFAULT_DISPLAY_MODE;
     private String graphicsDriverConfig = DEFAULT_GRAPHICSDRIVERCONFIG;
     private String dxwrapper = DEFAULT_DXWRAPPER;
     private String dxwrapperConfig = "";
@@ -150,6 +152,9 @@ public class Container {
     public void setGraphicsDriver(String graphicsDriver) {
         this.graphicsDriver = graphicsDriver;
     }
+
+    public String getDisplayMode() { return displayMode; }
+    public void setDisplayMode(String displayMode) { this.displayMode = displayMode; }
 
     public String getGraphicsDriverConfig() { return this.graphicsDriverConfig; }
 
@@ -413,6 +418,7 @@ public class Container {
             data.put("cpuList", cpuList);
             data.put("cpuListWoW64", cpuListWoW64);
             data.put("graphicsDriver", graphicsDriver);
+            data.put("displayMode", displayMode);
             data.put("graphicsDriverConfig", graphicsDriverConfig);
             data.put("emulator", emulator);
             data.put("emulator64", emulator64);
@@ -474,6 +480,8 @@ public class Container {
                 case "cpuListWoW64" :
                     setCPUListWoW64(data.getString(key));
                     break;
+                case "displayMode" :
+                    this.displayMode = value.toString(); break;
                 case "graphicsDriver" :
                     setGraphicsDriver(data.getString(key));
                     break;

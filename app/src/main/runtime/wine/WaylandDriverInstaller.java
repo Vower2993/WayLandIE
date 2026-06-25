@@ -16,7 +16,7 @@ public final class WaylandDriverInstaller {
     private static final String TAG = "WaylandDriverInstaller";
     private static final String ASSET = "winewayland-driver.zip";
 
-    public static boolean install(Context ctx, File prefix) {
+    public static boolean install(Context ctx, File prefix, String displayMode) {
         Log.i(TAG, "Installing winewayland driver to " + prefix);
         try {
             InputStream is = ctx.getAssets().open(ASSET);
@@ -46,6 +46,11 @@ public final class WaylandDriverInstaller {
                 copyIfExists(prefix, "lib/wine/aarch64-windows/winewayland.drv", system32);
                 copyIfExists(prefix, "lib/wine/aarch64-windows/libarm64ecfex.dll", system32);
                 copyIfExists(prefix, "lib/wine/aarch64-windows/ntdll.dll", system32);
+            }
+            // Set GraphicsDriver=winewayland.drv only when display mode is wayland
+            if (!"wayland".equals(displayMode)) {
+                Log.i(TAG, "Display mode is not wayland — skipping GraphicsDriver");
+                return true;
             }
             // Set GraphicsDriver=winewayland.drv in system.reg
             // Wine reads this to decide which display driver to load.
