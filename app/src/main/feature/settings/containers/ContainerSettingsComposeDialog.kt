@@ -90,6 +90,7 @@ class ContainerSettingsComposeDialog @JvmOverloads constructor(
     private val context = activity
     private val dialog: Dialog
     private val state = GameSettingsStateHolder()
+    private var displayModeValues: List<String> = listOf("x11", "wayland")
     private val manager = ContainerManager(context)
     private val contentsManager = ContentsManager(context)
     private var isArm64EC = false
@@ -488,7 +489,8 @@ class ContainerSettingsComposeDialog @JvmOverloads constructor(
         val displayModeArr = context.resources.getStringArray(R.array.display_mode_entries).toList()
         state.displayModeEntries.value = displayModeArr
         val displayModeValArr = context.resources.getStringArray(R.array.display_mode_values).toList()
-        val currentDisplayMode = if (isEditMode) container.displayMode else Container.DEFAULT_DISPLAY_MODE
+        this.displayModeValues = displayModeValArr
+        val currentDisplayMode = c?.displayMode ?: Container.DEFAULT_DISPLAY_MODE
         state.selectedDisplayMode.intValue = displayModeValArr.indexOf(currentDisplayMode).coerceAtLeast(0)
         val graphicsDriverArr = context.resources.getStringArray(R.array.graphics_driver_entries).toList()
         state.graphicsDriverEntries.value = graphicsDriverArr
@@ -771,7 +773,7 @@ class ContainerSettingsComposeDialog @JvmOverloads constructor(
             c.setEnvVars(envVarsStr)
             c.setCPUList(cpuList)
             c.setCPUListWoW64(cpuListWoW64)
-            val displayMode = displayModeValArr.getOrElse(state.selectedDisplayMode.intValue) { Container.DEFAULT_DISPLAY_MODE }
+            val displayMode = this.displayModeValues.getOrElse(state.selectedDisplayMode.intValue) { Container.DEFAULT_DISPLAY_MODE }
             c.setDisplayMode(displayMode)
             c.setGraphicsDriver(graphicsDriver)
             c.setGraphicsDriverConfig(graphicsDriverConfig)
