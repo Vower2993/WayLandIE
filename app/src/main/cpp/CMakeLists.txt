@@ -218,10 +218,15 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/bionic-libs/lib/libwayland-server.a")
         __ANDROID_MIN_SDK_VERSION__=31
     )
 
+    # Override the min SDK version for this target only.
+    # The NDK uses __ANDROID_MIN_SDK_VERSION__ to gate API availability.
+    # WinNative targets API 26 globally, but our bridge needs API 31+
+    # (ASurfaceTransaction_setCrop, AHardwareBuffer_getId, memfd_create).
+    # At runtime these are safe — S24 runs Android 14+ (API 34+).
     target_compile_options(waylandie_bridge PRIVATE
         -fPIC -O2 -Wno-unused-function -Wno-implicit-function-declaration
-        -Wno-error=unguarded-availability
-        -Wno-error=unguarded-availability-new
+        -U__ANDROID_MIN_SDK_VERSION__
+        -D__ANDROID_MIN_SDK_VERSION__=31
         -D__ANDROID_API__=31
     )
 
