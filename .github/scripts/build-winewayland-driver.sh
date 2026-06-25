@@ -556,7 +556,7 @@ export WAYLAND_EGL_CFLAGS="-I$BIONIC_LIBS/include"
 export WAYLAND_EGL_LIBS="-L$BIONIC_LIBS/lib -lwayland-egl"
 
 # xkbcommon — needed by winewayland.so for keyboard layout handling
-export XKB_CFLAGS="-I$BIONIC_LIBS/include"
+export XKB_CFLAGS="-I$BIONIC_LIBS/include -I/usr/include"
 export XKB_LIBS="-L$BIONIC_LIBS/lib -lxkbcommon"
 
 export WAYLAND_SCANNER="$(which wayland-scanner)"
@@ -565,6 +565,7 @@ export WAYLAND_SCANNER="$(which wayland-scanner)"
 # (win32u/window.c calls it unconditionally; if SONAME_LIBVULKAN is undefined,
 # the function is #ifdef'd out in vulkan.c, causing a link error)
 # NDK provides libvulkan.so at sysroot/usr/lib/aarch64-linux-android/28/
+export CPPFLAGS="-I$BIONIC_LIBS/include -I/usr/include"
 export ac_cv_lib_soname_vulkan=libvulkan.so
 export ac_cv_lib_vulkan_vkGetInstanceProcAddr=yes
 
