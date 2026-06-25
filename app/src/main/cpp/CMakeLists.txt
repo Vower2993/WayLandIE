@@ -221,6 +221,8 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/bionic-libs/lib/libwayland-server.a")
     target_compile_options(waylandie_bridge PRIVATE
         -fPIC -O2 -Wno-unused-function -Wno-implicit-function-declaration
         -Wno-error=unguarded-availability
+        -Wno-error=unguarded-availability-new
+        -D__ANDROID_API__=31
     )
 
     find_library(log-lib log)
