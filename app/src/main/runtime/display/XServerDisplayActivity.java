@@ -6135,10 +6135,6 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
         }
 
         // Wine cannot enumerate Android network interfaces; Steam treats that as offline.
-        // Start the WaylandIE bridge alongside the XServer.
-        // The bridge creates wayland-0 socket so Wine can use winewayland.drv
-        // for zero-copy AHB display output.
-        environment.addComponent(new WaylandBridgeComponent());
         environment.addComponent(new NetworkInfoUpdateComponent());
 
         if (shortcut != null && "STEAM".equals(shortcut.getExtra("game_source"))) {
@@ -6225,31 +6221,9 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
                     String currentOverrides = envVars.get("WINEDLLOVERRIDES");
                     String planWOverride = "lsteamclient=";
                     if (currentOverrides == null || currentOverrides.isEmpty()) {
-                        // Ensure winewayland.drv is enabled and winex11.drv is disabled
-                    String wlOverrides = envVars.get("WINEDLLOVERRIDES");
-                    if (wlOverrides == null) wlOverrides = "";
-                    if (!wlOverrides.contains("winewayland.drv")) {
-                        wlOverrides += (wlOverrides.isEmpty() ? "" : ";") + "winewayland.drv=b,native";
-                    }
-                    if (!wlOverrides.contains("winex11.drv=d")) {
-                        wlOverrides += (wlOverrides.isEmpty() ? "" : ";") + "winex11.drv=d";
-                    }
-                    envVars.put("WINEDLLOVERRIDES", wlOverrides);
-                    Log.d("XServerDisplayActivity", "WINEDLLOVERRIDES with Wayland: " + wlOverrides);
-                    // Original code:
+                                            // Original code:
                     } else if (!currentOverrides.contains("lsteamclient=")) {
-                        // Ensure winewayland.drv is enabled and winex11.drv is disabled
-                    String wlOverrides = envVars.get("WINEDLLOVERRIDES");
-                    if (wlOverrides == null) wlOverrides = "";
-                    if (!wlOverrides.contains("winewayland.drv")) {
-                        wlOverrides += (wlOverrides.isEmpty() ? "" : ";") + "winewayland.drv=b,native";
-                    }
-                    if (!wlOverrides.contains("winex11.drv=d")) {
-                        wlOverrides += (wlOverrides.isEmpty() ? "" : ";") + "winex11.drv=d";
-                    }
-                    envVars.put("WINEDLLOVERRIDES", wlOverrides);
-                    Log.d("XServerDisplayActivity", "WINEDLLOVERRIDES with Wayland: " + wlOverrides);
-                    // Original code:
+                                            // Original code:
                     }
                     Log.i("XServerDisplayActivity",
                             "Steam Launcher: WINEDLLOVERRIDES set to '"
