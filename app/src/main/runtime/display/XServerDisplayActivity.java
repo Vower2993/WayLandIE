@@ -155,6 +155,7 @@ import com.winlator.cmod.runtime.display.environment.components.SteamClientCompo
 import com.winlator.cmod.runtime.display.environment.components.SysVSharedMemoryComponent;
 import com.winlator.cmod.runtime.display.environment.components.XServerComponent;
 import com.winlator.cmod.runtime.display.environment.components.WaylandBridgeComponent;
+import com.winlator.cmod.runtime.display.environment.components.WaylandBridgeServer;
 import com.winlator.cmod.runtime.display.xserver.Atom;
 import com.winlator.cmod.runtime.display.xserver.Pointer;
 import com.winlator.cmod.runtime.display.xserver.Property;
@@ -249,6 +250,7 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
             "cmd"
     ));
     private XServerSurfaceView xServerView;
+    private WaylandBridgeServer waylandBridgeServer;
     private InputControlsView inputControlsView;
     private boolean inputControlsRevealAllowed = false;
     private TouchpadView touchpadView;
@@ -2922,6 +2924,10 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
 
             stopXServer("forced cleanup (" + trigger + ")");
             xServer = null;
+            if (waylandBridgeServer != null) {
+                waylandBridgeServer.stop();
+                waylandBridgeServer = null;
+            }
             xServerView = null;
 
             if (remaining.isEmpty()) {
@@ -6453,6 +6459,10 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
     private void setupUI() {
         FrameLayout rootView = xServerDisplayFrame;
         xServerView = new XServerSurfaceView(this, xServer);
+
+        // Start the Wayland bridge server for dmabuf-present
+        waylandBridgeServer = new WaylandBridgeServer();
+        waylandBridgeServer.start(xServerView);
         final VulkanRenderer renderer = xServerView.getRenderer();
         // Match guest libvulkan so imported AHB tiling matches the producer.
         String compositorGraphicsDriver =
