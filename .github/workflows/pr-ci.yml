@@ -104,14 +104,15 @@ jobs:
       run: |
         if [ ! -d app/src/main/cpp/bionic-libs/lib ] || [ ! -f app/src/main/cpp/bionic-libs/lib/libwayland-server.a ]; then
           export ANDROID_HOME=${{ env.ANDROID_HOME }}
-          export ANDROID_NDK_HOME=${{ env.ANDROID_HOME }}/ndk/27.3.13750724
+          export ANDROID_NDK_HOME=$(ls -d $ANDROID_HOME/ndk/* 2>/dev/null | head -1)
+          export NDK_ROOT=$ANDROID_NDK_HOME
           bash tools/build-bionic-bridge.sh
         fi
 
     - name: Build winewayland driver (winewayland.drv + winewayland.so + ntdll.dll + FEXCore DLL)
       run: |
         export ANDROID_HOME=${{ env.ANDROID_HOME }}
-        export ANDROID_NDK_HOME=${{ env.ANDROID_HOME }}/ndk/27.3.13750724
+        export ANDROID_NDK_HOME=$(ls -d $ANDROID_HOME/ndk/* 2>/dev/null | head -1)
         export WORKSPACE=${{ github.workspace }}
         bash .github/scripts/build-winewayland-driver.sh || echo "WARNING: winewayland driver build failed"
 
