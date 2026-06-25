@@ -93,7 +93,8 @@ android {
                 cppFlags ''
                 arguments "-DCMAKE_SHARED_LINKER_FLAGS=-Wl,-z,max-page-size=16384",
                           "-DCMAKE_EXE_LINKER_FLAGS=-Wl,-z,max-page-size=16384",
-                          "-DANDROID_STL=c++_shared"
+                          "-DANDROID_STL=c++_shared",
+                          "-DANDROID_PLATFORM=android-31"
             }
         }
 
