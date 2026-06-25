@@ -225,4 +225,12 @@
     </string-array>
     <string-array name="wine_entries">
     </string-array>
+    <string-array name="display_mode_entries">
+        <item>@string/display_mode_x11</item>
+        <item>@string/display_mode_wayland</item>
+    </string-array>
+    <string-array name="display_mode_values">
+        <item>x11</item>
+        <item>wayland</item>
+    </string-array>
 </resources>

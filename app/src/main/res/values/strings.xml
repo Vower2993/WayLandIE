@@ -1432,4 +1432,7 @@ Installed path:
     <string name="file_manager_delete_failed">Delete failed</string>
     <string name="file_manager_rename_failed">Rename failed</string>
     <string name="file_manager_create_folder_failed">Create folder failed</string>
+    <string name="display_mode">Display Mode</string>
+    <string name="display_mode_x11">X11 (Default)</string>
+    <string name="display_mode_wayland">Wayland (Zero-copy AHB)</string>
 </resources>

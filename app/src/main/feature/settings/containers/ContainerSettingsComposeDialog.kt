@@ -485,6 +485,11 @@ class ContainerSettingsComposeDialog @JvmOverloads constructor(
         state.screenSizeEntries.value = screenSizeArr
         selectScreenSize(c?.getScreenSize() ?: Container.DEFAULT_SCREEN_SIZE)
 
+        val displayModeArr = context.resources.getStringArray(R.array.display_mode_entries).toList()
+        state.displayModeEntries.value = displayModeArr
+        val displayModeValArr = context.resources.getStringArray(R.array.display_mode_values).toList()
+        val currentDisplayMode = if (isEditMode) container.displayMode else Container.DEFAULT_DISPLAY_MODE
+        state.selectedDisplayMode.intValue = displayModeValArr.indexOf(currentDisplayMode).coerceAtLeast(0)
         val graphicsDriverArr = context.resources.getStringArray(R.array.graphics_driver_entries).toList()
         state.graphicsDriverEntries.value = graphicsDriverArr
         selectByIdentifier(
@@ -766,6 +771,8 @@ class ContainerSettingsComposeDialog @JvmOverloads constructor(
             c.setEnvVars(envVarsStr)
             c.setCPUList(cpuList)
             c.setCPUListWoW64(cpuListWoW64)
+            val displayMode = displayModeValArr.getOrElse(state.selectedDisplayMode.intValue) { Container.DEFAULT_DISPLAY_MODE }
+            c.setDisplayMode(displayMode)
             c.setGraphicsDriver(graphicsDriver)
             c.setGraphicsDriverConfig(graphicsDriverConfig)
             c.setDXWrapper(dxwrapper)
