@@ -70,8 +70,14 @@ public final class WaylandDriverInstaller {
             String videoKey = "[System\\\\CurrentControlSet\\\\Control\\\\Video\\\\{00000000-0000-0000-0000-000000000000}\\\\0000]";
             String graphicsValue = "\"GraphicsDriver\"=\"winewayland.drv\"";
 
-            // Remove old GraphicsDriver entries
-            reg = reg.replaceAll("\"GraphicsDriver\"=\"[^"]*\"\n?", "");
+            // Remove old GraphicsDriver entries (simple string search, no regex)
+            int gIdx = reg.indexOf("\"GraphicsDriver\"");
+            while (gIdx >= 0) {
+                int eol = reg.indexOf("\n", gIdx);
+                if (eol < 0) eol = reg.length();
+                reg = reg.substring(0, gIdx) + reg.substring(eol);
+                gIdx = reg.indexOf("\"GraphicsDriver\"", gIdx);
+            }
 
             if (reg.contains(videoKey)) {
                 reg = reg.replace(videoKey, videoKey + "\n" + graphicsValue);
