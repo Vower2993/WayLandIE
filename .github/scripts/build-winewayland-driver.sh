@@ -555,6 +555,10 @@ export WAYLAND_SERVER_LIBS="-L$BIONIC_LIBS/lib -lwayland-server -lffi -landroid-
 export WAYLAND_EGL_CFLAGS="-I$BIONIC_LIBS/include"
 export WAYLAND_EGL_LIBS="-L$BIONIC_LIBS/lib -lwayland-egl"
 
+# xkbcommon — needed by winewayland.so for keyboard layout handling
+export XKB_CFLAGS="-I$BIONIC_LIBS/include"
+export XKB_LIBS="-L$BIONIC_LIBS/lib -lxkbcommon"
+
 export WAYLAND_SCANNER="$(which wayland-scanner)"
 
 # Pre-seed Vulkan soname cache so vulkan_update_surfaces gets compiled
