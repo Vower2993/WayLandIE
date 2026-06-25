@@ -1060,6 +1060,12 @@ private fun GeneralSection(
                     selectedIndex = state.selectedScreenSize.intValue,
                     onSelected = { state.selectedScreenSize.intValue = it }
                 )
+                SettingDropdown(
+                    label = stringResource(R.string.display_mode),
+                    entries = state.displayModeEntries.value,
+                    selectedIndex = state.selectedDisplayMode.intValue,
+                    onSelected = { state.selectedDisplayMode.intValue = it }
+                )
             }
             if (!isContainer) {
                 Box(Modifier.weight(1f)) {
