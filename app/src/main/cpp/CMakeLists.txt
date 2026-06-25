@@ -180,11 +180,9 @@ add_library(fakeinput SHARED
 target_compile_options(fakeinput PRIVATE -Wall -Wextra -fvisibility=hidden)
 target_link_libraries(fakeinput log dl)
 
-# === WaylandIE Bridge ===
-# Bionic-compiled Wayland compositor bridge
-# Receives dmabuf from Wine's winewayland.drv, forwards AHB to Android Surface
-set(WAYLANDIE_NO_XTEST 1)
-set(_WAYLAND_SERVER_NOPLUGINS 1)
+# === WaylandIE Bridge (DISABLED — needs wayland headers + bionic-libs) ===
+# Will be re-enabled once bionic-libs build is integrated into CI.
+
 
 add_library(waylandie_bridge SHARED
     waylandie-wayland-bridge.c
