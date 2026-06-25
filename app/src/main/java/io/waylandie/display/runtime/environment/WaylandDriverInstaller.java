@@ -115,19 +115,59 @@ public final class WaylandDriverInstaller {
                 log("  WARNING: arm64ec ntdll.dll is suspiciously small — FEX may still crash");
             }
 
-            // === PE header patching REMOVED ===
-            // d37a675 proved that WINE_KERNEL_STACK_SIZE=8192 alone is sufficient
-            // to prevent the FEX DllMain stack overflow. PE header patching was
-            // added in commit 303a802 and REINTRODUCED the stack overflow.
-            // The patcher modifies SizeOfStackReserve in exe files, but the
-            // user's custom proton-armec ntdll.so appears to ignore or cap
-            // the value, causing Wine to fall back to 1MB native stack.
-            // With WINE_KERNEL_STACK_SIZE=8192 (kernel stack = 8MB), FEX's
-            // DllMain runs on the kernel stack during initial process startup,
-            // which has enough space. The native stack is only used later
-            // (after FEX has already initialized).
+            // === PE header patching: SizeOfStackReserve → 8MB ===
             //
-            // DO NOT re-enable PE patching — it causes the regression.
+            // ROOT CAUSE (found by source-level analysis of proton-wine's
+            // init_thread_stack in dlls/ntdll/unix/thread.c):
+            //
+            // Wine allocates MULTIPLE stacks per thread:
+            //   1. Kernel stack: uses kernel_stack_size (8MB via WINE_KERNEL_STACK_SIZE) ✓
+            //   2. WoW64 64-bit stack: HARDCODED 0x40000 (256KB) — not affected by env var
+            //   3. WoW64 32-bit stack: uses PE header SizeOfStackReserve (1MB default)
+            //   4. ARM64EC emulator stack: HARDCODED 0x40000 (256KB) — not affected
+            //   5. Native stack: uses PE header SizeOfStackReserve (1MB default)
+            //
+            // FEX's libarm64ecfex.dll DllMain runs on stack #3 or #5 (the
+            // native/WoW64 stack), NOT on the kernel stack. WINE_KERNEL_STACK_SIZE
+            // only affects the kernel stack (#1), so it does NOT help FEX.
+            //
+            // The previous diagnosis (commit 74193cd) was WRONG: it claimed
+            // WINE_KERNEL_STACK_SIZE=8192 alone was sufficient, but that was
+            // never tested with an x86 game that loads FEX. The new trace
+            // (launch-trace-2026-06-25_02-47-59.txt) proves the stack overflow
+            // persists with WINE_KERNEL_STACK_SIZE=8192 set:
+            //   00fc:err:module:hacks_init HACK: setting kernel_stack_size to 8192KB.
+            //   00fc:err:virtual:virtual_setup_exception stack overflow 432 bytes
+            //     stack 0x100800000-0x100801000-0x1008ffd20  ← only 1MB
+            //
+            // The previous claim that "ntdll.so ignores SizeOfStackReserve" was
+            // also wrong — the source clearly shows virtual_alloc_thread_stack
+            // uses main_image_info.MaximumStackSize (from PE header) when
+            // reserve_size=0:
+            //   if (!reserve_size) reserve_size = main_image_info.MaximumStackSize;
+            //
+            // FIX: Patch SizeOfStackReserve to 8MB in ALL exe files:
+            //   - Builtin exes in proton lib/wine/{arch}-windows/
+            //   - Prefix exes in .wine/drive_c/windows/system32/ and syswow64/
+            //
+            // The "regression" observed in 303a802 was from mscoree=d (added
+            // in the same commit), NOT from PE patching. mscoree=d crashes
+            // explorer.exe. PE patching is safe and necessary.
+            log("=== PE header patching: SizeOfStackReserve → 8MB ===");
+            patchExeStackReserve(prefix);
+
+            // Also patch exes in the Wine prefix's system32/ and syswow64/.
+            // The prefix exes are real files (copied from prefixPack.txz),
+            // NOT symlinks, so they need independent patching.
+            File imagefsRoot = new File(ctx.getFilesDir(), "imagefs");
+            File winePrefix = new File(new File(imagefsRoot, "home"), "xuser/.wine");
+            File system32 = new File(winePrefix, "drive_c/windows/system32");
+            File syswow64 = new File(winePrefix, "drive_c/windows/syswow64");
+            log("  patching prefix system32/: " + system32.getAbsolutePath());
+            patchExeStackReserveInDir(system32);
+            log("  patching prefix syswow64/: " + syswow64.getAbsolutePath());
+            patchExeStackReserveInDir(syswow64);
+            log("=== PE header patching complete ===");
 
             return true;
         } catch (IOException ioe) {
@@ -312,6 +352,38 @@ public final class WaylandDriverInstaller {
             return true;
         } finally {
             raf.close();
+        }
+    }
+
+    /**
+     * Patch a single game exe's SizeOfStackReserve to 8MB. Called by
+     * WineRunner.execWine() before launching Wine, so the game's main
+     * thread gets 8MB stack (enough for FEX DllMain + game init).
+     *
+     * This is needed because:
+     *   - Builtin exes (rundll32.exe, explorer.exe, etc.) are patched once
+     *     during install via patchExeStackReserve().
+     *   - Game exes (ROTTR.exe, sekiro.exe, etc.) are NOT in the proton tree
+     *     and are NOT patched during install. They need per-launch patching.
+     *
+     * The patch is idempotent: if the exe already has SizeOfStackReserve >= 8MB,
+     * it returns false (no modification). This means re-running is safe.
+     *
+     * @param exe the game exe file (must be a PE file)
+     * @return true if the file was modified, false if already patched or not a valid PE
+     */
+    public static boolean patchGameExe(File exe) {
+        if (exe == null || !exe.exists() || !exe.isFile()) return false;
+        final long TARGET = 0x800000L; // 8MB
+        try {
+            boolean modified = patchOneExe(exe, TARGET);
+            if (modified) {
+                log("  [game-exe] patched " + exe.getName() + " → 8MB stack reserve");
+            }
+            return modified;
+        } catch (IOException e) {
+            log("  [game-exe] PATCH FAIL: " + exe.getName() + " — " + e.getMessage());
+            return false;
         }
     }
 

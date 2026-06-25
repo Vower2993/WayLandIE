@@ -3648,14 +3648,48 @@ static void emit_pointer_motion(struct server_state *state, double x, double y, 
            x, y, emitted, skipped, total_pointers,
            (void *)state->focused_surface, time_ms);
     fflush(stdout);
+    /* ALSO log to wayland-input.log for reliable diagnostics (bridge stdout
+     * capture has been unreliable in some traces). Matches the pointer-button
+     * log line so motion and button events can be cross-referenced in the
+     * same file. */
+    input_debug_log("pointer-motion x=%.1f y=%.1f emitted=%d skipped=%d total=%d focused=%p client=%p time=%u",
+           x, y, emitted, skipped, total_pointers,
+           (void *)state->focused_surface, (void *)state->focused_client, time_ms);
 }
 
 static void emit_pointer_button(struct server_state *state, const char *button_state, uint32_t time_ms) {
     int total_pointers = input_resource_count(&state->pointer_resources);
-    if (state->focused_client == NULL) {
-        printf("wayland-shm-ahb pointer-button drop=no-focus-client state=%s pointers=%d time=%u\n",
-                button_state, total_pointers, time_ms);
+    /* Click-through fix: use focused_surface for the NULL check and the
+     * same-client filter, CONSISTENT with emit_pointer_motion().
+     *
+     * The cursor-focus-fix (cd36fb0) introduced focused_client and used it
+     * for both the NULL check AND the filter in emit_pointer_button, while
+     * emit_pointer_motion was left using focused_surface for the filter.
+     * This inconsistency broke clicks even though motion worked: in some
+     * surface-recreation races, focused_client ends up stale relative to
+     * focused_surface, so the button filter `ptr_client != focused_client`
+     * skipped ALL pointers while the motion filter `same_client(ptr,
+     * focused_surface)` still emitted to the matching pointer. The result:
+     * the cursor moved (motion delivered) but taps did nothing (button
+     * skipped). Cursor highlight on hover requires only motion+enter, so
+     * the user saw the button highlight but no click.
+     *
+     * The fix: make button use the SAME filter as motion. When
+     * focused_surface is non-NULL, both filters produce identical results
+     * (because focused_client is set together with focused_surface in
+     * send_surface_focus, so they're in sync). When focused_surface is
+     * NULL (destroyed), both filters skip all pointers — but motion is
+     * ALSO skipped in that case, so the user wouldn't see the cursor move
+     * anyway, and there's no point emitting a button to a surface that
+     * doesn't exist. The cursor-focus-fix's benefit (preserving
+     * focused_client) is retained for the NULL-check early-return path,
+     * which lets us log the drop reason instead of silently returning. */
+    if (state->focused_surface == NULL) {
+        printf("wayland-shm-ahb pointer-button drop=no-focus-surface state=%s pointers=%d client=%p time=%u\n",
+                button_state, total_pointers, (void *)state->focused_client, time_ms);
         fflush(stdout);
+        input_debug_log("pointer-button drop=no-focus-surface state=%s pointers=%d client=%p time=%u",
+                button_state, total_pointers, (void *)state->focused_client, time_ms);
         return;
     }
     uint32_t wl_state = strcmp(button_state, "down") == 0
@@ -3666,7 +3700,9 @@ static void emit_pointer_button(struct server_state *state, const char *button_s
     int skipped = 0;
     struct input_resource_state *pointer;
     wl_list_for_each(pointer, &state->pointer_resources, link) {
-        if (wl_resource_get_client(pointer->resource) != state->focused_client) {
+        /* SAME filter as emit_pointer_motion: skip pointers whose client
+         * differs from the focused surface's client. */
+        if (!resource_same_client(pointer->resource, state->focused_surface)) {
             skipped++;
             continue;
         }
@@ -3683,11 +3719,25 @@ static void emit_pointer_button(struct server_state *state, const char *button_s
                 this_serial, button_state, WAYLANDIE_BTN_LEFT, wl_state,
                 (void *)pointer->resource, time_ms);
         fflush(stdout);
+        input_debug_log("pointer-button-send serial=%u state=%s ptr=%p focused=%p client=%p time=%u",
+                this_serial, button_state, (void *)pointer->resource,
+                (void *)state->focused_surface, (void *)state->focused_client, time_ms);
     }
-    printf("wayland-shm-ahb pointer-button state=%s emitted=%d skipped=%d total=%d focused=%p serial_start=%u time=%u\n",
+    printf("wayland-shm-ahb pointer-button state=%s emitted=%d skipped=%d total=%d focused=%p client=%p serial_start=%u time=%u\n",
             button_state, emitted, skipped, total_pointers,
-            (void *)state->focused_surface, serial_before, time_ms);
+            (void *)state->focused_surface, (void *)state->focused_client, serial_before, time_ms);
     fflush(stdout);
+    /* ALSO log to wayland-input.log via input_debug_log — this is the
+     * KEY diagnostic improvement. The bridge stdout capture has been
+     * unreliable (only 8 lines captured in the 00-08-36 trace, likely
+     * because the wl-bridge-output thread's reader was outpaced by the
+     * bridge's per-event printf spam). wayland-input.log is written
+     * synchronously by input_debug_log (open+write+close per call), so
+     * it's reliable. With this log line in wayland-input.log, we can
+     * diagnose future click failures without depending on bridge stdout. */
+    input_debug_log("pointer-button state=%s emitted=%d skipped=%d total=%d focused=%p client=%p time=%u",
+            button_state, emitted, skipped, total_pointers,
+            (void *)state->focused_surface, (void *)state->focused_client, time_ms);
 }
 
 static void emit_pointer_scroll(struct server_state *state, double hscroll, double vscroll, uint32_t time_ms) {

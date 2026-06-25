@@ -129,6 +129,19 @@ public final class WineRunner {
             bridgeOutputTruncated = false;
         }
 
+        // ALSO clear installerDiagnostics — it's a static StringBuilder that
+        // was NEVER cleared before, so previous launches' diagnostics
+        // (WaylandDriverInstaller output, [bridge] start logs, [cleanup]
+        // logs, [adrenotools] logs) accumulated across runs and showed up
+        // in the trace as duplicate sequences. This made it look like
+        // WineRunner was starting the bridge twice when in reality only
+        // ONE bridge was started (the other was leftover from a previous
+        // launch's installerDiagnostics). Clearing here ensures each trace
+        // shows only the current launch's diagnostics.
+        synchronized (installerDiagnostics) {
+            installerDiagnostics.setLength(0);
+        }
+
         File rootDir = imageFs.getRootDir();
         String nativeLibDir = context.getApplicationInfo().nativeLibraryDir;
 
@@ -153,6 +166,43 @@ public final class WineRunner {
             installerDiagnostics.append("[wayland-installer] EXCEPTION: ")
                 .append(e.getClass().getSimpleName())
                 .append(": ").append(e.getMessage()).append('\n');
+        }
+
+        // Patch game exe's SizeOfStackReserve to 8MB. This is CRITICAL for
+        // x86/x86_64 games that load FEX (libarm64ecfex.dll). FEX's DllMain
+        // needs >1MB of stack, but the default PE SizeOfStackReserve is 1MB.
+        // Wine's init_thread_stack uses the PE header value for the native
+        // and WoW64 stacks — WINE_KERNEL_STACK_SIZE only affects the kernel
+        // stack, not the Windows thread stack that FEX runs on.
+        //
+        // We patch:
+        //   1. The exePath itself (if it's a real file, not "explorer")
+        //   2. Any .exe paths found in extraArgs (e.g. the game exe passed
+        //      as an argument to explorer /desktop=shell,...)
+        //
+        // The patch is idempotent — if the exe already has 8MB stack reserve,
+        // patchOneExe returns false (no modification). Safe to re-run.
+        try {
+            if (exePath != null && !exePath.equals("explorer")) {
+                File exeFile = new File(exePath);
+                if (exeFile.isFile() && exeFile.getName().toLowerCase().endsWith(".exe")) {
+                    WaylandDriverInstaller.patchGameExe(exeFile);
+                }
+            }
+            if (extraArgs != null) {
+                for (String arg : extraArgs) {
+                    if (arg != null && arg.toLowerCase().endsWith(".exe")) {
+                        File argFile = new File(arg);
+                        if (argFile.isFile()) {
+                            WaylandDriverInstaller.patchGameExe(argFile);
+                        }
+                    }
+                }
+            }
+        } catch (Exception e) {
+            android.util.Log.w("WineRunner", "game-exe patching failed: " + e.getMessage());
+            installerDiagnostics.append("[game-exe] PATCH FAIL: ")
+                .append(e.getMessage()).append('\n');
         }
 
         // Set GraphicsDriver=winewayland.drv in system.reg BEFORE launching Wine.
