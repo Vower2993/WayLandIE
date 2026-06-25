@@ -478,7 +478,7 @@ export CXXFLAGS="-O2"
   --without-x --without-opengl --without-vulkan \
   --without-alsa --without-oss --without-pulse --without-cups \
   --without-sane --without-usb --without-sdl --without-gstreamer \
-  --with-freetype --without-fontconfig --without-v4l2 \
+  --without-freetype --without-fontconfig --without-v4l2 \
   --enable-win64 \
   --disable-tests \
   2>&1 | tail -10
@@ -578,7 +578,7 @@ export ac_cv_lib_EGL_eglGetProcAddress=yes
   --without-x \
   --without-alsa --without-oss --without-pulse --without-cups \
   --without-sane --without-usb --without-sdl --without-gstreamer \
-  --with-freetype --without-fontconfig --without-v4l2 \
+  --without-freetype --without-fontconfig --without-v4l2 \
   --enable-win64 \
   --enable-archs=arm64ec,aarch64 \
   --with-mingw=$LLVM_MINGW_DIR/bin/clang \
