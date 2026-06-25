@@ -115,8 +115,8 @@ public class WaylandBridgeServer {
                 java.io.FileDescriptor[] ancillary = client.getAncillaryFileDescriptors();
                 int dmabufFd = -1;
                 if (ancillary != null && ancillary.length > 0) {
-                    try {
-                        dmabufFd = android.os.ParcelFileDescriptor.fromFd(ancillary[0]).getFd();
+                    try (android.os.ParcelFileDescriptor pfd = android.os.ParcelFileDescriptor.dup(ancillary[0])) {
+                        dmabufFd = pfd.getFd();
                     } catch (Exception e) {
                         Log.w(TAG, "Failed to get ancillary fd", e);
                     }
