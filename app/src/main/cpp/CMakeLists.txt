@@ -264,7 +264,13 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/bionic-libs/lib/libwayland-server.a")
     )
 
     set_target_properties(waylandie_bridge_exe PROPERTIES
+        # Android gradle only packages files matching lib*.so in the APK's
+        # lib/ directory. We must name the executable libwaylandie_bridge_exe.so
+        # so it ships inside the APK. At runtime WaylandBridgeComponent finds
+        # it in nativeLibraryDir and marks it executable before exec'ing.
+        PREFIX "lib"
         OUTPUT_NAME "waylandie_bridge_exe"
+        SUFFIX ".so"
         # On Android executables must be PIE.
         POSITION_INDEPENDENT_CODE ON
     )
