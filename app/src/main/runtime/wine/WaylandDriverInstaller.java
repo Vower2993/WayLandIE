@@ -149,6 +149,7 @@ public final class WaylandDriverInstaller {
 
         // Check if the .so was patched (look for VK_KHR_xlib_surface)
         boolean patched = false;
+        String probeInfo = "";
         try {
             byte[] soData = java.nio.file.Files.readAllBytes(soInWinePath.toPath());
             byte[] xlibSearch = "VK_KHR_xlib_surface".getBytes("ASCII");
@@ -159,13 +160,24 @@ public final class WaylandDriverInstaller {
                 }
                 if (match) { patched = true; break; }
             }
+            // Also probe for wayland_surface to see if it's still there
+            byte[] waylandSearch = "wayland_surface".getBytes("ASCII");
+            int waylandCount = 0;
+            for (int i = 0; i <= soData.length - waylandSearch.length; i++) {
+                boolean match = true;
+                for (int j = 0; j < waylandSearch.length; j++) {
+                    if (soData[i + j] != waylandSearch[j]) { match = false; break; }
+                }
+                if (match) waylandCount++;
+            }
+            probeInfo = " wayland_surface_count=" + waylandCount;
         } catch (Exception e) {
             Log.w(TAG, "Failed to check patch status: " + e.getMessage());
         }
 
         writeDiagnostic(ctx, prefix, winePath, "OK: drv=" + driverInSystem32.length()
                 + " so=" + soInWinePath.length() + " GraphicsDriver set"
-                + " surface_patched=" + patched);
+                + " surface_patched=" + patched + probeInfo);
         return true;
     }
 
@@ -269,6 +281,23 @@ public final class WaylandDriverInstaller {
             byte[] search = "VK_KHR_wayland_surface".getBytes("ASCII");
             byte[] replace = "VK_KHR_xlib_surface\0\0\0".getBytes("ASCII");
 
+            // First, search for various substrings to understand the .so's string table
+            String[] probes = {"wayland_surface", "VK_KHR_wayland", "VK_KHR_xlib", "VK_KHR_surface", "winewayland"};
+            StringBuilder probeReport = new StringBuilder();
+            for (String probe : probes) {
+                byte[] probeBytes = probe.getBytes("ASCII");
+                int count = 0;
+                for (int i = 0; i <= data.length - probeBytes.length; i++) {
+                    boolean match = true;
+                    for (int j = 0; j < probeBytes.length; j++) {
+                        if (data[i + j] != probeBytes[j]) { match = false; break; }
+                    }
+                    if (match) count++;
+                }
+                probeReport.append(probe).append("=").append(count).append(" ");
+            }
+            Log.i(TAG, "patchSurfaceExtension: probe '" + soFile.getName() + "' (" + data.length + " bytes): " + probeReport);
+
             int patched = 0;
             for (int i = 0; i <= data.length - search.length; i++) {
                 boolean match = true;
@@ -285,7 +314,7 @@ public final class WaylandDriverInstaller {
                 java.nio.file.Files.write(soFile.toPath(), data);
                 Log.i(TAG, "patchSurfaceExtension: patched " + patched + " occurrence(s) in " + soFile.getName());
             } else {
-                Log.i(TAG, "patchSurfaceExtension: no occurrences found (already patched?) in " + soFile.getName());
+                Log.w(TAG, "patchSurfaceExtension: 'VK_KHR_wayland_surface' NOT FOUND in " + soFile.getName() + " — probe results: " + probeReport);
             }
         } catch (Exception e) {
             Log.w(TAG, "patchSurfaceExtension failed: " + e.getMessage());
