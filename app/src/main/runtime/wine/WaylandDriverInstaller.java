@@ -87,21 +87,23 @@ public final class WaylandDriverInstaller {
     }
 
     /**
-     * Writes a diagnostic file to the container's .wine dir so we can verify
-     * ensureDriverInstalled ran. The user can share this file with us.
+     * Writes a diagnostic file to the app's external logs directory (same place
+     * as wine/fexcore logs) so the user can share it without root access.
      */
     private static void writeDiagnostic(Context ctx, File prefix, String message) {
         try {
-            File diagFile = new File(prefix, "wayland-driver-install.log");
+            File logsDir = com.winlator.cmod.runtime.system.LogManager.getLogsDir(ctx);
+            File diagFile = new File(logsDir, "wayland-driver-install.log");
             java.io.FileWriter fw = new java.io.FileWriter(diagFile, true);
             fw.write("[" + new java.util.Date() + "] " + message + "\n");
             fw.write("  prefix=" + prefix.getAbsolutePath() + "\n");
+            fw.write("  prefix exists=" + prefix.exists() + "\n");
             fw.write("  system32=" + new File(prefix, "drive_c/windows/system32").getAbsolutePath() + "\n");
             fw.write("  system32 exists=" + new File(prefix, "drive_c/windows/system32").exists() + "\n");
             File drv = new File(prefix, "drive_c/windows/system32/winewayland.drv");
-            fw.write("  winewayland.drv exists=" + drv.exists() + " size=" + drv.length() + "\n");
+            fw.write("  winewayland.drv in system32 exists=" + drv.exists() + " size=" + drv.length() + "\n");
             File libDrv = new File(prefix, "lib/wine/aarch64-windows/winewayland.drv");
-            fw.write("  lib/wine/.../winewayland.drv exists=" + libDrv.exists() + " size=" + libDrv.length() + "\n");
+            fw.write("  winewayland.drv in lib/wine exists=" + libDrv.exists() + " size=" + libDrv.length() + "\n");
             // Check if asset exists
             try {
                 java.io.InputStream test = ctx.getAssets().open(ASSET);

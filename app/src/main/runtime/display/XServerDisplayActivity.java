@@ -6154,6 +6154,19 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
             // → nodrv_CreateWindow → "explorer failed to start" → container crash.
             try {
                 File prefixDir = new File(container.getRootDir(), ".wine");
+                // Write diagnostic to logs dir (accessible without root)
+                File logsDir = com.winlator.cmod.runtime.system.LogManager.getLogsDir(this);
+                try {
+                    java.io.FileWriter fw = new java.io.FileWriter(
+                            new File(logsDir, "wayland-driver-install.log"), true);
+                    fw.write("[" + new java.util.Date() + "] ENTERED Wayland block in setupXEnvironment\n");
+                    fw.write("  displayMode=" + displayMode + "\n");
+                    fw.write("  container=" + (container != null ? container.getRootDir() : "null") + "\n");
+                    fw.write("  prefixDir=" + prefixDir.getAbsolutePath() + " exists=" + prefixDir.exists() + "\n");
+                    fw.close();
+                } catch (Exception e) {
+                    Log.e("XServerDisplayActivity", "Failed to write Wayland diagnostic", e);
+                }
                 com.winlator.cmod.runtime.wine.WaylandDriverInstaller
                         .ensureDriverInstalled(this, prefixDir);
             } catch (Exception e) {
