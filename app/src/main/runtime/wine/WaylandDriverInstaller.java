@@ -51,7 +51,21 @@ public final class WaylandDriverInstaller {
      * STATUS_NOT_FOUND (0xc0000135) and fall back to nodrv_CreateWindow,
      * causing "The explorer process failed to start" and container crash.
      */
-    public static boolean ensureDriverInstalled(Context ctx, File prefix) {
+    /**
+     * Called at launch time when display mode is Wayland.
+     * Ensures winewayland.drv + libarm64ecfex.dll + ntdll.dll are in system32
+     * and GraphicsDriver is set in system.reg.
+     *
+     * CRITICAL: Wine's builtin driver loader needs BOTH the PE file (.drv) in
+     * system32 AND the Unix companion (.so) in Wine's install dir
+     * (imageFs.winePath/lib/wine/aarch64-unix/). Without the .so, Wine fails
+     * with STATUS_NOT_FOUND (0xc0000135) even though the .drv is in system32.
+     *
+     * @param ctx       Android context
+     * @param prefix    container's .wine directory (for system32 + system.reg)
+     * @param winePath  Wine install dir (imageFs.winePath = .../opt/proton-9.0-arm64ec)
+     */
+    public static boolean ensureDriverInstalled(Context ctx, File prefix, File winePath) {
         File system32 = new File(prefix, "drive_c/windows/system32");
         File driverInSystem32 = new File(system32, "winewayland.drv");
 
@@ -64,25 +78,56 @@ public final class WaylandDriverInstaller {
                 copyToSystem32(prefix);
             } catch (IOException e) {
                 Log.e(TAG, "ensureDriverInstalled: extraction failed", e);
-                writeDiagnostic(ctx, prefix, "EXTRACTION_FAILED: " + e.getMessage());
+                writeDiagnostic(ctx, prefix, winePath, "EXTRACTION_FAILED: " + e.getMessage());
                 return false;
             }
         } else {
             Log.i(TAG, "ensureDriverInstalled: winewayland.drv already present in system32");
         }
 
+        // CRITICAL: Copy winewayland.drv + winewayland.so to Wine's install dir.
+        // Wine's builtin driver loader looks for the Unix companion .so in
+        // winePath/lib/wine/aarch64-unix/ and the PE in winePath/lib/wine/aarch64-windows/.
+        // Without these, Wine can't load the driver even if the .drv is in system32.
+        if (winePath != null && winePath.isDirectory()) {
+            File wineAarch64Windows = new File(winePath, "lib/wine/aarch64-windows");
+            File wineAarch64Unix = new File(winePath, "lib/wine/aarch64-unix");
+            Log.i(TAG, "ensureDriverInstalled: copying driver to Wine install dir: " + winePath);
+            copyIfExists(prefix, "lib/wine/aarch64-windows/winewayland.drv", wineAarch64Windows);
+            copyIfExists(prefix, "lib/wine/aarch64-unix/winewayland.so", wineAarch64Unix);
+            copyIfExists(prefix, "lib/wine/aarch64-windows/libarm64ecfex.dll", wineAarch64Windows);
+            copyIfExists(prefix, "lib/wine/aarch64-windows/ntdll.dll", wineAarch64Windows);
+            copyIfExists(prefix, "lib/wine/arm64ec-windows/libarm64ecfex.dll",
+                    new File(winePath, "lib/wine/arm64ec-windows"));
+            copyIfExists(prefix, "lib/wine/arm64ec-windows/ntdll.dll",
+                    new File(winePath, "lib/wine/arm64ec-windows"));
+        } else {
+            Log.w(TAG, "ensureDriverInstalled: winePath is null or not a directory — "
+                    + "cannot copy .so companion, driver will fail to load");
+        }
+
         // Verify the driver is actually in system32 now
         if (!driverInSystem32.exists() || driverInSystem32.length() < 1000) {
             Log.e(TAG, "ensureDriverInstalled: winewayland.drv STILL missing from system32 after extraction!");
-            writeDiagnostic(ctx, prefix, "DRIVER_STILL_MISSING after extraction. system32=" + system32.getAbsolutePath() + " exists=" + system32.exists());
+            writeDiagnostic(ctx, prefix, winePath, "DRIVER_STILL_MISSING after extraction");
+            return false;
+        }
+
+        // Verify the .so companion is in Wine's install dir
+        File soInWinePath = new File(winePath, "lib/wine/aarch64-unix/winewayland.so");
+        if (!soInWinePath.exists() || soInWinePath.length() < 1000) {
+            Log.e(TAG, "ensureDriverInstalled: winewayland.so missing from Wine install dir!");
+            writeDiagnostic(ctx, prefix, winePath, "SO_MISSING in winePath: " + soInWinePath.getAbsolutePath());
             return false;
         }
 
         Log.i(TAG, "ensureDriverInstalled: winewayland.drv verified in system32 (" + driverInSystem32.length() + " bytes)");
+        Log.i(TAG, "ensureDriverInstalled: winewayland.so verified in winePath (" + soInWinePath.length() + " bytes)");
 
         // Always set GraphicsDriver (idempotent — removes old entries first)
         setGraphicsDriver(prefix);
-        writeDiagnostic(ctx, prefix, "OK: driver=" + driverInSystem32.length() + " bytes, GraphicsDriver set");
+        writeDiagnostic(ctx, prefix, winePath, "OK: drv=" + driverInSystem32.length()
+                + " so=" + soInWinePath.length() + " GraphicsDriver set");
         return true;
     }
 
@@ -90,7 +135,7 @@ public final class WaylandDriverInstaller {
      * Writes a diagnostic file to the app's external logs directory (same place
      * as wine/fexcore logs) so the user can share it without root access.
      */
-    private static void writeDiagnostic(Context ctx, File prefix, String message) {
+    private static void writeDiagnostic(Context ctx, File prefix, File winePath, String message) {
         try {
             File logsDir = com.winlator.cmod.runtime.system.LogManager.getLogsDir(ctx);
             File diagFile = new File(logsDir, "wayland-driver-install.log");
@@ -98,12 +143,20 @@ public final class WaylandDriverInstaller {
             fw.write("[" + new java.util.Date() + "] " + message + "\n");
             fw.write("  prefix=" + prefix.getAbsolutePath() + "\n");
             fw.write("  prefix exists=" + prefix.exists() + "\n");
+            fw.write("  winePath=" + (winePath != null ? winePath.getAbsolutePath() : "null") + "\n");
+            fw.write("  winePath exists=" + (winePath != null && winePath.exists()) + "\n");
             fw.write("  system32=" + new File(prefix, "drive_c/windows/system32").getAbsolutePath() + "\n");
             fw.write("  system32 exists=" + new File(prefix, "drive_c/windows/system32").exists() + "\n");
             File drv = new File(prefix, "drive_c/windows/system32/winewayland.drv");
             fw.write("  winewayland.drv in system32 exists=" + drv.exists() + " size=" + drv.length() + "\n");
             File libDrv = new File(prefix, "lib/wine/aarch64-windows/winewayland.drv");
-            fw.write("  winewayland.drv in lib/wine exists=" + libDrv.exists() + " size=" + libDrv.length() + "\n");
+            fw.write("  winewayland.drv in prefix lib/wine exists=" + libDrv.exists() + " size=" + libDrv.length() + "\n");
+            if (winePath != null) {
+                File soInWine = new File(winePath, "lib/wine/aarch64-unix/winewayland.so");
+                fw.write("  winewayland.so in winePath exists=" + soInWine.exists() + " size=" + soInWine.length() + "\n");
+                File drvInWine = new File(winePath, "lib/wine/aarch64-windows/winewayland.drv");
+                fw.write("  winewayland.drv in winePath exists=" + drvInWine.exists() + " size=" + drvInWine.length() + "\n");
+            }
             // Check if asset exists
             try {
                 java.io.InputStream test = ctx.getAssets().open(ASSET);

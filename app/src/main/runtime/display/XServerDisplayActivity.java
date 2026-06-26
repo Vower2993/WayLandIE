@@ -6147,13 +6147,13 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
         // Start WaylandIE bridge only when display mode is "wayland"
         if ("wayland".equals(displayMode)) {
             Log.i("XServerDisplayActivity", "Wayland mode enabled — starting bridge");
-            // CRITICAL: Ensure winewayland.drv is in system32 BEFORE Wine starts.
-            // The container may have been created with X11 mode (default) and
-            // later switched to Wayland via shortcut settings. Without this,
-            // Wine can't find winewayland.drv → STATUS_NOT_FOUND (0xc0000135)
-            // → nodrv_CreateWindow → "explorer failed to start" → container crash.
+            // CRITICAL: Ensure winewayland.drv is in system32 AND winewayland.so
+            // is in Wine's install dir BEFORE Wine starts. Without the .so companion,
+            // Wine fails with STATUS_NOT_FOUND (0xc0000135) even though the .drv
+            // is in system32.
             try {
                 File prefixDir = new File(container.getRootDir(), ".wine");
+                File winePath = new File(imageFs.winePath);
                 // Write diagnostic to logs dir (accessible without root)
                 File logsDir = com.winlator.cmod.runtime.system.LogManager.getLogsDir(this);
                 try {
@@ -6163,12 +6163,13 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
                     fw.write("  displayMode=" + displayMode + "\n");
                     fw.write("  container=" + (container != null ? container.getRootDir() : "null") + "\n");
                     fw.write("  prefixDir=" + prefixDir.getAbsolutePath() + " exists=" + prefixDir.exists() + "\n");
+                    fw.write("  winePath=" + winePath.getAbsolutePath() + " exists=" + winePath.exists() + "\n");
                     fw.close();
                 } catch (Exception e) {
                     Log.e("XServerDisplayActivity", "Failed to write Wayland diagnostic", e);
                 }
                 com.winlator.cmod.runtime.wine.WaylandDriverInstaller
-                        .ensureDriverInstalled(this, prefixDir);
+                        .ensureDriverInstalled(this, prefixDir, winePath);
             } catch (Exception e) {
                 Log.e("XServerDisplayActivity", "Failed to ensure Wayland driver installed", e);
             }
