@@ -6471,12 +6471,16 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
         if ("wayland".equals(displayMode)) {
             String wlOverrides = envVars.get("WINEDLLOVERRIDES");
             if (wlOverrides == null) wlOverrides = "";
-            // Force Wine to load our winewayland.drv (native) and disable
-            // winex11.drv entirely. Without disabling winex11.drv, Wine may
-            // fall back to it if the GraphicsDriver registry edit doesn't
-            // match the actual adapter GUID.
+            // winewayland.drv is a BUILTIN driver — it needs the Unix .so
+            // companion (winewayland.so in winePath/lib/wine/aarch64-unix/)
+            // to load. Using "native" alone fails with STATUS_NOT_FOUND
+            // because Wine finds the PE but can't initialize it without the
+            // .so. Use "b,native" so Wine tries builtin loading first
+            // (which uses the .so), then falls back to native PE.
+            // Also disable winex11.drv entirely so Wine doesn't fall back
+            // to X11.
             if (!wlOverrides.contains("winewayland.drv")) {
-                wlOverrides += (wlOverrides.isEmpty() ? "" : ";") + "winewayland.drv=native";
+                wlOverrides += (wlOverrides.isEmpty() ? "" : ";") + "winewayland.drv=b,native";
             }
             if (!wlOverrides.contains("winex11.drv")) {
                 wlOverrides += (wlOverrides.isEmpty() ? "" : ";") + "winex11.drv=";
