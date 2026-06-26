@@ -119,6 +119,8 @@ public final class WaylandDriverInstaller {
             // uses vkCreateXlibSurfaceKHR — the wrapper ignores the X11
             // parameters and uses its internal ANativeWindow*.
             patchSurfaceExtension(new File(wineAarch64Unix, "winewayland.so"));
+            // Also patch the copy in the prefix (in case Wine loads from there)
+            patchSurfaceExtension(new File(prefix, "lib/wine/aarch64-unix/winewayland.so"));
         } else {
             Log.w(TAG, "ensureDriverInstalled: winePath is null or not a directory — "
                     + "cannot copy .so companion, driver will fail to load");
@@ -144,8 +146,26 @@ public final class WaylandDriverInstaller {
 
         // Always set GraphicsDriver (idempotent — removes old entries first)
         setGraphicsDriver(prefix);
+
+        // Check if the .so was patched (look for VK_KHR_xlib_surface)
+        boolean patched = false;
+        try {
+            byte[] soData = java.nio.file.Files.readAllBytes(soInWinePath.toPath());
+            byte[] xlibSearch = "VK_KHR_xlib_surface".getBytes("ASCII");
+            for (int i = 0; i <= soData.length - xlibSearch.length; i++) {
+                boolean match = true;
+                for (int j = 0; j < xlibSearch.length; j++) {
+                    if (soData[i + j] != xlibSearch[j]) { match = false; break; }
+                }
+                if (match) { patched = true; break; }
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "Failed to check patch status: " + e.getMessage());
+        }
+
         writeDiagnostic(ctx, prefix, winePath, "OK: drv=" + driverInSystem32.length()
-                + " so=" + soInWinePath.length() + " GraphicsDriver set");
+                + " so=" + soInWinePath.length() + " GraphicsDriver set"
+                + " surface_patched=" + patched);
         return true;
     }
 
