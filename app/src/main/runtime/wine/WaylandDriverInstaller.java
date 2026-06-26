@@ -64,14 +64,56 @@ public final class WaylandDriverInstaller {
                 copyToSystem32(prefix);
             } catch (IOException e) {
                 Log.e(TAG, "ensureDriverInstalled: extraction failed", e);
+                writeDiagnostic(ctx, prefix, "EXTRACTION_FAILED: " + e.getMessage());
                 return false;
             }
         } else {
             Log.i(TAG, "ensureDriverInstalled: winewayland.drv already present in system32");
         }
+
+        // Verify the driver is actually in system32 now
+        if (!driverInSystem32.exists() || driverInSystem32.length() < 1000) {
+            Log.e(TAG, "ensureDriverInstalled: winewayland.drv STILL missing from system32 after extraction!");
+            writeDiagnostic(ctx, prefix, "DRIVER_STILL_MISSING after extraction. system32=" + system32.getAbsolutePath() + " exists=" + system32.exists());
+            return false;
+        }
+
+        Log.i(TAG, "ensureDriverInstalled: winewayland.drv verified in system32 (" + driverInSystem32.length() + " bytes)");
+
         // Always set GraphicsDriver (idempotent — removes old entries first)
         setGraphicsDriver(prefix);
+        writeDiagnostic(ctx, prefix, "OK: driver=" + driverInSystem32.length() + " bytes, GraphicsDriver set");
         return true;
+    }
+
+    /**
+     * Writes a diagnostic file to the container's .wine dir so we can verify
+     * ensureDriverInstalled ran. The user can share this file with us.
+     */
+    private static void writeDiagnostic(Context ctx, File prefix, String message) {
+        try {
+            File diagFile = new File(prefix, "wayland-driver-install.log");
+            java.io.FileWriter fw = new java.io.FileWriter(diagFile, true);
+            fw.write("[" + new java.util.Date() + "] " + message + "\n");
+            fw.write("  prefix=" + prefix.getAbsolutePath() + "\n");
+            fw.write("  system32=" + new File(prefix, "drive_c/windows/system32").getAbsolutePath() + "\n");
+            fw.write("  system32 exists=" + new File(prefix, "drive_c/windows/system32").exists() + "\n");
+            File drv = new File(prefix, "drive_c/windows/system32/winewayland.drv");
+            fw.write("  winewayland.drv exists=" + drv.exists() + " size=" + drv.length() + "\n");
+            File libDrv = new File(prefix, "lib/wine/aarch64-windows/winewayland.drv");
+            fw.write("  lib/wine/.../winewayland.drv exists=" + libDrv.exists() + " size=" + libDrv.length() + "\n");
+            // Check if asset exists
+            try {
+                java.io.InputStream test = ctx.getAssets().open(ASSET);
+                fw.write("  asset " + ASSET + " openable=YES\n");
+                test.close();
+            } catch (IOException e) {
+                fw.write("  asset " + ASSET + " openable=NO: " + e.getMessage() + "\n");
+            }
+            fw.close();
+        } catch (Exception e) {
+            Log.w(TAG, "Failed to write diagnostic: " + e.getMessage());
+        }
     }
 
     private static void extractZip(Context ctx, File prefix) throws IOException {
