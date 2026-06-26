@@ -248,18 +248,26 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/bionic-libs/lib/libwayland-server.a")
     )
 
     # ------------------------------------------------------------------
-    # Target 2: waylandie_bridge_exe (SHARED library, exec'd as a process)
+    # Target 2: waylandie_bridge_exe (EXECUTABLE, packaged as lib*.so)
     #
-    # CRITICAL: Android Gradle Plugin (AGP) only packages add_library(SHARED)
-    # targets in the APK's lib/ dir. add_executable targets are NOT packaged.
-    # WinNative's own pulseaudio/box64 follow this pattern: build as a SHARED
-    # library (.so), include a main() function, and exec the .so at runtime.
-    # The NDK linker adds the dynamic interpreter (/system/bin/linker64) to
-    # shared libraries that export main(), making them valid PIE executables.
-    # See app/src/main/runtime/display/environment/components/PulseAudioComponent.java
-    # for the reference implementation of this pattern.
+    # The bridge is a standalone Wayland compositor process with main().
+    # It MUST be built as add_executable (NOT add_library SHARED) because:
+    #   - add_executable creates a PIE binary with PT_INTERP segment
+    #     (dynamic linker = /system/bin/linker64) + entry point (_start)
+    #   - The kernel can exec() this binary — ProcessBuilder.start() works
+    #
+    # add_library(SHARED) with -pie does NOT work: -shared takes precedence
+    # over -pie, producing ET_DYN without PT_INTERP. The kernel rejects
+    # exec() with ENOEXEC ("Exec format error"), so the bridge process
+    # never starts, wayland-0 socket is never created, and winewayland.drv's
+    # process_attach fails because wl_display_connect() can't find the socket.
+    #
+    # AGP packaging: add_executable output named libwaylandie_bridge_exe.so
+    # IS packaged by AGP — it matches the lib*.so glob pattern. AGP's CMake
+    # integration copies all lib*.so files from the build output to the APK
+    # lib/ directory regardless of whether they're SHARED libs or executables.
     # ------------------------------------------------------------------
-    add_library(waylandie_bridge_exe SHARED
+    add_executable(waylandie_bridge_exe
         waylandie-wayland-bridge.c
         generated/xdg-shell-protocol.c
         generated/linux-dmabuf-unstable-v1-protocol.c
@@ -270,13 +278,11 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/bionic-libs/lib/libwayland-server.a")
     )
 
     set_target_properties(waylandie_bridge_exe PROPERTIES
+        # Name it libwaylandie_bridge_exe.so so AGP packages it in the APK
+        PREFIX "lib"
         OUTPUT_NAME "waylandie_bridge_exe"
+        SUFFIX ".so"
         POSITION_INDEPENDENT_CODE ON
-        # Link as PIE so the .so can be exec'd as a process (has dynamic
-        # interpreter + entry point). This matches WinNative's pulseaudio
-        # pattern — the .so is both a valid shared library AND a valid
-        # PIE executable.
-        LINK_FLAGS "-pie"
     )
 
     target_include_directories(waylandie_bridge_exe PRIVATE
@@ -293,7 +299,7 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/bionic-libs/lib/libwayland-server.a")
     )
 
     target_compile_options(waylandie_bridge_exe PRIVATE
-        -fPIC -O2 -Wno-unused-function -Wno-implicit-function-declaration
+        -fPIE -O2 -Wno-unused-function -Wno-implicit-function-declaration
         -D__ANDROID_MIN_SDK_VERSION__=31
         -include ${CMAKE_CURRENT_SOURCE_DIR}/android_api_override.h
     )

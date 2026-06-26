@@ -38,11 +38,17 @@ public class WaylandBridgeComponent extends EnvironmentComponent {
         String nativeLibDir = context.getApplicationInfo().nativeLibraryDir;
 
         File bridgeBin = new File(nativeLibDir, "libwaylandie_bridge_exe.so");
+        Log.i(TAG, "Bridge binary path: " + bridgeBin.getAbsolutePath());
+        Log.i(TAG, "Bridge binary exists: " + bridgeBin.exists());
+        Log.i(TAG, "Bridge binary size: " + (bridgeBin.exists() ? bridgeBin.length() : 0) + " bytes");
+
         if (!bridgeBin.exists()) {
             Log.e(TAG, "Bridge binary not found at " + bridgeBin);
+            writeDiagnostic(context, "BRIDGE_BINARY_NOT_FOUND: " + bridgeBin);
             return;
         }
-        bridgeBin.setExecutable(true, false);
+        boolean execSet = bridgeBin.setExecutable(true, false);
+        Log.i(TAG, "Bridge binary setExecutable: " + execSet);
 
         File runtimeDir = new File(new File(rootDir, "usr/tmp"), "runtime");
         if (!runtimeDir.exists()) runtimeDir.mkdirs();
@@ -52,6 +58,10 @@ public class WaylandBridgeComponent extends EnvironmentComponent {
         new File(runtimeDir, "wayland-0").delete();
         new File(runtimeDir, "wayland-0.lock").delete();
         socketNameFile.delete();
+
+        Log.i(TAG, "XDG_RUNTIME_DIR: " + runtimeDir.getAbsolutePath());
+        Log.i(TAG, "runtimeDir exists: " + runtimeDir.exists());
+        Log.i(TAG, "runtimeDir writable: " + runtimeDir.canWrite());
 
         List<String> cmd = new ArrayList<>();
         cmd.add(bridgeBin.getAbsolutePath());
@@ -78,7 +88,7 @@ public class WaylandBridgeComponent extends EnvironmentComponent {
 
         try {
             bridgeProcess = pb.start();
-            Log.i(TAG, "Bridge translator started");
+            Log.i(TAG, "Bridge process started, pid=" + bridgeProcess.pid());
 
             new Thread(() -> {
                 try (java.io.BufferedReader reader = new java.io.BufferedReader(
@@ -92,13 +102,50 @@ public class WaylandBridgeComponent extends EnvironmentComponent {
                 }
             }, "wl-bridge-output").start();
 
-            Thread.sleep(2000);
-            if (socketNameFile.exists()) {
+            // Wait for bridge to create the socket
+            Thread.sleep(3000);
+
+            boolean socketExists = new File(runtimeDir, "wayland-0").exists();
+            boolean socketNameExists = socketNameFile.exists();
+            Log.i(TAG, "After 3s wait: wayland-0 socket exists=" + socketExists
+                    + " socket-name.txt exists=" + socketNameExists);
+
+            // Check if process is still alive
+            boolean alive = bridgeProcess.isAlive();
+            Log.i(TAG, "Bridge process alive: " + alive);
+
+            if (socketNameExists) {
                 String socketName = new String(java.nio.file.Files.readAllBytes(socketNameFile.toPath())).trim();
-                Log.i(TAG, "Wayland socket: " + socketName);
+                Log.i(TAG, "Wayland socket name: " + socketName);
+            }
+
+            if (!alive) {
+                Log.e(TAG, "Bridge process died immediately! Exit code: " + bridgeProcess.exitValue());
+                writeDiagnostic(context, "BRIDGE_DIED: exitCode=" + bridgeProcess.exitValue()
+                        + " socketExists=" + socketExists
+                        + " socketNameExists=" + socketNameExists);
+            } else if (!socketExists) {
+                Log.e(TAG, "Bridge process alive but wayland-0 socket NOT created!");
+                writeDiagnostic(context, "BRIDGE_ALIVE_NO_SOCKET: socketExists=" + socketExists
+                        + " socketNameExists=" + socketNameExists);
+            } else {
+                writeDiagnostic(context, "BRIDGE_OK: socketExists=true processAlive=" + alive);
             }
         } catch (Exception e) {
             Log.e(TAG, "Failed to start bridge", e);
+            writeDiagnostic(context, "BRIDGE_EXCEPTION: " + e.getClass().getName() + ": " + e.getMessage());
+        }
+    }
+
+    private void writeDiagnostic(Context ctx, String message) {
+        try {
+            File logsDir = com.winlator.cmod.runtime.system.LogManager.getLogsDir(ctx);
+            File diagFile = new File(logsDir, "wayland-bridge-startup.log");
+            java.io.FileWriter fw = new java.io.FileWriter(diagFile, true);
+            fw.write("[" + new java.util.Date() + "] " + message + "\n");
+            fw.close();
+        } catch (Exception e) {
+            Log.w(TAG, "Failed to write diagnostic: " + e.getMessage());
         }
     }
 
