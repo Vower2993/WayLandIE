@@ -108,6 +108,21 @@ public final class WaylandDriverInstaller {
         copyIfExists(prefix, "lib/wine/aarch64-windows/ntdll.dll", system32);
     }
 
+    /**
+     * Sets GraphicsDriver=winewayland.drv in system.reg.
+     *
+     * Wine reads this registry value to decide which display driver to load.
+     * Without it, Wine defaults to winex11.drv even if winewayland.drv is
+     * installed in system32/.
+     *
+     * The adapter GUID is generated dynamically during wineboot — we can't
+     * predict it. Instead, we scan for ALL [System\\...\\Control\\Video\\{GUID}\\0000]
+     * keys in system.reg and set GraphicsDriver on each one. This ensures
+     * Wine finds it regardless of which GUID was assigned.
+     *
+     * We also set it under [Software\\Wine\\Drivers] in user.reg as a fallback
+     * (Wine checks this if the system.reg Video key doesn't have GraphicsDriver).
+     */
     private static void setGraphicsDriver(File prefix) {
         File systemReg = new File(prefix, "system.reg");
         if (!systemReg.exists()) {
@@ -116,25 +131,76 @@ public final class WaylandDriverInstaller {
         }
         try {
             String reg = new String(java.nio.file.Files.readAllBytes(systemReg.toPath()));
-            String videoKey = "[System\\\\CurrentControlSet\\\\Control\\\\Video\\\\{00000000-0000-0000-0000-000000000000}\\\\0000]";
             String graphicsValue = "\"GraphicsDriver\"=\"winewayland.drv\"";
 
-            // Remove old GraphicsDriver entries (simple string search, no regex)
-            int gIdx = reg.indexOf("\"GraphicsDriver\"");
-            while (gIdx >= 0) {
-                int eol = reg.indexOf("\n", gIdx);
-                if (eol < 0) eol = reg.length();
-                reg = reg.substring(0, gIdx) + reg.substring(eol);
-                gIdx = reg.indexOf("\"GraphicsDriver\"", gIdx);
+            // Remove old GraphicsDriver entries that point to winex11.drv
+            // (but keep any that the user might have set to other drivers).
+            // We replace any existing GraphicsDriver with winewayland.drv.
+            StringBuilder rebuilt = new StringBuilder();
+            for (String line : reg.split("\n", -1)) {
+                if (line.contains("\"GraphicsDriver\"")) {
+                    rebuilt.append(graphicsValue).append("\n");
+                } else {
+                    rebuilt.append(line).append("\n");
+                }
+            }
+            reg = rebuilt.toString();
+            // Remove trailing extra newline if we added one
+            if (reg.endsWith("\n\n")) {
+                reg = reg.substring(0, reg.length() - 1);
             }
 
-            if (reg.contains(videoKey)) {
-                reg = reg.replace(videoKey, videoKey + "\n" + graphicsValue);
-            } else {
-                reg += "\n" + videoKey + "\n" + graphicsValue + "\n";
+            // Now ensure GraphicsDriver is set under ALL Video adapter keys.
+            // Find all lines matching [System\\CurrentControlSet\\Control\\Video\\{GUID}\\0000]
+            // and add GraphicsDriver after them if not already present.
+            StringBuilder result = new StringBuilder();
+            String[] lines = reg.split("\n", -1);
+            for (int i = 0; i < lines.length; i++) {
+                result.append(lines[i]);
+                if (i < lines.length - 1) result.append("\n");
+                // Check if this line is a Video adapter 0000 key
+                if (lines[i].startsWith("[System\\\\CurrentControlSet\\\\Control\\\\Video\\\\")
+                        && lines[i].endsWith("\\\\0000]")) {
+                    // Check if the next non-empty line already has GraphicsDriver
+                    boolean hasGraphics = false;
+                    if (i + 1 < lines.length && lines[i + 1].contains("\"GraphicsDriver\"")) {
+                        hasGraphics = true;
+                    }
+                    if (!hasGraphics) {
+                        result.append(graphicsValue).append("\n");
+                    }
+                }
             }
-            java.nio.file.Files.write(systemReg.toPath(), reg.getBytes());
-            Log.i(TAG, "Set system.reg: GraphicsDriver=winewayland.drv");
+
+            java.nio.file.Files.write(systemReg.toPath(), result.toString().getBytes());
+            Log.i(TAG, "Set system.reg: GraphicsDriver=winewayland.drv (all Video keys)");
+
+            // Also set fallback in user.reg: [Software\\Wine\\Drivers] "Graphics"="winewayland.drv"
+            File userReg = new File(prefix, "user.reg");
+            if (userReg.exists()) {
+                String userRegContent = new String(java.nio.file.Files.readAllBytes(userReg.toPath()));
+                String driversKey = "[Software\\\\Wine\\\\Drivers]";
+                String graphicsUserValue = "\"Graphics\"=\"winewayland.drv\"";
+
+                // Remove old Graphics= entries under Wine\Drivers
+                int drvIdx = userRegContent.indexOf(driversKey);
+                if (drvIdx >= 0) {
+                    // Find the end of this key block
+                    int nextKey = userRegContent.indexOf("\n[", drvIdx + 1);
+                    if (nextKey < 0) nextKey = userRegContent.length();
+                    String block = userRegContent.substring(drvIdx, nextKey);
+                    // Remove existing Graphics= line
+                    block = block.replaceAll("\"Graphics\"=\"[^\"]*\"\n?", "");
+                    // Add our Graphics= line
+                    block = block + graphicsUserValue + "\n";
+                    userRegContent = userRegContent.substring(0, drvIdx) + block + userRegContent.substring(nextKey);
+                } else {
+                    // Key doesn't exist — append it
+                    userRegContent += "\n" + driversKey + "\n" + graphicsUserValue + "\n";
+                }
+                java.nio.file.Files.write(userReg.toPath(), userRegContent.getBytes());
+                Log.i(TAG, "Set user.reg: [Software\\Wine\\Drivers] Graphics=winewayland.drv");
+            }
         } catch (Exception e) {
             Log.w(TAG, "Failed to set GraphicsDriver: " + e.getMessage());
         }
