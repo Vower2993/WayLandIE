@@ -6423,8 +6423,15 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
         if ("wayland".equals(displayMode)) {
             String wlOverrides = envVars.get("WINEDLLOVERRIDES");
             if (wlOverrides == null) wlOverrides = "";
+            // Force Wine to load our winewayland.drv (native) and disable
+            // winex11.drv entirely. Without disabling winex11.drv, Wine may
+            // fall back to it if the GraphicsDriver registry edit doesn't
+            // match the actual adapter GUID.
             if (!wlOverrides.contains("winewayland.drv")) {
-                wlOverrides += (wlOverrides.isEmpty() ? "" : ";") + "winewayland.drv=b,native";
+                wlOverrides += (wlOverrides.isEmpty() ? "" : ";") + "winewayland.drv=native";
+            }
+            if (!wlOverrides.contains("winex11.drv")) {
+                wlOverrides += (wlOverrides.isEmpty() ? "" : ";") + "winex11.drv=";
             }
             envVars.put("WINEDLLOVERRIDES", wlOverrides);
             Log.d("XServerDisplayActivity", "Wayland WINEDLLOVERRIDES: " + wlOverrides);
@@ -6464,7 +6471,7 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
         // Start Wayland bridge server only when display mode is "wayland"
         if ("wayland".equals(displayMode)) {
             waylandBridgeServer = new WaylandBridgeServer();
-            waylandBridgeServer.start(xServerView);
+            waylandBridgeServer.start(xServerView, this);
         }
         final VulkanRenderer renderer = xServerView.getRenderer();
         // Match guest libvulkan so imported AHB tiling matches the producer.

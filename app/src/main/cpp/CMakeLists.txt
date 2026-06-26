@@ -248,12 +248,18 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/bionic-libs/lib/libwayland-server.a")
     )
 
     # ------------------------------------------------------------------
-    # Target 2: waylandie_bridge_exe (EXECUTABLE, the compositor process)
-    # Output name is libwaylandie_bridge_exe.so so that Android's gradle
-    # packaging system picks it up and ships it inside the APK lib/ dir.
-    # At runtime WaylandBridgeComponent marks it executable + exec's it.
+    # Target 2: waylandie_bridge_exe (SHARED library, exec'd as a process)
+    #
+    # CRITICAL: Android Gradle Plugin (AGP) only packages add_library(SHARED)
+    # targets in the APK's lib/ dir. add_executable targets are NOT packaged.
+    # WinNative's own pulseaudio/box64 follow this pattern: build as a SHARED
+    # library (.so), include a main() function, and exec the .so at runtime.
+    # The NDK linker adds the dynamic interpreter (/system/bin/linker64) to
+    # shared libraries that export main(), making them valid PIE executables.
+    # See app/src/main/runtime/display/environment/components/PulseAudioComponent.java
+    # for the reference implementation of this pattern.
     # ------------------------------------------------------------------
-    add_executable(waylandie_bridge_exe
+    add_library(waylandie_bridge_exe SHARED
         waylandie-wayland-bridge.c
         generated/xdg-shell-protocol.c
         generated/linux-dmabuf-unstable-v1-protocol.c
@@ -264,15 +270,13 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/bionic-libs/lib/libwayland-server.a")
     )
 
     set_target_properties(waylandie_bridge_exe PROPERTIES
-        # Android gradle only packages files matching lib*.so in the APK's
-        # lib/ directory. We must name the executable libwaylandie_bridge_exe.so
-        # so it ships inside the APK. At runtime WaylandBridgeComponent finds
-        # it in nativeLibraryDir and marks it executable before exec'ing.
-        PREFIX "lib"
         OUTPUT_NAME "waylandie_bridge_exe"
-        SUFFIX ".so"
-        # On Android executables must be PIE.
         POSITION_INDEPENDENT_CODE ON
+        # Link as PIE so the .so can be exec'd as a process (has dynamic
+        # interpreter + entry point). This matches WinNative's pulseaudio
+        # pattern — the .so is both a valid shared library AND a valid
+        # PIE executable.
+        LINK_FLAGS "-pie"
     )
 
     target_include_directories(waylandie_bridge_exe PRIVATE

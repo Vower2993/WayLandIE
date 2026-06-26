@@ -1,5 +1,6 @@
 package com.winlator.cmod.runtime.display.environment.components;
 
+import android.content.Context;
 import android.net.LocalServerSocket;
 import android.net.LocalSocket;
 import android.util.Log;
@@ -24,6 +25,7 @@ public class WaylandBridgeServer {
     private volatile boolean running = false;
     private SurfaceControl presentLayer;
     private SurfaceView hostView;
+    private Context context;
     private int width = 1920;
     private int height = 1080;
     private int frameIndex = 0;
@@ -49,7 +51,12 @@ public class WaylandBridgeServer {
     }
 
     public void start(SurfaceView view) {
+        start(view, null);
+    }
+
+    public void start(SurfaceView view, Context ctx) {
         this.hostView = view;
+        this.context = ctx != null ? ctx.getApplicationContext() : null;
         running = true;
         try {
             serverSocket = new LocalServerSocket(SOCKET_NAME);
@@ -176,11 +183,18 @@ public class WaylandBridgeServer {
             }
 
             // Get paths for native present
-            String tmpDir = "/data/local/tmp";
+            // Use app-private dirs that always exist + are writable.
+            String pkgDataDir = (context != null)
+                    ? context.getFilesDir().getAbsolutePath()
+                    : "/data/user/0/com.winnative.cmod/files";
+            String tmpDir = context != null
+                    ? context.getCacheDir().getAbsolutePath()
+                    : pkgDataDir + "/cache";
             String hookLibDir = "/system/lib64";
-            String driverDir = "/data/user/0/com.winnative.cmod/files/adrenotools-driver";
+            String driverDir = pkgDataDir + "/adrenotools-driver";
             if (driverName == null || driverName.isEmpty()) {
-                driverName = "vulkan.waylandie.a8xx.so";
+                // Don't hardcode a driver name — let the native code probe.
+                driverName = "";
             }
 
             // Call native present
