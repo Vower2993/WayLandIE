@@ -88,7 +88,7 @@ public class WaylandBridgeComponent extends EnvironmentComponent {
 
         try {
             bridgeProcess = pb.start();
-            Log.i(TAG, "Bridge process started, pid=" + bridgeProcess.pid());
+            Log.i(TAG, "Bridge process started");
 
             new Thread(() -> {
                 try (java.io.BufferedReader reader = new java.io.BufferedReader(
