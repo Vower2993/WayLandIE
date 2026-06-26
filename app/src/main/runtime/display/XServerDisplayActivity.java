@@ -5967,6 +5967,28 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
     }
 
     private void setupXEnvironment() throws PackageManager.NameNotFoundException {
+        // Write unconditional diagnostic so we can see displayMode even if Wayland block is not entered
+        try {
+            File logsDir = com.winlator.cmod.runtime.system.LogManager.getLogsDir(this);
+            java.io.FileWriter fw = new java.io.FileWriter(
+                    new File(logsDir, "wayland-driver-install.log"), true);
+            fw.write("[" + new java.util.Date() + "] setupXEnvironment called\n");
+            fw.write("  displayMode='" + displayMode + "'\n");
+            fw.write("  container=" + (container != null ? container.getRootDir() : "null") + "\n");
+            if (container != null) {
+                fw.write("  container.getDisplayMode()='" + container.getDisplayMode() + "'\n");
+            }
+            fw.write("  shortcut=" + (shortcut != null ? shortcut.id : "null") + "\n");
+            if (shortcut != null) {
+                fw.write("  shortcut displayMode extra='" + shortcut.getExtra("displayMode", "<not set>") + "'\n");
+                fw.write("  shortcut usesContainerDefaults=" + shortcut.usesContainerDefaults() + "\n");
+            }
+            fw.write("  imageFs.winePath=" + imageFs.winePath + "\n");
+            fw.close();
+        } catch (Exception e) {
+            Log.e("XServerDisplayActivity", "Failed to write setupXEnvironment diagnostic", e);
+        }
+
         if (SessionKeepAliveService.isSessionActive()) {
             XEnvironment existingEnv = SessionKeepAliveService.getActiveEnvironment();
             XServer existingXServer = SessionKeepAliveService.getActiveXServer();
