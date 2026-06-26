@@ -5978,7 +5978,7 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
             if (container != null) {
                 fw.write("  container.getDisplayMode()='" + container.getDisplayMode() + "'\n");
             }
-            fw.write("  shortcut=" + (shortcut != null ? shortcut.id : "null") + "\n");
+            fw.write("  shortcut=" + (shortcut != null ? shortcut.name : "null") + "\n");
             if (shortcut != null) {
                 fw.write("  shortcut displayMode extra='" + shortcut.getExtra("displayMode", "<not set>") + "'\n");
                 fw.write("  shortcut usesContainerDefaults=" + shortcut.usesContainerDefaults() + "\n");
