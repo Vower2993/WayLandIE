@@ -228,7 +228,10 @@ public final class WaylandDriverInstaller {
         }
         try {
             String reg = new String(java.nio.file.Files.readAllBytes(systemReg.toPath()));
-            String graphicsValue = "\"GraphicsDriver\"=\"winewayland.drv\"";
+            // Wine constructs the driver filename as: wine + <GraphicsDriver value> + .drv
+            // So GraphicsDriver=wayland → winewayland.drv (correct)
+            // GraphicsDriver=winewayland.drv → winewinewayland.drv.drv (WRONG — doubled)
+            String graphicsValue = "\"GraphicsDriver\"=\"wayland\"";
 
             // Remove old GraphicsDriver entries that point to winex11.drv
             // (but keep any that the user might have set to other drivers).
@@ -270,14 +273,15 @@ public final class WaylandDriverInstaller {
             }
 
             java.nio.file.Files.write(systemReg.toPath(), result.toString().getBytes());
-            Log.i(TAG, "Set system.reg: GraphicsDriver=winewayland.drv (all Video keys)");
+            Log.i(TAG, "Set system.reg: GraphicsDriver=wayland (all Video keys)");
 
-            // Also set fallback in user.reg: [Software\\Wine\\Drivers] "Graphics"="winewayland.drv"
+            // Also set fallback in user.reg: [Software\\Wine\\Drivers] "Graphics"="wayland"
+            // (Wine constructs the filename as wine + value + .drv, so "wayland" → winewayland.drv)
             File userReg = new File(prefix, "user.reg");
             if (userReg.exists()) {
                 String userRegContent = new String(java.nio.file.Files.readAllBytes(userReg.toPath()));
                 String driversKey = "[Software\\\\Wine\\\\Drivers]";
-                String graphicsUserValue = "\"Graphics\"=\"winewayland.drv\"";
+                String graphicsUserValue = "\"Graphics\"=\"wayland\"";
 
                 // Remove old Graphics= entries under Wine\Drivers
                 int drvIdx = userRegContent.indexOf(driversKey);
@@ -296,7 +300,7 @@ public final class WaylandDriverInstaller {
                     userRegContent += "\n" + driversKey + "\n" + graphicsUserValue + "\n";
                 }
                 java.nio.file.Files.write(userReg.toPath(), userRegContent.getBytes());
-                Log.i(TAG, "Set user.reg: [Software\\Wine\\Drivers] Graphics=winewayland.drv");
+                Log.i(TAG, "Set user.reg: [Software\\Wine\\Drivers] Graphics=wayland");
             }
         } catch (Exception e) {
             Log.w(TAG, "Failed to set GraphicsDriver: " + e.getMessage());
