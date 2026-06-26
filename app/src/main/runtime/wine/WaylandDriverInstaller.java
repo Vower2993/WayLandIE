@@ -101,6 +101,24 @@ public final class WaylandDriverInstaller {
                     new File(winePath, "lib/wine/arm64ec-windows"));
             copyIfExists(prefix, "lib/wine/arm64ec-windows/ntdll.dll",
                     new File(winePath, "lib/wine/arm64ec-windows"));
+
+            // CRITICAL: Binary-patch winewayland.so to change the Vulkan surface
+            // extension from VK_KHR_wayland_surface to VK_KHR_xlib_surface.
+            //
+            // WHY: Wine's winevulkan.dll asks the display driver for the host
+            // surface extension. winewayland.drv returns "VK_KHR_wayland_surface".
+            // But the Android Vulkan wrapper (loaded via VK_ICD_FILENAMES) only
+            // supports VK_KHR_xlib_surface (which it translates to
+            // VK_KHR_android_surface). So vkCreateInstance fails with
+            // VK_ERROR_EXTENSION_NOT_PRESENT.
+            //
+            // FIX: Replace the string "VK_KHR_wayland_surface" (22 bytes) with
+            // "VK_KHR_xlib_surface\0\0\0" (19 bytes + 3 null padding = 22 bytes)
+            // in the .so binary. winevulkan.dll then requests
+            // VK_KHR_xlib_surface, which the wrapper handles. Surface creation
+            // uses vkCreateXlibSurfaceKHR — the wrapper ignores the X11
+            // parameters and uses its internal ANativeWindow*.
+            patchSurfaceExtension(new File(wineAarch64Unix, "winewayland.so"));
         } else {
             Log.w(TAG, "ensureDriverInstalled: winePath is null or not a directory — "
                     + "cannot copy .so companion, driver will fail to load");
@@ -203,6 +221,55 @@ public final class WaylandDriverInstaller {
         copyIfExists(prefix, "lib/wine/aarch64-windows/winewayland.drv", system32);
         copyIfExists(prefix, "lib/wine/aarch64-windows/libarm64ecfex.dll", system32);
         copyIfExists(prefix, "lib/wine/aarch64-windows/ntdll.dll", system32);
+    }
+
+    /**
+     * Binary-patches winewayland.so to replace the Vulkan surface extension
+     * string "VK_KHR_wayland_surface" with "VK_KHR_xlib_surface".
+     *
+     * This is necessary because the Android Vulkan wrapper only supports
+     * VK_KHR_xlib_surface (which it translates to VK_KHR_android_surface).
+     * Without this patch, vkCreateInstance fails with VK_ERROR_EXTENSION_NOT_PRESENT
+     * when winewayland.drv reports VK_KHR_wayland_surface.
+     *
+     * The patch is safe because:
+     * - "VK_KHR_wayland_surface" (22 bytes) is replaced with
+     *   "VK_KHR_xlib_surface\0\0" (20 bytes + 2 null padding = 22 bytes)
+     * - C string functions stop at the first null, so padding is ignored
+     * - The .so's checksum/structure is unchanged (same-length replacement)
+     * - Idempotent: if already patched, the string isn't found and no change is made
+     */
+    private static void patchSurfaceExtension(File soFile) {
+        if (soFile == null || !soFile.exists()) {
+            Log.w(TAG, "patchSurfaceExtension: file not found: " + soFile);
+            return;
+        }
+        try {
+            byte[] data = java.nio.file.Files.readAllBytes(soFile.toPath());
+            byte[] search = "VK_KHR_wayland_surface".getBytes("ASCII");
+            byte[] replace = "VK_KHR_xlib_surface\0\0\0".getBytes("ASCII");
+
+            int patched = 0;
+            for (int i = 0; i <= data.length - search.length; i++) {
+                boolean match = true;
+                for (int j = 0; j < search.length; j++) {
+                    if (data[i + j] != search[j]) { match = false; break; }
+                }
+                if (match) {
+                    System.arraycopy(replace, 0, data, i, replace.length);
+                    patched++;
+                }
+            }
+
+            if (patched > 0) {
+                java.nio.file.Files.write(soFile.toPath(), data);
+                Log.i(TAG, "patchSurfaceExtension: patched " + patched + " occurrence(s) in " + soFile.getName());
+            } else {
+                Log.i(TAG, "patchSurfaceExtension: no occurrences found (already patched?) in " + soFile.getName());
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "patchSurfaceExtension failed: " + e.getMessage());
+        }
     }
 
     /**
