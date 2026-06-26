@@ -102,6 +102,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.draw.scale
 import com.winlator.cmod.R
+import com.winlator.cmod.runtime.container.Container
 import com.winlator.cmod.runtime.wine.WineThemeManager
 import com.winlator.cmod.shared.ui.outlinedSwitchColors
 import com.winlator.cmod.shared.ui.widget.EnvVarsView
@@ -295,6 +296,7 @@ class GameSettingsStateHolder {
     val selectedAudioDriver = mutableIntStateOf(0)
     val displayModeEntries = mutableStateOf<List<String>>(emptyList())
     val selectedDisplayMode = mutableIntStateOf(0)
+    val zeroCopyBuffer = mutableStateOf(Container.DEFAULT_ZERO_COPY_BUFFER)
     val midiSoundFontEntries = mutableStateOf<List<String>>(emptyList())
     val selectedMidiSoundFont = mutableIntStateOf(0)
 
@@ -1078,6 +1080,13 @@ private fun GeneralSection(
                 }
             }
         }
+
+        // Zero-copy buffer toggle — forces DRI3 AHB direct scanout path
+        SettingSwitch(
+            label = stringResource(R.string.zero_copy_buffer),
+            checked = state.zeroCopyBuffer.value,
+            onCheckedChange = { state.zeroCopyBuffer.value = it }
+        )
 
         // Custom resolution fields when "Custom" is selected (index 0)
         if (state.selectedScreenSize.intValue == 0) {

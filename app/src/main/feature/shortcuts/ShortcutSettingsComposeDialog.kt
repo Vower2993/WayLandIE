@@ -459,6 +459,8 @@ class ShortcutSettingsComposeDialog private constructor(
         this.displayModeValues = displayModeValArr
         val currentDisplayMode = getShortcutSetting("displayMode", container.getDisplayMode())
         state.selectedDisplayMode.intValue = displayModeValArr.indexOf(currentDisplayMode).coerceAtLeast(0)
+        state.zeroCopyBuffer.value = getShortcutSetting("zeroCopyBuffer",
+                String.valueOf(container.getZeroCopyBuffer())).equals("true")
 
         // Container selection
         loadContainerList()
@@ -1007,6 +1009,8 @@ class ShortcutSettingsComposeDialog private constructor(
             )
             val displayMode = this.displayModeValues.getOrElse(state.selectedDisplayMode.intValue) { container.getDisplayMode() }
             saveOverride("displayMode", displayMode, container.getDisplayMode())
+            saveOverride("zeroCopyBuffer", String.valueOf(state.zeroCopyBuffer.value),
+                    String.valueOf(container.getZeroCopyBuffer()))
             hasContainerOverride = hasContainerOverride or saveOverride("graphicsDriver", graphicsDriver, container.getGraphicsDriver())
 
             val graphicsDriverConfig = buildGraphicsDriverConfigFromState()

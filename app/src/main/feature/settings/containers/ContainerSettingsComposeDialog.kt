@@ -492,6 +492,7 @@ class ContainerSettingsComposeDialog @JvmOverloads constructor(
         this.displayModeValues = displayModeValArr
         val currentDisplayMode = c?.displayMode ?: Container.DEFAULT_DISPLAY_MODE
         state.selectedDisplayMode.intValue = displayModeValArr.indexOf(currentDisplayMode).coerceAtLeast(0)
+        state.zeroCopyBuffer.value = c?.getZeroCopyBuffer() ?: Container.DEFAULT_ZERO_COPY_BUFFER
         val graphicsDriverArr = context.resources.getStringArray(R.array.graphics_driver_entries).toList()
         state.graphicsDriverEntries.value = graphicsDriverArr
         selectByIdentifier(
@@ -775,6 +776,7 @@ class ContainerSettingsComposeDialog @JvmOverloads constructor(
             c.setCPUListWoW64(cpuListWoW64)
             val displayMode = this.displayModeValues.getOrElse(state.selectedDisplayMode.intValue) { Container.DEFAULT_DISPLAY_MODE }
             c.setDisplayMode(displayMode)
+            c.setZeroCopyBuffer(state.zeroCopyBuffer.value)
             c.setGraphicsDriver(graphicsDriver)
             c.setGraphicsDriverConfig(graphicsDriverConfig)
             c.setDXWrapper(dxwrapper)

@@ -1435,4 +1435,5 @@ Installed path:
     <string name="display_mode">Display Mode</string>
     <string name="display_mode_x11">X11 (Default)</string>
     <string name="display_mode_wayland">Wayland (Zero-copy AHB)</string>
+    <string name="zero_copy_buffer">Zero-Copy Buffer (DRI3 AHB Direct Scanout)</string>
 </resources>

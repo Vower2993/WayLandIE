@@ -281,6 +281,7 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
     private boolean launchedFromPinnedShortcut = false;
     private String graphicsDriver = Container.DEFAULT_GRAPHICS_DRIVER;
     private String displayMode = Container.DEFAULT_DISPLAY_MODE;
+    private boolean isZeroCopyBuffer = Container.DEFAULT_ZERO_COPY_BUFFER;
     private HashMap<String, String> graphicsDriverConfig;
     private String audioDriver = Container.DEFAULT_AUDIO_DRIVER;
     private String emulator = Container.DEFAULT_EMULATOR;
@@ -1270,7 +1271,12 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
 
         graphicsDriver = container.getGraphicsDriver();
         displayMode = getShortcutSetting("displayMode", container.getDisplayMode());
-        Log.d("XServerDisplayActivity", "Display mode: " + displayMode);
+        isZeroCopyBuffer = shortcut != null
+                ? shortcut.getSettingExtra("zeroCopyBuffer",
+                        String.valueOf(container.getZeroCopyBuffer())).equals("true")
+                : container.getZeroCopyBuffer();
+        Log.d("XServerDisplayActivity", "Display mode: " + displayMode
+                + " zeroCopyBuffer: " + isZeroCopyBuffer);
         String graphicsDriverConfig = container.getGraphicsDriverConfig();
         audioDriver = container.getAudioDriver();
         emulator = container.getEmulator();
@@ -7162,6 +7168,20 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
         if ("1".equals(syncFrame)) {
             wsiDebugFlags.add("forcesync");
         }
+
+        // Zero-copy buffer: force DRI3 AHB direct scanout path.
+        // When enabled, adds WSI debug flags to trace the present path and
+        // ensures the AHB modifier is negotiated for zero-copy GPU→display.
+        if (isZeroCopyBuffer) {
+            // MESA_VK_WSI_DEBUG=buffer ensures WSI logs which image path is chosen
+            // (native/drm/ahb vs cpu/blit). This is diagnostic only — zero overhead.
+            if (!wsiDebugFlags.contains("buffer")) wsiDebugFlags.add("buffer");
+            // Ensure the wrapper prefers external memory (AHB/dmabuf) over CPU paths
+            envVars.put("WRAPPER_PREFER_EXTERNAL_MEMORY", "1");
+            // Force DRI3 path (not SHM) for pixmap present
+            envVars.put("MESA_VK_WSI_FORCE_DRI3", "1");
+        }
+
         if (!wsiDebugFlags.isEmpty()) {
             envVars.put("MESA_VK_WSI_DEBUG", String.join(",", wsiDebugFlags));
         }

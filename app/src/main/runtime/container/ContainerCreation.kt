@@ -185,6 +185,7 @@ object ContainerCreation {
             put("fexcorePreset", FEXCorePreset.PERFORMANCE)
             put("desktopTheme", WineThemeManager.DEFAULT_DESKTOP_THEME)
             put("displayMode", Container.DEFAULT_DISPLAY_MODE)
+            put("zeroCopyBuffer", Container.DEFAULT_ZERO_COPY_BUFFER)
             put("midiSoundFont", "")
             put("lc_all", "")
             put("execArgs", "")

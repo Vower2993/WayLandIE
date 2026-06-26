@@ -21,6 +21,7 @@ import java.util.Locale;
 
 public class Container {
     public static final String DEFAULT_ENV_VARS = "WRAPPER_MAX_IMAGE_COUNT=0 VKD3D_SHADER_MODEL=6_6 ZINK_DESCRIPTORS=lazy ZINK_DEBUG=compact MESA_SHADER_CACHE_DISABLE=false MESA_SHADER_CACHE_MAX_SIZE=512MB mesa_glthread=true TU_DEBUG=noconform,sysmem,perf MESA_VK_WSI_PRESENT_MODE=immediate MESA_NO_ERROR=true";
+    public static final boolean DEFAULT_ZERO_COPY_BUFFER = true; // DRI3 AHB direct scanout
     public static final String DEFAULT_SCREEN_SIZE = "1280x720";
     public static final String DEFAULT_GRAPHICS_DRIVER = "wrapper";
     public static final String DEFAULT_AUDIO_DRIVER = "alsa";
@@ -45,6 +46,7 @@ public class Container {
     private String envVars = DEFAULT_ENV_VARS;
     private String graphicsDriver = DEFAULT_GRAPHICS_DRIVER;
     private String displayMode = DEFAULT_DISPLAY_MODE;
+    private boolean zeroCopyBuffer = DEFAULT_ZERO_COPY_BUFFER;
     private String graphicsDriverConfig = DEFAULT_GRAPHICSDRIVERCONFIG;
     private String dxwrapper = DEFAULT_DXWRAPPER;
     private String dxwrapperConfig = "";
@@ -155,6 +157,8 @@ public class Container {
 
     public String getDisplayMode() { return displayMode; }
     public void setDisplayMode(String displayMode) { this.displayMode = displayMode; }
+    public boolean getZeroCopyBuffer() { return zeroCopyBuffer; }
+    public void setZeroCopyBuffer(boolean zeroCopyBuffer) { this.zeroCopyBuffer = zeroCopyBuffer; }
 
     public String getGraphicsDriverConfig() { return this.graphicsDriverConfig; }
 
@@ -419,6 +423,7 @@ public class Container {
             data.put("cpuListWoW64", cpuListWoW64);
             data.put("graphicsDriver", graphicsDriver);
             data.put("displayMode", displayMode);
+            data.put("zeroCopyBuffer", zeroCopyBuffer);
             data.put("graphicsDriverConfig", graphicsDriverConfig);
             data.put("emulator", emulator);
             data.put("emulator64", emulator64);
@@ -482,6 +487,8 @@ public class Container {
                     break;
                 case "displayMode" :
                     this.displayMode = data.getString(key); break;
+                case "zeroCopyBuffer" :
+                    this.zeroCopyBuffer = data.optBoolean(key, DEFAULT_ZERO_COPY_BUFFER); break;
                 case "graphicsDriver" :
                     setGraphicsDriver(data.getString(key));
                     break;
