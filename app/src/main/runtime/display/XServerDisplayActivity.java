@@ -6561,6 +6561,12 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
             if (!wlOverrides.contains("winewayland.drv")) {
                 wlOverrides += (wlOverrides.isEmpty() ? "" : ";") + "winewayland.drv=b";
             }
+            // Disable explorer.exe in Wayland mode — wineboot auto-launches it
+            // as the shell, but it crashes (nodrv_CreateWindow) and triggers
+            // LdrShutdownProcess, killing the wine session before the game loads.
+            if (!wlOverrides.contains("explorer.exe")) {
+                wlOverrides += (wlOverrides.isEmpty() ? "" : ";") + "explorer.exe=";
+            }
             // Do NOT add winex11.drv= — let it load as fallback
             envVars.put("WINEDLLOVERRIDES", wlOverrides);
             Log.d("XServerDisplayActivity", "Wayland WINEDLLOVERRIDES: " + wlOverrides);
