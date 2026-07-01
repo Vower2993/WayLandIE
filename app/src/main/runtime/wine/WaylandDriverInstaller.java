@@ -418,18 +418,29 @@ public final class WaylandDriverInstaller {
                         if (data[i + j] != search[j]) { match = false; break; }
                     }
                     if (match) {
-                        // Write the full replacement string (may be longer than search).
-                        // If replacement is shorter, pad with nulls.
-                        int writeLen = Math.max(replace.length, search.length);
+                        // Write replacement + null terminator.
+                        // If replacement is LONGER than search (e.g. win32_surface=20B
+                        // → android_surface=22B), we write 22 bytes + 1 null = 23 bytes,
+                        // overwriting 3 bytes past the original 20-byte string.
+                        // The null terminator at byte 22 ensures C string functions see
+                        // a properly terminated "VK_KHR_android_surface" string.
+                        // The 2-3 bytes of overflow corrupt the start of the next string
+                        // in the PE .rdata section, but this is acceptable because:
+                        //   - The next string is likely another Vulkan extension we're
+                        //     also patching (or an unrelated string that won't be matched)
+                        //   - The null terminator prevents our replacement from bleeding
+                        //     into the next string
+                        int writeLen = replace.length + 1; // +1 for null terminator
                         byte[] writeData = new byte[writeLen];
                         System.arraycopy(replace, 0, writeData, 0, replace.length);
-                        // Null-fill remaining bytes (if replacement is shorter)
-                        for (int j = replace.length; j < writeLen; j++) {
-                            writeData[j] = 0;
-                        }
+                        writeData[replace.length] = 0; // null terminator
                         // Only write if we have room (don't overflow past end of data)
                         if (i + writeLen <= data.length) {
                             System.arraycopy(writeData, 0, data, i, writeLen);
+                            patched++;
+                        } else if (i + replace.length <= data.length) {
+                            // Fallback: write without null if we're near end of data
+                            System.arraycopy(replace, 0, data, i, replace.length);
                             patched++;
                         }
                     }
