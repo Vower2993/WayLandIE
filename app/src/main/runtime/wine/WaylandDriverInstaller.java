@@ -143,6 +143,16 @@ public final class WaylandDriverInstaller {
             // Also patch winewayland.so (in case it has the string too)
             patchSurfaceExtension(new File(wineAarch64Unix, "winewayland.so"));
             patchSurfaceExtension(new File(prefix, "lib/wine/aarch64-unix/winewayland.so"));
+
+            // DXVK PATCHING: dxgi.dll + d3d11.dll + d3d12.dll hardcode
+            // VK_KHR_win32_surface internally and request it directly,
+            // bypassing winevulkan's extension mapping. The Android wrapper
+            // only exposes VK_KHR_android_surface. Binary-patch the DLLs.
+            padDxvkSurfaceExtension(new File(system32, "dxgi.dll"));
+            padDxvkSurfaceExtension(new File(system32, "d3d11.dll"));
+            padDxvkSurfaceExtension(new File(system32, "d3d12.dll"));
+            padDxvkSurfaceExtension(new File(new File(prefix, "drive_c/windows"), "syswow64/dxgi.dll"));
+            padDxvkSurfaceExtension(new File(new File(prefix, "drive_c/windows"), "syswow64/d3d11.dll"));
         } else {
             Log.w(TAG, "ensureDriverInstalled: winePath is null or not a directory — "
                     + "cannot copy .so companion, driver will fail to load");
@@ -421,6 +431,44 @@ public final class WaylandDriverInstaller {
             }
         } catch (Exception e) {
             Log.w(TAG, "patchSurfaceExtension failed: " + e.getMessage());
+        }
+    }
+/**
+     * Binary-patches DXVK DLLs to replace hardcoded VK_KHR_win32_surface
+     * with VK_KHR_android_surface so DXVK's createInstance succeeds on
+     * the Android Vulkan wrapper (which only exposes android_surface).
+     * Same-length patch: "VK_KHR_win32_surface" (21B) with "VK_KHR_android_surface\0".
+     * Idempotent — skips if string already replaced.
+     */
+    private static void padDxvkSurfaceExtension(File dllFile) {
+        if (dllFile == null || !dllFile.exists()) return;
+        try {
+            byte[] data = java.nio.file.Files.readAllBytes(dllFile.toPath());
+            byte[] search = "VK_KHR_win32_surface".getBytes("ASCII");
+            byte[] replace = "VK_KHR_android_surface\0".getBytes("ASCII");
+
+            if (search.length != replace.length) {
+                Log.w(TAG, "padDxvk: length mismatch — aborting");
+                return;
+            }
+
+            int patched = 0;
+            for (int i = 0; i <= data.length - search.length; i++) {
+                boolean match = true;
+                for (int j = 0; j < search.length; j++) {
+                    if (data[i + j] != search[j]) { match = false; break; }
+                }
+                if (match) {
+                    System.arraycopy(replace, 0, data, i, replace.length);
+                    patched++;
+                }
+            }
+            if (patched > 0) {
+                java.nio.file.Files.write(dllFile.toPath(), data);
+                Log.i(TAG, "padDxvk: patched " + patched + " occ in " + dllFile.getName());
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "padDxvk: failed " + dllFile.getName() + ": " + e.getMessage());
         }
     }
 
