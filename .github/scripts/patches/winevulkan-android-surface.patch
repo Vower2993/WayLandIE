@@ -1,0 +1,12 @@
+diff --git a/dlls/winevulkan/make_vulkan b/dlls/winevulkan/make_vulkan
+index 1111111..2222222 100644
+--- a/dlls/winevulkan/make_vulkan
++++ b/dlls/winevulkan/make_vulkan
+@@ -141,6 +141,7 @@ UNSUPPORTED_EXTENSIONS = [
+ UNEXPOSED_PLATFORMS = {
++    "android",
+     "macos",
+     "metal",
+     "wayland",
+     "xlib",
+ }

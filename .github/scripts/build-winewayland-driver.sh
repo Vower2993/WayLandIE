@@ -703,18 +703,41 @@ echo "=== [8/9] Build winewayland targets ==="
 #   wine client error:0: version mismatch 933/932.
 # Instead, the 8MB stack fix is achieved by patching the PE headers of
 # explorer.exe + rundll32.exe at install time (see WaylandDriverInstaller.java).
+# Apply winevulkan patch: add "android" to UNEXPOSED_PLATFORMS so
+# VK_KHR_android_surface and vkCreateAndroidSurfaceKHR are generated.
+echo "=== Patching winevulkan make_vulkan for android_surface ==="
+cd /tmp/proton-wine
+if grep -q '"android"' dlls/winevulkan/make_vulkan; then
+    echo "  android already in UNEXPOSED_PLATFORMS — skipping patch"
+else
+    sed -i '/^UNEXPOSED_PLATFORMS = {$/a\    "android",' dlls/winevulkan/make_vulkan
+    echo "  Added 'android' to UNEXPOSED_PLATFORMS"
+fi
+
+# Regenerate vulkan.h and vulkan_driver.h with android_surface support
+echo "=== Regenerating Vulkan headers ==="
+cd /tmp/proton-wine/dlls/winevulkan
+python3 make_vulkan 2>&1 | tail -5
+# Verify android_surface is now in the generated headers
+grep -c "VK_KHR_android_surface" /tmp/proton-wine/include/wine/vulkan.h
+grep -c "vkCreateAndroidSurfaceKHR" /tmp/proton-wine/include/wine/vulkan.h
+cd /tmp/proton-wine
+
 make -j$(nproc) -k \
   dlls/winewayland.drv/aarch64-windows/winewayland.drv \
   dlls/winewayland.drv/winewayland.so \
   dlls/winewayland.drv/arm64ec-windows/winewayland.drv \
   dlls/ntdll/aarch64-windows/ntdll.dll \
   dlls/ntdll/arm64ec-windows/ntdll.dll \
+  dlls/winevulkan/aarch64-windows/winevulkan.dll \
+  dlls/winevulkan/arm64ec-windows/winevulkan.dll \
   2>&1 | tail -300 || true
 
 echo "=== Searching for built artifacts ==="
 find /tmp/proton-wine -name "winewayland*" -type f -newer /tmp/proton-wine/configure 2>/dev/null | head -20
 find /tmp/proton-wine -name "*.drv" -type f -newer /tmp/proton-wine/configure 2>/dev/null | head -10
 find /tmp/proton-wine -name "ntdll.dll" -type f -newer /tmp/proton-wine/configure 2>/dev/null | head -10
+find /tmp/proton-wine -name "winevulkan*" -type f -newer /tmp/proton-wine/configure 2>/dev/null | head -10
 ls -la /tmp/proton-wine/dlls/winewayland.drv/ 2>/dev/null
 ls -la /tmp/proton-wine/dlls/ntdll/aarch64-windows/ 2>/dev/null
 ls -la /tmp/proton-wine/dlls/ntdll/arm64ec-windows/ 2>/dev/null
@@ -780,6 +803,29 @@ else
   echo "WARNING: ntdll.dll not built — FEX will still crash. Check make output above."
 fi
 
+# === Collect winevulkan.dll (aarch64 + arm64ec) ===
+# Built from source with VK_KHR_android_surface support (added via make_vulkan patch).
+# This replaces the Proton package's winevulkan.dll which lacks the android_surface
+# extension bitfield flag. Without this, DXVK's vkCreateInstance fails even though
+# the extension name string is patched in the binary.
+echo "=== Collecting winevulkan.dll ==="
+for f in \
+  "/tmp/proton-wine/dlls/winevulkan/aarch64-windows/winevulkan.dll"; do
+  if [ -f "$f" ] && [ "$(stat -c%s "$f")" -gt 1000 ]; then
+    echo "Found winevulkan: $f ($(stat -c%s "$f") bytes)"
+    cp "$f" "$PROTON_OUT/lib/wine/aarch64-windows/winevulkan.dll"
+    break
+  fi
+done
+# Verify android_surface is in the built DLL
+if [ -f "$PROTON_OUT/lib/wine/aarch64-windows/winevulkan.dll" ]; then
+  if strings "$PROTON_OUT/lib/wine/aarch64-windows/winevulkan.dll" | grep -q "VK_KHR_android_surface"; then
+    echo "  ✓ VK_KHR_android_surface found in winevulkan.dll"
+  else
+    echo "  ✗ VK_KHR_android_surface NOT found in winevulkan.dll!"
+  fi
+fi
+
 # Verify the new ntdll has the FEX-required exports
 echo "=== Verifying ntdll exports ==="
 NTDLL_HYBRID="$PROTON_OUT/lib/wine/aarch64-windows/ntdll.dll"
@@ -802,11 +848,11 @@ DRV_SIZE=$(stat -c%s "$PROTON_OUT/lib/wine/aarch64-windows/winewayland.drv" 2>/d
 SO_SIZE=$(stat -c%s "$PROTON_OUT/lib/wine/aarch64-unix/winewayland.so" 2>/dev/null || echo 0)
 NTDLL_AA_SIZE=$(stat -c%s "$PROTON_OUT/lib/wine/aarch64-windows/ntdll.dll" 2>/dev/null || echo 0)
 NTDLL_EC_SIZE=$(stat -c%s "$PROTON_OUT/lib/wine/arm64ec-windows/ntdll.dll" 2>/dev/null || echo 0)
+VULKAN_SIZE=$(stat -c%s "$PROTON_OUT/lib/wine/aarch64-windows/winevulkan.dll" 2>/dev/null || echo 0)
 echo "winewayland.drv: $DRV_SIZE bytes"
 echo "winewayland.so: $SO_SIZE bytes"
 echo "ntdll.dll (aarch64): $NTDLL_AA_SIZE bytes"
-echo "ntdll.dll (arm64ec): $NTDLL_EC_SIZE bytes"
-echo "ntdll.so: NOT shipped (version mismatch risk — PE header patching used instead)"
+echo "winevulkan.dll: $VULKAN_SIZE bytes"
 
 if [ "$DRV_SIZE" -lt 1000 ]; then
   echo "FATAL: winewayland.drv missing or too small"
@@ -822,9 +868,12 @@ fi
 if [ "$SO_SIZE" -lt 1000 ]; then
   echo "FATAL: winewayland.so missing or too small"
   echo "=== winewayland.so build output (last 80 lines) ==="
-  # The make output was truncated earlier; re-run with verbose to see errors
   make -j1 dlls/winewayland.drv/winewayland.so V=1 2>&1 | tail -80 || true
   exit 1
+fi
+
+if [ "$VULKAN_SIZE" -lt 1000 ]; then
+  echo "WARNING: winevulkan.dll not built — will use Proton's version (lacks android_surface)"
 fi
 
 cd "$OUTDIR"
