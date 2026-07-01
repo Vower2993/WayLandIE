@@ -67,6 +67,8 @@ if [ -d "$WLD_SRC" ]; then
     # 1. Copy new source files directly
     cp "$WLD_SRC"/wayland_dmabuf.c dlls/winewayland.drv/
     cp "$WLD_SRC"/linux-dmabuf-unstable-v1.xml dlls/winewayland.drv/
+    # Replace vulkan.c with Android dmabuf-enabled version
+    cp "$WLD_SRC"/vulkan.c dlls/winewayland.drv/vulkan.c
 
     # 2. waylanddrv.h: add dmabuf include after last protocol header
     sed -i '/^#include "xdg-toplevel-icon-v1-client-protocol.h"/a #include "linux-dmabuf-unstable-v1-client-protocol.h"' \

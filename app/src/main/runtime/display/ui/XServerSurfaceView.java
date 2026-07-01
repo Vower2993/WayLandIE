@@ -120,6 +120,14 @@ public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Cal
             height = 0;
         }
         renderer.attachSurface(holder.getSurface());
+        // In Wayland mode, pass the ANativeWindow to winewayland.drv for
+        // vkCreateAndroidSurfaceKHR (Android doesn't support VK_KHR_wayland_surface)
+        try {
+            com.winlator.cmod.runtime.display.environment.components.WaylandBridgeServer
+                    .nativeSetAnativeWindow(holder.getSurface());
+        } catch (UnsatisfiedLinkError e) {
+            // waylandie_display_native not loaded — X11 mode, ignore
+        }
         startRenderThreadIfNeeded();
     }
 
