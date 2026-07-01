@@ -63,24 +63,41 @@ cd proton-wine
 WLD_SRC="$WORKSPACE/app/src/main/cpp/winewayland-drv"
 if [ -d "$WLD_SRC" ]; then
     echo "Patching winewayland.drv with dmabuf sources from WayLandIE..."
-    cp "$WLD_SRC"/wayland_dmabuf.c dlls/winewayland.drv/ 2>/dev/null || true
-    cp "$WLD_SRC"/linux-dmabuf-unstable-v1.xml dlls/winewayland.drv/ 2>/dev/null || true
-    # Patch registry handler to bind dmabuf global
-    if [ -f "$WLD_SRC"/wayland.c.patch ] && command -v patch >/dev/null 2>&1; then
-        patch -p1 < "$WLD_SRC"/wayland.c.patch 2>/dev/null || echo "  Warning: wayland.c patch failed (may already be applied)"
+
+    # 1. Copy new source files directly
+    cp "$WLD_SRC"/wayland_dmabuf.c dlls/winewayland.drv/
+    cp "$WLD_SRC"/linux-dmabuf-unstable-v1.xml dlls/winewayland.drv/
+
+    # 2. Copy fully-patched wayland.c (includes dmabuf registry binding)
+    if [ -f "$WLD_SRC"/wayland.c ]; then
+        cp "$WLD_SRC"/wayland.c dlls/winewayland.drv/wayland.c
+        echo "  wayland.c replaced with dmabuf-enabled version"
+    else
+        echo "  WARNING: wayland.c not in winewayland-drv, using sed patch"
+        sed -i '/wp_fractional_scale_manager_v1_interface, 1);/a\    }\n    else if (strcmp(interface, "zwp_linux_dmabuf_v1") == 0)\n    {\n        wayland_dmabuf_init(registry, id, version);' dlls/winewayland.drv/wayland.c
     fi
-    # Patch header for dmabuf types
-    if [ -f "$WLD_SRC"/waylanddrv.h.patch ] && command -v patch >/dev/null 2>&1; then
-        patch -p1 < "$WLD_SRC"/waylanddrv.h.patch 2>/dev/null || echo "  Warning: waylanddrv.h patch failed"
+
+    # 3. Copy fully-patched waylanddrv.h (includes dmabuf types + declarations)
+    if [ -f "$WLD_SRC"/waylanddrv.h ]; then
+        cp "$WLD_SRC"/waylanddrv.h dlls/winewayland.drv/waylanddrv.h
+        echo "  waylanddrv.h replaced with dmabuf-enabled version"
+    else
+        echo "  WARNING: waylanddrv.h not in winewayland-drv, patching with sed..."
+        sed -i '/#include "fractional-scale-v1-client-protocol.h"/a #include "linux-dmabuf-unstable-v1-client-protocol.h"' dlls/winewayland.drv/waylanddrv.h
+        sed -i '/struct wp_alpha_modifier_v1 \*wp_alpha_modifier_v1;/a \    struct zwp_linux_dmabuf_v1 *zwp_linux_dmabuf_v1;' dlls/winewayland.drv/waylanddrv.h
     fi
-    # Patch Makefile.in for new sources
-    if [ -f "$WLD_SRC"/Makefile.in.patch ] && command -v patch >/dev/null 2>&1; then
-        patch -p1 < "$WLD_SRC"/Makefile.in.patch 2>/dev/null || echo "  Warning: Makefile.in patch failed"
+
+    # 4. Copy fully-patched wayland_surface.c (includes wayland_surface_attach_dmabuf)
+    if [ -f "$WLD_SRC"/wayland_surface.c ]; then
+        cp "$WLD_SRC"/wayland_surface.c dlls/winewayland.drv/wayland_surface.c
+        echo "  wayland_surface.c replaced with dmabuf-enabled version"
+    else
+        echo "  WARNING: wayland_surface.c not in winewayland-drv"
     fi
-    # Patch wayland_surface.c for attach_dmabuf
-    if [ -f "$WLD_SRC"/wayland_surface.c.patch ] && command -v patch >/dev/null 2>&1; then
-        patch -p1 < "$WLD_SRC"/wayland_surface.c.patch 2>/dev/null || echo "  Warning: wayland_surface.c patch failed"
-    fi
+
+    # 5. Patch Makefile.in with sed — add new source file entries
+    sed -i '/^[[:space:]]*dllmain\.c/a\\tlinux-dmabuf-unstable-v1.xml \\\n\twayland_dmabuf.c \\' dlls/winewayland.drv/Makefile.in
+    echo "  Makefile.in patched with dmabuf sources"
     echo "  dmabuf sources applied"
 else
     echo "  WARNING: $WLD_SRC not found — building without dmabuf support"
