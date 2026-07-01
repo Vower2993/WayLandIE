@@ -68,36 +68,37 @@ if [ -d "$WLD_SRC" ]; then
     cp "$WLD_SRC"/wayland_dmabuf.c dlls/winewayland.drv/
     cp "$WLD_SRC"/linux-dmabuf-unstable-v1.xml dlls/winewayland.drv/
 
-    # 2. Copy fully-patched wayland.c (includes dmabuf registry binding)
-    if [ -f "$WLD_SRC"/wayland.c ]; then
-        cp "$WLD_SRC"/wayland.c dlls/winewayland.drv/wayland.c
-        echo "  wayland.c replaced with dmabuf-enabled version"
-    else
-        echo "  WARNING: wayland.c not in winewayland-drv, using sed patch"
-        sed -i '/wp_fractional_scale_manager_v1_interface, 1);/a\    }\n    else if (strcmp(interface, "zwp_linux_dmabuf_v1") == 0)\n    {\n        wayland_dmabuf_init(registry, id, version);' dlls/winewayland.drv/wayland.c
+    # 2. waylanddrv.h: add dmabuf include after last protocol header
+    sed -i '/^#include "xdg-toplevel-icon-v1-client-protocol.h"/a #include "linux-dmabuf-unstable-v1-client-protocol.h"' \
+        dlls/winewayland.drv/waylanddrv.h
+
+    # 3. waylanddrv.h: add zwp_linux_dmabuf_v1 pointer to struct wayland
+    sed -i '/struct xdg_toplevel_icon_manager_v1 \*xdg_toplevel_icon_manager_v1;/a \    struct zwp_linux_dmabuf_v1 *zwp_linux_dmabuf_v1;' \
+        dlls/winewayland.drv/waylanddrv.h
+
+    # 4. waylanddrv.h: add dmabuf type declarations and function prototypes
+    #    Insert after 'BOOL wayland_process_init(void);' + blank line
+    sed -i '/^BOOL wayland_process_init(void);$/r '"${WLD_SRC}"'/waylanddrv_dmabuf_decls.h' \
+        dlls/winewayland.drv/waylanddrv.h
+
+    # 5. wayland.c: add dmabuf registry binding after last existing binding
+    sed -i '/xdg_toplevel_icon_manager_v1_interface, 1);/a \    }\n    else if (strcmp(interface, "zwp_linux_dmabuf_v1") == 0)\n    {\n        wayland_dmabuf_init(registry, id, version);' \
+        dlls/winewayland.drv/wayland.c
+
+    # 6. wayland_surface.c: add wayland_surface_attach_dmabuf function
+    #    Insert before 'wayland_surface_config_is_compatible' block
+    sed -i '/^\/\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*$/{N;/ \*          wayland_surface_config_is_compatible/r '"${WLD_SRC}"'/wayland_surface_attach_dmabuf.inc"
+}' dlls/winewayland.drv/wayland_surface.c
+    # Fallback: if the above multiline sed failed, use a simpler anchor
+    if ! grep -q "wayland_surface_attach_dmabuf" dlls/winewayland.drv/wayland_surface.c; then
+        sed -i '/^BOOL wayland_surface_config_is_compatible/i '"$(sed 's/$/\\n/' ${WLD_SRC}/wayland_surface_attach_dmabuf.inc | tr -d '\n' | sed 's/\\n$//')"'' \
+            dlls/winewayland.drv/wayland_surface.c 2>/dev/null || true
     fi
 
-    # 3. Copy fully-patched waylanddrv.h (includes dmabuf types + declarations)
-    if [ -f "$WLD_SRC"/waylanddrv.h ]; then
-        cp "$WLD_SRC"/waylanddrv.h dlls/winewayland.drv/waylanddrv.h
-        echo "  waylanddrv.h replaced with dmabuf-enabled version"
-    else
-        echo "  WARNING: waylanddrv.h not in winewayland-drv, patching with sed..."
-        sed -i '/#include "fractional-scale-v1-client-protocol.h"/a #include "linux-dmabuf-unstable-v1-client-protocol.h"' dlls/winewayland.drv/waylanddrv.h
-        sed -i '/struct wp_alpha_modifier_v1 \*wp_alpha_modifier_v1;/a \    struct zwp_linux_dmabuf_v1 *zwp_linux_dmabuf_v1;' dlls/winewayland.drv/waylanddrv.h
-    fi
+    # 7. Makefile.in: add new source files
+    sed -i '/^[[:space:]]*dllmain\.c \\$/a \\tlinux-dmabuf-unstable-v1.xml \\\n\twayland_dmabuf.c \\' \
+        dlls/winewayland.drv/Makefile.in
 
-    # 4. Copy fully-patched wayland_surface.c (includes wayland_surface_attach_dmabuf)
-    if [ -f "$WLD_SRC"/wayland_surface.c ]; then
-        cp "$WLD_SRC"/wayland_surface.c dlls/winewayland.drv/wayland_surface.c
-        echo "  wayland_surface.c replaced with dmabuf-enabled version"
-    else
-        echo "  WARNING: wayland_surface.c not in winewayland-drv"
-    fi
-
-    # 5. Patch Makefile.in with sed — add new source file entries
-    sed -i '/^[[:space:]]*dllmain\.c/a\\tlinux-dmabuf-unstable-v1.xml \\\n\twayland_dmabuf.c \\' dlls/winewayland.drv/Makefile.in
-    echo "  Makefile.in patched with dmabuf sources"
     echo "  dmabuf sources applied"
 else
     echo "  WARNING: $WLD_SRC not found — building without dmabuf support"
