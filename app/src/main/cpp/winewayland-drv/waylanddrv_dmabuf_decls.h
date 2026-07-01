@@ -4,6 +4,9 @@
 
 #define WINEWAYLAND_MAX_DMABUF_PLANES 4
 
+/* Forward declaration needed before typedef. */
+struct wayland_dmabuf_buffer;
+
 typedef void (*dmabuf_buffer_release_cb)(struct wayland_dmabuf_buffer *buffer);
 
 struct wayland_dmabuf_buffer

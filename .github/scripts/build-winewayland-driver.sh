@@ -85,15 +85,9 @@ if [ -d "$WLD_SRC" ]; then
     sed -i '/xdg_toplevel_icon_manager_v1_interface, 1);/a \    }\n    else if (strcmp(interface, "zwp_linux_dmabuf_v1") == 0)\n    {\n        wayland_dmabuf_init(registry, id, version);' \
         dlls/winewayland.drv/wayland.c
 
-    # 6. wayland_surface.c: add wayland_surface_attach_dmabuf function
-    #    Insert before 'wayland_surface_config_is_compatible' block
-    sed -i '/^\/\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*\*$/{N;/ \*          wayland_surface_config_is_compatible/r '"${WLD_SRC}"'/wayland_surface_attach_dmabuf.inc"
-}' dlls/winewayland.drv/wayland_surface.c
-    # Fallback: if the above multiline sed failed, use a simpler anchor
-    if ! grep -q "wayland_surface_attach_dmabuf" dlls/winewayland.drv/wayland_surface.c; then
-        sed -i '/^BOOL wayland_surface_config_is_compatible/i '"$(sed 's/$/\\n/' ${WLD_SRC}/wayland_surface_attach_dmabuf.inc | tr -d '\n' | sed 's/\\n$//')"'' \
-            dlls/winewayland.drv/wayland_surface.c 2>/dev/null || true
-    fi
+    # 6. wayland_surface.c: insert attach_dmabuf function after attach_shm
+    sed -i "/^[[:space:]]*surface->content_height = win_height;[[:space:]]*$/r ${WLD_SRC}/wayland_surface_attach_dmabuf.inc" \
+        dlls/winewayland.drv/wayland_surface.c
 
     # 7. Makefile.in: add new source files
     sed -i '/^[[:space:]]*dllmain\.c \\$/a \\tlinux-dmabuf-unstable-v1.xml \\\n\twayland_dmabuf.c \\' \
