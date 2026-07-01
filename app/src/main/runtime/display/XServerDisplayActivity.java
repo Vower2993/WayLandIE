@@ -913,6 +913,14 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
 
         preferences = PreferenceManager.getDefaultSharedPreferences(this);
         com.winlator.cmod.runtime.system.ApplicationLogGate.refresh(this);
+        // If app-debug logging was enabled in Settings, restart it now.
+        // The DebugFragment toggle calls startAppLogging on toggle-ON, but on
+        // app restart the preference is still true while the logcat process is
+        // dead. Without this, application.log is empty after a fresh launch
+        // even when the toggle is ON.
+        if (com.winlator.cmod.runtime.system.ApplicationLogGate.isEnabled()) {
+            com.winlator.cmod.runtime.system.LogManager.startAppLogging(this);
+        }
         applyPreferredRefreshRate();
         launchedFromPinnedShortcut = isPinnedShortcutLaunchIntent(getIntent());
         
