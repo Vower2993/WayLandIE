@@ -1173,16 +1173,58 @@ public class GuestProgramLauncherComponent extends EnvironmentComponent {
         envVars.toStringArray(),
         workingDir != null ? workingDir : rootDir,
         (status) -> {
-          // Log the wine process exit code + timestamp so we can correlate
-          // it with bridge output and wine debug logs when diagnosing crashes.
-          // Status > 128 typically means killed by signal (status - 128).
-          // 137 = SIGKILL (Android LMK or explicit kill)
-          // 139 = SIGSEGV
-          // 143 = SIGTERM (normal stop)
-          Log.e("GuestProgramLauncherComponent",
-              "GUEST_PROCESS_EXIT: status=" + status
+          // Decode the exit status robustly. On Android/Linux, Java's
+          // Process.waitFor() returns:
+          //   - The exit code (0-255) for normal exit
+          //   - 128 + signal_number for signal kills (e.g. 139=SIGSEGV, 134=SIGABRT,
+          //     137=SIGKILL, 143=SIGTERM)
+          // We write to BOTH logcat AND a file (guest-process-exit.log) because
+          // logcat capture can be unreliable (filter issues, process death).
+          String signalInfo;
+          if (status > 128 && status <= 192) {
+            int sig = status - 128;
+            String sigName;
+            switch (sig) {
+              case 1:  sigName = "SIGHUP";  break;
+              case 2:  sigName = "SIGINT";  break;
+              case 3:  sigName = "SIGQUIT"; break;
+              case 4:  sigName = "SIGILL";  break;
+              case 6:  sigName = "SIGABRT"; break;
+              case 7:  sigName = "SIGBUS";  break;
+              case 8:  sigName = "SIGFPE";  break;
+              case 9:  sigName = "SIGKILL"; break;
+              case 11: sigName = "SIGSEGV"; break;
+              case 13: sigName = "SIGPIPE"; break;
+              case 15: sigName = "SIGTERM"; break;
+              default: sigName = "signal_" + sig; break;
+            }
+            signalInfo = "KILLED_BY_SIGNAL " + sig + " (" + sigName + ")";
+          } else if (status == 0) {
+            signalInfo = "NORMAL_EXIT";
+          } else {
+            signalInfo = "EXIT_CODE=" + status;
+          }
+
+          String exitLog = "GUEST_PROCESS_EXIT: status=" + status
               + " timestamp=" + new java.util.Date()
-              + " (status>128 → signal " + (status > 128 ? (status - 128) : "N/A") + ")");
+              + " → " + signalInfo;
+          Log.e("GuestProgramLauncherComponent", exitLog);
+
+          // Also write to a file so we have it even if logcat capture fails
+          try {
+            File logsDir = com.winlator.cmod.runtime.system.LogManager.getLogsDir(
+                environment.getContext());
+            File exitLogFile = new File(logsDir, "guest-process-exit.log");
+            java.io.FileWriter fw = new java.io.FileWriter(exitLogFile, true);
+            fw.write("[" + new java.util.Date() + "] " + exitLog + "\n");
+            fw.write("  displayMode=" + envVars.get("DISPLAY") + "\n");
+            fw.write("  WAYLAND_DISPLAY=" + envVars.get("WAYLAND_DISPLAY") + "\n");
+            fw.write("  WINEDEBUG=" + envVars.get("WINEDEBUG") + "\n");
+            fw.write("  WINEDLLOVERRIDES=" + envVars.get("WINEDLLOVERRIDES") + "\n");
+            fw.close();
+          } catch (Exception e) {
+            Log.w("GuestProgramLauncherComponent", "Failed to write exit log file", e);
+          }
 
           synchronized (lock) {
             if (gen == launchGeneration) pid = -1;

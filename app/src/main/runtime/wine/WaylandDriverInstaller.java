@@ -178,6 +178,16 @@ public final class WaylandDriverInstaller {
         writeDiagnostic(ctx, prefix, winePath, "OK: drv=" + driverInSystem32.length()
                 + " so=" + soInWinePath.length() + " GraphicsDriver set"
                 + " surface_patched=" + patched + probeInfo);
+
+        // Dump the GraphicsDriver registry entries so we can verify they
+        // were actually written. This is critical for diagnosing nodrv_CreateWindow:
+        // if the registry entry is missing or wrong, Wine can't find the driver.
+        dumpRegistryDriverEntries(ctx, prefix);
+
+        // Dump PE exports of winewayland.drv by scanning for export names.
+        // Wine's USER_LoadDriver needs specific exports (DllMain + driver funcs).
+        // If exports are missing, the driver loads but can't be used.
+        dumpPeExports(ctx, driverInSystem32, "winewayland.drv");
         return true;
     }
 
@@ -438,6 +448,129 @@ public final class WaylandDriverInstaller {
             Log.i(TAG, "  copied to system32: " + src.getName() + " (" + dst.length() + " bytes)");
         } catch (IOException e) {
             Log.w(TAG, "  copy failed: " + src.getName() + " — " + e.getMessage());
+        }
+    }
+
+    /**
+     * Dumps the GraphicsDriver registry entries from system.reg and user.reg
+     * to the wayland-driver-install.log. This lets us verify that
+     * setGraphicsDriver() actually wrote the entries correctly.
+     */
+    private static void dumpRegistryDriverEntries(Context ctx, File prefix) {
+        try {
+            File logsDir = com.winlator.cmod.runtime.system.LogManager.getLogsDir(ctx);
+            File diagFile = new File(logsDir, "wayland-driver-install.log");
+            java.io.FileWriter fw = new java.io.FileWriter(diagFile, true);
+
+            // Dump system.reg GraphicsDriver entries
+            File systemReg = new File(prefix, "system.reg");
+            if (systemReg.exists()) {
+                String reg = new String(java.nio.file.Files.readAllBytes(systemReg.toPath()));
+                fw.write("--- system.reg GraphicsDriver entries ---\n");
+                boolean foundAny = false;
+                for (String line : reg.split("\n", -1)) {
+                    if (line.contains("GraphicsDriver") || line.contains("Video\\\\")
+                            || line.contains("Drivers]")) {
+                        fw.write("  " + line + "\n");
+                        foundAny = true;
+                    }
+                }
+                if (!foundAny) {
+                    fw.write("  (NO GraphicsDriver or Video entries found in system.reg)\n");
+                }
+            }
+
+            // Dump user.reg [Software\Wine\Drivers] entries
+            File userReg = new File(prefix, "user.reg");
+            if (userReg.exists()) {
+                String reg = new String(java.nio.file.Files.readAllBytes(userReg.toPath()));
+                fw.write("--- user.reg Wine\\Drivers entries ---\n");
+                int drvIdx = reg.indexOf("[Software\\\\Wine\\\\Drivers]");
+                if (drvIdx < 0) {
+                    fw.write("  (NO [Software\\Wine\\Drivers] key found in user.reg)\n");
+                } else {
+                    int nextKey = reg.indexOf("\n[", drvIdx + 1);
+                    if (nextKey < 0) nextKey = reg.length();
+                    String block = reg.substring(drvIdx, nextKey);
+                    for (String line : block.split("\n", -1)) {
+                        fw.write("  " + line + "\n");
+                    }
+                }
+            }
+
+            fw.close();
+        } catch (Exception e) {
+            Log.w(TAG, "dumpRegistryDriverEntries failed: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Dumps the PE export names from a .dll/.drv file by scanning the binary
+     * for the export directory. This is a simplified scanner that looks for
+     * ASCII strings near the export table — it doesn't fully parse the PE
+     * format but is good enough to list the exported function names.
+     */
+    private static void dumpPeExports(Context ctx, File peFile, String label) {
+        try {
+            File logsDir = com.winlator.cmod.runtime.system.LogManager.getLogsDir(ctx);
+            File diagFile = new File(logsDir, "wayland-driver-install.log");
+            java.io.FileWriter fw = new java.io.FileWriter(diagFile, true);
+
+            byte[] data = java.nio.file.Files.readAllBytes(peFile.toPath());
+            fw.write("--- " + label + " PE exports (size=" + data.length + " bytes) ---\n");
+
+            // Search for known Wine display driver export names
+            String[] knownExports = {
+                "DllMain", "wine_get_vulkan_driver",
+                "wine_create_window", "wine_destroy_window",
+                "create_desktop", "create_window",
+                "set_capture", "release_capture",
+                "get_cursor_pos", "set_cursor_pos", "set_cursor",
+                "change_display_settings", "enum_display_settings",
+                "create_dc", "create_compat_dc", "delete_dc",
+                "create_compat_bitmap", "delete_object",
+                "bit_block_transfer", "stretch_block_transfer",
+                "get_text_metrics", "get_text_extent",
+                "create_font", "select_object",
+                "get_device_caps", "get_system_metrics",
+                "register_hotkey", "unregister_hotkey",
+                "set_layered_window_attributes",
+                "set_window_pos", "set_window_style",
+                "set_window_text", "get_window_text",
+                "show_window", "destroy_window",
+                "set_focus", "set_active_window",
+                "clip_cursor", "get_clip_cursor",
+                "keybd_event", "mouse_event",
+                "get_key_state", "get_async_key_state",
+                "map_virtual_key", "to_unicode",
+                "get_keyboard_layout", "get_keyboard_layout_list",
+                "load_keyboard_layout", "unload_keyboard_layout",
+                "activate_keyboard_layout",
+                "vk_to_wchar", "get_keyboard_type",
+                "beep", "message_beep",
+                "get_monitor_info", "enum_display_monitors",
+                "system_parameters_info",
+            };
+
+            int foundCount = 0;
+            for (String name : knownExports) {
+                byte[] search = name.getBytes("ASCII");
+                for (int i = 0; i <= data.length - search.length; i++) {
+                    boolean match = true;
+                    for (int j = 0; j < search.length; j++) {
+                        if (data[i + j] != search[j]) { match = false; break; }
+                    }
+                    if (match) {
+                        fw.write("  EXPORT: " + name + " (found at offset 0x" + Integer.toHexString(i) + ")\n");
+                        foundCount++;
+                        break;
+                    }
+                }
+            }
+            fw.write("  Total known exports found: " + foundCount + "/" + knownExports.length + "\n");
+            fw.close();
+        } catch (Exception e) {
+            Log.w(TAG, "dumpPeExports failed: " + e.getMessage());
         }
     }
 }

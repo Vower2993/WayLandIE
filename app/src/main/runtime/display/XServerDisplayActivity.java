@@ -3911,9 +3911,14 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
 
         List<String> gestureProfileNames = new ArrayList<>();
         int gestureSelectedIndex = 0;
+        // gestureProfileManager may be null if renderDrawerMenu() is called
+        // before it's initialized (it's created at line ~1524, but
+        // renderDrawerMenu() can be called from onCreate at line ~1037).
         try {
-            gestureProfileNames = gestureProfileManager.getProfileNames();
-            gestureSelectedIndex = Math.max(0, gestureProfileManager.indexOfProfile(selectedGestureProfileId()));
+            if (gestureProfileManager != null) {
+                gestureProfileNames = gestureProfileManager.getProfileNames();
+                gestureSelectedIndex = Math.max(0, gestureProfileManager.indexOfProfile(selectedGestureProfileId()));
+            }
         } catch (Throwable t) {
             android.util.Log.e("XServerDisplayActivity", "gesture drawer names failed", t);
         }
