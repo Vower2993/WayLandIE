@@ -97,7 +97,7 @@ public final class WaylandDriverInstaller {
             copyIfExists(prefix, "lib/wine/aarch64-unix/winewayland.so", wineAarch64Unix);
             copyIfExists(prefix, "lib/wine/aarch64-windows/libarm64ecfex.dll", wineAarch64Windows);
             copyIfExists(prefix, "lib/wine/aarch64-windows/ntdll.dll", wineAarch64Windows);
-            // Copy source-built winevulkan.so (Unix-side) — has VK_KHR_android_surface support
+            // Copy source-built winevulkan.so (Unix-side) — has VK_KHR_xlib_surface support
             copyIfExists(prefix, "lib/wine/aarch64-unix/winevulkan.so", wineAarch64Unix);
             // arm64ec-windows dir may not exist in all Proton builds — only copy if dir exists
             File arm64ecDir = new File(winePath, "lib/wine/arm64ec-windows");
@@ -109,19 +109,19 @@ public final class WaylandDriverInstaller {
             }
 
             // CRITICAL: Binary-patch winevulkan.dll to replace Vulkan surface
-            // extension strings with VK_KHR_android_surface.
+            // extension strings with VK_KHR_xlib_surface.
             //
             // WHY: Wine's winevulkan.dll contains hardcoded extension name
             // strings: "VK_KHR_wayland_surface" and "VK_KHR_win32_surface".
             // DXVK requests VK_KHR_win32_surface (Wine maps it to the native
             // platform surface). But the Android Vulkan wrapper (Turnip/Adreno)
-            // only supports VK_KHR_android_surface. So vkCreateInstance fails
+            // only supports VK_KHR_xlib_surface. So vkCreateInstance fails
             // with VK_ERROR_EXTENSION_NOT_PRESENT.
             //
-            // FIX: Replace BOTH strings with "VK_KHR_android_surface" (21 bytes)
+            // FIX: Replace BOTH strings with "VK_KHR_xlib_surface" (19 bytes)
             // using same-length null-patched binary patch:
-            //   "VK_KHR_wayland_surface" (22B) → "VK_KHR_android_surface\0" (22B)
-            //   "VK_KHR_win32_surface" (19B) → "VK_KHR_android_surface\0\0\0" (22B)
+            //   "VK_KHR_wayland_surface" (22B) → "VK_KHR_xlib_surface\0\0\0" (22B)
+            //   "VK_KHR_win32_surface" (19B) → "VK_KHR_xlib_surface\0\0\0" (22B)
             // Also patch winex11.drv which contains VK_KHR_win32_surface too.
             //
             // winevulkan.dll locations — patch ALL copies that wine might load:
@@ -188,7 +188,7 @@ public final class WaylandDriverInstaller {
         // Always set GraphicsDriver (idempotent — removes old entries first)
         setGraphicsDriver(prefix);
 
-        // Check if winevulkan.dll was patched (look for VK_KHR_android_surface)
+        // Check if winevulkan.dll was patched (look for VK_KHR_xlib_surface)
         // We check ALL copies: system32 (what wine loads) AND winePath (the source)
         boolean patched = false;
         String probeInfo = "";
@@ -198,17 +198,17 @@ public final class WaylandDriverInstaller {
             File winevulkanToCheck = winevulkanSys32.exists() ? winevulkanSys32 : winevulkanWinePath;
             if (winevulkanToCheck.exists()) {
                 byte[] vulkanData = java.nio.file.Files.readAllBytes(winevulkanToCheck.toPath());
-                // Search for VK_KHR_android_surface (the replacement string)
-                byte[] androidSearch = "VK_KHR_android_surface".getBytes("ASCII");
-                int androidCount = 0;
-                for (int i = 0; i <= vulkanData.length - androidSearch.length; i++) {
+                // Search for VK_KHR_xlib_surface (the replacement string)
+                byte[] xlibSearch = "VK_KHR_xlib_surface".getBytes("ASCII");
+                int xlibCount = 0;
+                for (int i = 0; i <= vulkanData.length - xlibSearch.length; i++) {
                     boolean match = true;
-                    for (int j = 0; j < androidSearch.length; j++) {
-                        if (vulkanData[i + j] != androidSearch[j]) { match = false; break; }
+                    for (int j = 0; j < xlibSearch.length; j++) {
+                        if (vulkanData[i + j] != xlibSearch[j]) { match = false; break; }
                     }
-                    if (match) androidCount++;
+                    if (match) xlibCount++;
                 }
-                patched = androidCount > 0;
+                patched = xlibCount > 0;
                 // Also count remaining unpatched strings
                 byte[] waylandSearch = "VK_KHR_wayland_surface".getBytes("ASCII");
                 int waylandCount = 0;
@@ -229,7 +229,7 @@ public final class WaylandDriverInstaller {
                     if (match) win32Count++;
                 }
                 probeInfo = " winevulkan_patched=" + patched
-                    + " android_surface=" + androidCount
+                    + " xlib_surface=" + xlibCount
                     + " wayland_surface=" + waylandCount
                     + " win32_surface=" + win32Count
                     + " file=" + winevulkanToCheck.getAbsolutePath()
@@ -237,15 +237,15 @@ public final class WaylandDriverInstaller {
                 // Also check if the winePath copy is patched
                 if (winevulkanWinePath.exists() && !winevulkanToCheck.equals(winevulkanWinePath)) {
                     byte[] wpData = java.nio.file.Files.readAllBytes(winevulkanWinePath.toPath());
-                    int wpAndroid = 0;
-                    for (int i = 0; i <= wpData.length - androidSearch.length; i++) {
+                    int wpXlib = 0;
+                    for (int i = 0; i <= wpData.length - xlibSearch.length; i++) {
                         boolean match = true;
-                        for (int j = 0; j < androidSearch.length; j++) {
-                            if (wpData[i + j] != androidSearch[j]) { match = false; break; }
+                        for (int j = 0; j < xlibSearch.length; j++) {
+                            if (wpData[i + j] != xlibSearch[j]) { match = false; break; }
                         }
-                        if (match) wpAndroid++;
+                        if (match) wpXlib++;
                     }
-                    probeInfo += " winePath_android_surface=" + wpAndroid;
+                    probeInfo += " winePath_xlib_surface=" + wpXlib;
                 }
             } else {
                 probeInfo = " winevulkan.dll NOT FOUND in system32 or winePath";
@@ -346,14 +346,14 @@ public final class WaylandDriverInstaller {
 
     /**
      * Binary-patches PE/ELF binaries to replace Vulkan surface extension
-     * strings with VK_KHR_android_surface.
+     * strings with VK_KHR_xlib_surface.
      *
      * Patches BOTH winevulkan.dll AND DXVK DLLs (dxgi.dll, d3d11.dll, etc.)
      * because DXVK hardcodes VK_KHR_win32_surface in its own binaries.
      *
      * String lengths (bytes, NOT including null terminator):
-     *   "VK_KHR_wayland_surface"  = 22 bytes → "VK_KHR_android_surface" = 22 bytes (same)
-     *   "VK_KHR_win32_surface"    = 20 bytes → "VK_KHR_android_surface" = 22 bytes (2B longer)
+     *   "VK_KHR_wayland_surface"  = 22 bytes → "VK_KHR_xlib_surface" = 22 bytes (same)
+     *   "VK_KHR_win32_surface"    = 20 bytes → "VK_KHR_xlib_surface" = 22 bytes (2B longer)
      *
      * For same-length: replace in-place + null terminator.
      * For longer replacement: write replacement + null, overwriting 3 bytes past
@@ -367,31 +367,28 @@ public final class WaylandDriverInstaller {
         try {
             byte[] data = java.nio.file.Files.readAllBytes(soFile.toPath());
 
-            // Patch multiple surface extension strings to VK_KHR_android_surface.
+            // Patch surface extension strings to VK_KHR_xlib_surface.
+            //
+            // The adrenotools Vulkan wrapper (Turnip/Adreno) exposes:
+            //   VK_KHR_xlib_surface  (19 bytes) — SUPPORTED by the wrapper
+            //   VK_KHR_xlib_surface (22 bytes) — NOT supported (confirmed by +vulkan log)
+            //
+            // The adrenotools wrapper translates VK_KHR_xlib_surface internally
+            // to VK_KHR_xlib_surface for the real driver.
             //
             // String lengths (bytes, NOT including null terminator):
-            //   "VK_KHR_wayland_surface"  = 22 bytes
-            //   "VK_KHR_win32_surface"    = 20 bytes
-            //   "VK_KHR_android_surface"  = 22 bytes
-            //
-            // For wayland_surface (22B) → android_surface (22B): same length, easy.
-            // For win32_surface (20B) → android_surface (22B): replacement is 2 bytes
-            // LONGER. We overwrite the original 20 bytes + 2 bytes of whatever follows.
-            // In PE .rdata sections, strings are null-terminated and often followed by
-            // padding or other strings. Overwriting 2 extra bytes is safe because:
-            //   - If followed by null (end of string), we overwrite the null + 1 padding byte
-            //   - If followed by another extension string we're also patching, it gets patched too
-            //   - The null terminator of the replacement is at position 22, which is past
-            //     the original string's null terminator at position 20
+            //   "VK_KHR_wayland_surface"  = 22 bytes → "VK_KHR_xlib_surface\0\0\0" = 19+3 null = 22
+            //   "VK_KHR_win32_surface"    = 20 bytes → "VK_KHR_xlib_surface\0" = 19+1 null = 20
+            // Both are same-length replacements with null padding — no overflow.
             String[][] patches = {
-                {"VK_KHR_wayland_surface", "VK_KHR_android_surface"},
-                {"VK_KHR_win32_surface",   "VK_KHR_android_surface"},
+                {"VK_KHR_wayland_surface", "VK_KHR_xlib_surface"},
+                {"VK_KHR_win32_surface",   "VK_KHR_xlib_surface"},
             };
 
             // First, probe for all relevant substrings
             String[] probes = {"wayland_surface", "win32_surface", "VK_KHR_wayland",
                                "VK_KHR_win32", "VK_KHR_android", "VK_KHR_xlib",
-                               "VK_KHR_surface", "winewayland"};
+                               "VK_KHR_surface", "winewayland", "xlib_surface"};
             StringBuilder probeReport = new StringBuilder();
             for (String probe : probes) {
                 byte[] probeBytes = probe.getBytes("ASCII");
@@ -421,10 +418,10 @@ public final class WaylandDriverInstaller {
                     if (match) {
                         // Write replacement + null terminator.
                         // If replacement is LONGER than search (e.g. win32_surface=20B
-                        // → android_surface=22B), we write 22 bytes + 1 null = 23 bytes,
+                        // → xlib_surface=22B), we write 22 bytes + 1 null = 23 bytes,
                         // overwriting 3 bytes past the original 20-byte string.
                         // The null terminator at byte 22 ensures C string functions see
-                        // a properly terminated "VK_KHR_android_surface" string.
+                        // a properly terminated "VK_KHR_xlib_surface" string.
                         // The 2-3 bytes of overflow corrupt the start of the next string
                         // in the PE .rdata section, but this is acceptable because:
                         //   - The next string is likely another Vulkan extension we're

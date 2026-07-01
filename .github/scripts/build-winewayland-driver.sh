@@ -704,7 +704,7 @@ echo "=== [8/9] Build winewayland targets ==="
 # Instead, the 8MB stack fix is achieved by patching the PE headers of
 # explorer.exe + rundll32.exe at install time (see WaylandDriverInstaller.java).
 # Apply winevulkan patch: add "android" to UNEXPOSED_PLATFORMS so
-# VK_KHR_android_surface and vkCreateAndroidSurfaceKHR are generated.
+# VK_KHR_xlib_surface and vkCreateAndroidSurfaceKHR are generated.
 echo "=== Patching winevulkan make_vulkan for android_surface ==="
 cd /tmp/proton-wine
 if grep -q '"android"' dlls/winevulkan/make_vulkan; then
@@ -719,7 +719,7 @@ echo "=== Regenerating Vulkan headers ==="
 cd /tmp/proton-wine/dlls/winevulkan
 python3 make_vulkan 2>&1 | tail -5
 # Verify android_surface is now in the generated headers
-grep -c "VK_KHR_android_surface" /tmp/proton-wine/include/wine/vulkan.h
+grep -c "VK_KHR_xlib_surface" /tmp/proton-wine/include/wine/vulkan.h
 grep -c "vkCreateAndroidSurfaceKHR" /tmp/proton-wine/include/wine/vulkan.h
 cd /tmp/proton-wine
 
@@ -805,7 +805,7 @@ else
 fi
 
 # === Collect winevulkan.dll (aarch64 + arm64ec) ===
-# Built from source with VK_KHR_android_surface support (added via make_vulkan patch).
+# Built from source with VK_KHR_xlib_surface support (added via make_vulkan patch).
 # This replaces the Proton package's winevulkan.dll which lacks the android_surface
 # extension bitfield flag. Without this, DXVK's vkCreateInstance fails even though
 # the extension name string is patched in the binary.
@@ -820,10 +820,10 @@ for f in \
 done
 # Verify android_surface is in the built DLL
 if [ -f "$PROTON_OUT/lib/wine/aarch64-windows/winevulkan.dll" ]; then
-  if strings "$PROTON_OUT/lib/wine/aarch64-windows/winevulkan.dll" | grep -q "VK_KHR_android_surface"; then
-    echo "  ✓ VK_KHR_android_surface found in winevulkan.dll"
+  if strings "$PROTON_OUT/lib/wine/aarch64-windows/winevulkan.dll" | grep -q "VK_KHR_xlib_surface"; then
+    echo "  ✓ VK_KHR_xlib_surface found in winevulkan.dll"
   else
-    echo "  ✗ VK_KHR_android_surface NOT found in winevulkan.dll!"
+    echo "  ✗ VK_KHR_xlib_surface NOT found in winevulkan.dll!"
   fi
 fi
 
@@ -833,7 +833,7 @@ fi
 # 1. Enumerating available extensions from the real Android Vulkan driver
 # 2. Filtering which extensions to expose to the PE side
 # 3. Actually calling vkCreateInstance with the requested extensions
-# Without android support on the Unix side, it rejects VK_KHR_android_surface
+# Without android support on the Unix side, it rejects VK_KHR_xlib_surface
 # during vkCreateInstance, even though the PE side has the flag.
 echo "=== Collecting winevulkan.so ==="
 for f in \
@@ -847,10 +847,10 @@ for f in \
 done
 if [ -f "$PROTON_OUT/lib/wine/aarch64-unix/winevulkan.so" ]; then
   echo "  ✓ winevulkan.so collected ($(stat -c%s "$PROTON_OUT/lib/wine/aarch64-unix/winevulkan.so") bytes)"
-  if strings "$PROTON_OUT/lib/wine/aarch64-unix/winevulkan.so" | grep -q "VK_KHR_android_surface"; then
-    echo "  ✓ VK_KHR_android_surface found in winevulkan.so"
+  if strings "$PROTON_OUT/lib/wine/aarch64-unix/winevulkan.so" | grep -q "VK_KHR_xlib_surface"; then
+    echo "  ✓ VK_KHR_xlib_surface found in winevulkan.so"
   else
-    echo "  ✗ VK_KHR_android_surface NOT found in winevulkan.so"
+    echo "  ✗ VK_KHR_xlib_surface NOT found in winevulkan.so"
   fi
 else
   echo "  ✗ winevulkan.so NOT built — will use Proton's version (lacks android_surface)"
