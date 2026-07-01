@@ -731,6 +731,7 @@ make -j$(nproc) -k \
   dlls/ntdll/arm64ec-windows/ntdll.dll \
   dlls/winevulkan/aarch64-windows/winevulkan.dll \
   dlls/winevulkan/arm64ec-windows/winevulkan.dll \
+  dlls/winevulkan/winevulkan.so \
   2>&1 | tail -300 || true
 
 echo "=== Searching for built artifacts ==="
@@ -826,6 +827,35 @@ if [ -f "$PROTON_OUT/lib/wine/aarch64-windows/winevulkan.dll" ]; then
   fi
 fi
 
+# === Collect winevulkan.so (Unix-side) ===
+# CRITICAL: The Unix-side winevulkan.so must also be built from source with
+# android_surface support. The Unix side is responsible for:
+# 1. Enumerating available extensions from the real Android Vulkan driver
+# 2. Filtering which extensions to expose to the PE side
+# 3. Actually calling vkCreateInstance with the requested extensions
+# Without android support on the Unix side, it rejects VK_KHR_android_surface
+# during vkCreateInstance, even though the PE side has the flag.
+echo "=== Collecting winevulkan.so ==="
+for f in \
+  "/tmp/proton-wine/dlls/winevulkan/winevulkan.so" \
+  "/tmp/proton-wine/dlls/winevulkan/winevulkan.dll.so"; do
+  if [ -f "$f" ] && [ "$(stat -c%s "$f")" -gt 1000 ]; then
+    echo "Found winevulkan.so: $f ($(stat -c%s "$f") bytes)"
+    cp "$f" "$PROTON_OUT/lib/wine/aarch64-unix/winevulkan.so"
+    break
+  fi
+done
+if [ -f "$PROTON_OUT/lib/wine/aarch64-unix/winevulkan.so" ]; then
+  echo "  ✓ winevulkan.so collected ($(stat -c%s "$PROTON_OUT/lib/wine/aarch64-unix/winevulkan.so") bytes)"
+  if strings "$PROTON_OUT/lib/wine/aarch64-unix/winevulkan.so" | grep -q "VK_KHR_android_surface"; then
+    echo "  ✓ VK_KHR_android_surface found in winevulkan.so"
+  else
+    echo "  ✗ VK_KHR_android_surface NOT found in winevulkan.so"
+  fi
+else
+  echo "  ✗ winevulkan.so NOT built — will use Proton's version (lacks android_surface)"
+fi
+
 # Verify the new ntdll has the FEX-required exports
 echo "=== Verifying ntdll exports ==="
 NTDLL_HYBRID="$PROTON_OUT/lib/wine/aarch64-windows/ntdll.dll"
@@ -849,10 +879,12 @@ SO_SIZE=$(stat -c%s "$PROTON_OUT/lib/wine/aarch64-unix/winewayland.so" 2>/dev/nu
 NTDLL_AA_SIZE=$(stat -c%s "$PROTON_OUT/lib/wine/aarch64-windows/ntdll.dll" 2>/dev/null || echo 0)
 NTDLL_EC_SIZE=$(stat -c%s "$PROTON_OUT/lib/wine/arm64ec-windows/ntdll.dll" 2>/dev/null || echo 0)
 VULKAN_SIZE=$(stat -c%s "$PROTON_OUT/lib/wine/aarch64-windows/winevulkan.dll" 2>/dev/null || echo 0)
+VULKAN_SO_SIZE=$(stat -c%s "$PROTON_OUT/lib/wine/aarch64-unix/winevulkan.so" 2>/dev/null || echo 0)
 echo "winewayland.drv: $DRV_SIZE bytes"
 echo "winewayland.so: $SO_SIZE bytes"
 echo "ntdll.dll (aarch64): $NTDLL_AA_SIZE bytes"
 echo "winevulkan.dll: $VULKAN_SIZE bytes"
+echo "winevulkan.so: $VULKAN_SO_SIZE bytes"
 
 if [ "$DRV_SIZE" -lt 1000 ]; then
   echo "FATAL: winewayland.drv missing or too small"

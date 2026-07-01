@@ -97,6 +97,8 @@ public final class WaylandDriverInstaller {
             copyIfExists(prefix, "lib/wine/aarch64-unix/winewayland.so", wineAarch64Unix);
             copyIfExists(prefix, "lib/wine/aarch64-windows/libarm64ecfex.dll", wineAarch64Windows);
             copyIfExists(prefix, "lib/wine/aarch64-windows/ntdll.dll", wineAarch64Windows);
+            // Copy source-built winevulkan.so (Unix-side) — has VK_KHR_android_surface support
+            copyIfExists(prefix, "lib/wine/aarch64-unix/winevulkan.so", wineAarch64Unix);
             // arm64ec-windows dir may not exist in all Proton builds — only copy if dir exists
             File arm64ecDir = new File(winePath, "lib/wine/arm64ec-windows");
             if (arm64ecDir.isDirectory()) {
