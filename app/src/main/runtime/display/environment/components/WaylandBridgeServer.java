@@ -42,6 +42,9 @@ public class WaylandBridgeServer {
             String tmpDir, String hookLibDir,
             String driverDir, String driverName);
 
+    // Set the ANativeWindow env var for winewayland.drv's Vulkan surface creation
+    public static native void nativeSetAnativeWindow(android.view.Surface surface);
+
     static {
         try {
             System.loadLibrary("waylandie_display_native");

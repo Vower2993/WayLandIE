@@ -5952,3 +5952,25 @@ Java_com_winlator_cmod_runtime_display_environment_components_WaylandBridgeServe
     reset_ahb_vk_renderer_locked();
     pthread_mutex_unlock(&g_ahb_vk_mutex);
 }
+
+/* Set the WAYLANDIE_ANATIVE_WINDOW env var so winewayland.drv's vulkan.c
+ * can use vkCreateAndroidSurfaceKHR instead of vkCreateWaylandSurfaceKHR.
+ * Called from Java when the Android Surface is created. */
+JNIEXPORT void JNICALL
+Java_com_winlator_cmod_runtime_display_environment_components_WaylandBridgeServer_nativeSetAnativeWindow(
+        JNIEnv *env, jclass clazz, jobject surface) {
+    (void)env;
+    (void)clazz;
+    if (!surface) {
+        setenv("WAYLANDIE_ANATIVE_WINDOW", "0", 1);
+        return;
+    }
+    /* Get the ANativeWindow from the Surface object */
+    ANativeWindow *anw = ANativeWindow_fromSurface(env, surface);
+    if (anw) {
+        char buf[32];
+        snprintf(buf, sizeof(buf), "%llu", (unsigned long long)(uintptr_t)anw);
+        setenv("WAYLANDIE_ANATIVE_WINDOW", buf, 1);
+        /* Don't release — winewayland.drv will use it during Vulkan init */
+    }
+}
