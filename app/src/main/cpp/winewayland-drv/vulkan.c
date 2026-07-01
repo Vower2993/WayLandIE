@@ -34,9 +34,6 @@
 #include "wine/vulkan_driver.h"
 
 #ifdef __ANDROID__
-/* Include Android headers AFTER wine/vulkan.h so Vulkan types are defined.
- * The NDK's vulkan/vulkan_android.h expects vulkan/vulkan_core.h first,
- * but wine/vulkan.h provides equivalent definitions. */
 #include <android/hardware_buffer.h>
 #include <android/native_window.h>
 #endif
@@ -49,70 +46,42 @@ WINE_DEFAULT_DEBUG_CHANNEL(vulkan);
  * vkCreateAndroidSurfaceKHR instead, which requires an ANativeWindow. */
 static ANativeWindow *g_anative_window = NULL;
 
-/* Track the Wayland surface associated with each HWND for dmabuf present. */
-static struct wayland_client_surface *g_current_surface = NULL;
-
 static const struct vulkan_driver_funcs wayland_vulkan_driver_funcs;
 
 #ifdef __ANDROID__
 
-/* Extract dmabuf fd from a VkImage via AHardwareBuffer.
- * Returns the dmabuf fd, or -1 on failure.
- * The caller MUST close() the fd when done. */
-static int wayland_vulkan_image_to_dmabuf_fd(VkDevice device, VkImage image,
-                                             uint32_t *out_width, uint32_t *out_height,
-                                             uint32_t *out_stride, uint32_t *out_format)
+/* Wine's vulkan.h doesn't define the Android surface extension types.
+ * Define them locally so we can call vkCreateAndroidSurfaceKHR. */
+#define VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR 1000008000
+
+typedef struct VkAndroidSurfaceCreateInfoKHR {
+    VkStructureType sType;
+    const void *pNext;
+    VkAndroidSurfaceCreateFlagsKHR flags;
+    struct ANativeWindow *window;
+} VkAndroidSurfaceCreateInfoKHR_Local;
+
+typedef VkResult (VKAPI_PTR *PFN_vkCreateAndroidSurfaceKHR_local)(
+    VkInstance, const VkAndroidSurfaceCreateInfoKHR_Local *,
+    const VkAllocationCallbacks *, VkSurfaceKHR *);
+
+/* Load vkCreateAndroidSurfaceKHR at runtime via vkGetInstanceProcAddr.
+ * Wine's vulkan_instance struct doesn't have p_vkCreateAndroidSurfaceKHR. */
+static PFN_vkCreateAndroidSurfaceKHR_local load_vkCreateAndroidSurfaceKHR(
+    const struct vulkan_instance *instance)
 {
-    /* This function uses VK_ANDROID_external_memory_android_hardware_buffer
-     * to export the VkImage as an AHardwareBuffer, then extracts the dmabuf
-     * fd via AHardwareBuffer_getNativeHandle().
-     *
-     * Requirements:
-     * - The VkImage must have been created with
-     *   VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID
-     * - The device must support VK_ANDROID_external_memory_android_hardware_buffer
-     *
-     * TODO: This requires swapchain images to be created with AHB external
-     * memory. Currently, DXVK creates swapchain images without AHB support.
-     * A winevulkan-level hook is needed to add AHB external memory to
-     * swapchain image creation. See the winevulkan-dmabuf-hook patch. */
-    ERR("wayland_vulkan_image_to_dmabuf_fd: not yet implemented — requires winevulkan swapchain hook\n");
-    return -1;
-}
-
-/* Present a dmabuf fd through the Wayland compositor.
- * Creates a wl_buffer from the fd via zwp_linux_dmabuf_v1, attaches it
- * to the surface, adds damage, and commits. */
-static VkResult wayland_vulkan_present_dmabuf(int dmabuf_fd, uint32_t width,
-                                              uint32_t height, uint32_t stride,
-                                              uint32_t format, uint64_t modifier)
-{
-    struct wayland_dmabuf_buffer *dmabuf_buf;
-
-    if (!g_current_surface)
+    static PFN_vkCreateAndroidSurfaceKHR_local fn = NULL;
+    if (!fn && instance && instance->host.instance)
     {
-        ERR("wayland_vulkan_present_dmabuf: no current Wayland surface\n");
-        return VK_ERROR_SURFACE_LOST_KHR;
+        fn = (PFN_vkCreateAndroidSurfaceKHR_local)
+            instance->p_vkGetInstanceProcAddr(instance->host.instance,
+                                              "vkCreateAndroidSurfaceKHR");
+        if (fn)
+            ERR("Loaded vkCreateAndroidSurfaceKHR at %p\n", fn);
+        else
+            ERR("vkCreateAndroidSurfaceKHR not available — Vulkan surface creation will fail\n");
     }
-
-    /* Create a wl_buffer from the dmabuf fd. The fd is dup'd internally
-     * so the caller can close it immediately after. */
-    dmabuf_buf = wayland_dmabuf_wl_buffer_for_gpu_fd(width, height, dmabuf_fd,
-                                                     format, modifier, stride, NULL);
-    if (!dmabuf_buf)
-    {
-        ERR("wayland_vulkan_present_dmabuf: failed to create dmabuf buffer\n");
-        return VK_ERROR_OUT_OF_HOST_MEMORY;
-    }
-
-    /* Attach the dmabuf buffer to the Wayland surface and commit. */
-    wayland_surface_attach_dmabuf(g_current_surface->client.wl_surface ?
-                                  NULL : NULL, dmabuf_buf, NULL);
-    /* TODO: wayland_surface_attach_dmabuf expects a struct wayland_surface *,
-     * not a wl_surface. Need to get the wayland_surface from the HWND. */
-
-    TRACE("Presented dmabuf fd=%d %ux%u through Wayland\n", dmabuf_fd, width, height);
-    return VK_SUCCESS;
+    return fn;
 }
 
 #endif /* __ANDROID__ */
@@ -130,13 +99,7 @@ static VkResult wayland_vulkan_surface_create(HWND hwnd, BOOL raw, const struct 
 #ifdef __ANDROID__
     /* On Android, the Vulkan driver only supports VK_KHR_android_surface,
      * not VK_KHR_wayland_surface. Create an Android surface using the
-     * ANativeWindow provided by the Java side (set via env var).
-     *
-     * The zero-copy dmabuf path is handled by intercepting vkQueuePresentKHR
-     * at the winevulkan level — see wayland_vulkan_present_dmabuf() above.
-     * For now, this creates a working Vulkan surface so DXVK can render.
-     * The actual frame data flows through the Wayland compositor via
-     * zwp_linux_dmabuf_v1 once the present hook is connected. */
+     * ANativeWindow provided by the Java side (set via env var). */
     {
         const char *anw_env = getenv("WAYLANDIE_ANATIVE_WINDOW");
         if (!g_anative_window && anw_env)
@@ -145,14 +108,23 @@ static VkResult wayland_vulkan_surface_create(HWND hwnd, BOOL raw, const struct 
 
     if (g_anative_window)
     {
-        VkAndroidSurfaceCreateInfoKHR create_info_android;
-        create_info_android.sType = VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR;
-        create_info_android.pNext = NULL;
-        create_info_android.flags = 0;
-        create_info_android.window = g_anative_window;
+        VkAndroidSurfaceCreateInfoKHR_Local create_info;
+        PFN_vkCreateAndroidSurfaceKHR_local pfn;
 
-        res = instance->p_vkCreateAndroidSurfaceKHR(instance->host.instance,
-                                                    &create_info_android, NULL, handle);
+        pfn = load_vkCreateAndroidSurfaceKHR(instance);
+        if (!pfn)
+        {
+            ERR("Cannot create Android surface — vkCreateAndroidSurfaceKHR not loaded\n");
+            client_surface_release(&surface->client);
+            return VK_ERROR_EXTENSION_NOT_PRESENT;
+        }
+
+        create_info.sType = (VkStructureType)VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR;
+        create_info.pNext = NULL;
+        create_info.flags = 0;
+        create_info.window = g_anative_window;
+
+        res = pfn(instance->host.instance, &create_info, NULL, handle);
         if (res != VK_SUCCESS)
         {
             ERR("Failed to create Android Vulkan surface, res=%d\n", res);
@@ -160,7 +132,6 @@ static VkResult wayland_vulkan_surface_create(HWND hwnd, BOOL raw, const struct 
             return res;
         }
 
-        g_current_surface = surface;
         set_client_surface(hwnd, surface);
         *client = &surface->client;
         TRACE("Created Android surface=0x%s for hwnd=%p\n", wine_dbgstr_longlong(*handle), hwnd);
@@ -201,8 +172,7 @@ static VkBool32 wayland_get_physical_device_presentation_support(struct vulkan_p
     TRACE("%p %u\n", physical_device, index);
 
 #ifdef __ANDROID__
-    /* On Android, always claim presentation support — the Android Vulkan
-     * driver handles queueing to the ANativeWindow. */
+    /* On Android, always claim presentation support */
     return VK_TRUE;
 #else
     return instance->p_vkGetPhysicalDeviceWaylandPresentationSupportKHR(physical_device->host.physical_device, index,
@@ -214,11 +184,6 @@ static void wayland_map_instance_extensions(struct vulkan_instance_extensions *e
 {
     if (extensions->has_VK_KHR_win32_surface) extensions->has_VK_KHR_wayland_surface = 1;
     if (extensions->has_VK_KHR_wayland_surface) extensions->has_VK_KHR_win32_surface = 1;
-#ifdef __ANDROID__
-    /* Map win32 surface to android surface on Android */
-    if (extensions->has_VK_KHR_win32_surface) extensions->has_VK_KHR_android_surface = 1;
-    if (extensions->has_VK_KHR_android_surface) extensions->has_VK_KHR_win32_surface = 1;
-#endif
 }
 
 static void wayland_map_device_extensions(struct vulkan_device_extensions *extensions)
@@ -229,11 +194,6 @@ static void wayland_map_device_extensions(struct vulkan_device_extensions *exten
     if (extensions->has_VK_KHR_external_semaphore_fd) extensions->has_VK_KHR_external_semaphore_win32 = 1;
     if (extensions->has_VK_KHR_external_fence_win32) extensions->has_VK_KHR_external_fence_fd = 1;
     if (extensions->has_VK_KHR_external_fence_fd) extensions->has_VK_KHR_external_fence_win32 = 1;
-#ifdef __ANDROID__
-    /* Enable AHB external memory for dmabuf export */
-    if (extensions->has_VK_KHR_external_memory_fd)
-        extensions->has_VK_ANDROID_external_memory_android_hardware_buffer = 1;
-#endif
 }
 
 static const struct vulkan_driver_funcs wayland_vulkan_driver_funcs =
