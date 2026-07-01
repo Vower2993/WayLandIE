@@ -7922,7 +7922,10 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
         }
 
         if (!args.isEmpty() && !args.startsWith("winhandler.exe") && !args.startsWith("explorer")) {
-            return "winhandler.exe " + args;
+            // Use "start /wait" to make wine wait for the child process.
+            // Without /wait, winhandler.exe exits after launching the game,
+            // causing wine to shut down before the game can initialize.
+            return "start /wait winhandler.exe " + args;
         } else {
             return args;
         }
