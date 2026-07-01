@@ -1173,6 +1173,17 @@ public class GuestProgramLauncherComponent extends EnvironmentComponent {
         envVars.toStringArray(),
         workingDir != null ? workingDir : rootDir,
         (status) -> {
+          // Log the wine process exit code + timestamp so we can correlate
+          // it with bridge output and wine debug logs when diagnosing crashes.
+          // Status > 128 typically means killed by signal (status - 128).
+          // 137 = SIGKILL (Android LMK or explicit kill)
+          // 139 = SIGSEGV
+          // 143 = SIGTERM (normal stop)
+          Log.e("GuestProgramLauncherComponent",
+              "GUEST_PROCESS_EXIT: status=" + status
+              + " timestamp=" + new java.util.Date()
+              + " (status>128 → signal " + (status > 128 ? (status - 128) : "N/A") + ")");
+
           synchronized (lock) {
             if (gen == launchGeneration) pid = -1;
           }

@@ -108,13 +108,67 @@ object LogManager {
 
         try {
             stopAppLogging()
-            val pid = android.os.Process.myPid()
+            // Capture logcat from ALL processes (not just our PID) because:
+            //   - The WaylandIE bionic bridge runs as a SEPARATE process
+            //     (libwaylandie_bridge_exe.so) with its own PID — its log
+            //     lines (tag "WayLandIE/Bridge") would be filtered out by
+            //     --pid.
+            //   - Wine subprocesses also have different PIDs.
+            // Use a tag-include filter to keep the log size manageable.
+            // Tag list covers all app components: activity, bridge, server,
+            // installer, wine launcher, container manager, graphics, input.
+            //
+            // Levels: *:I captures Info+ (the app uses Log.i for most
+            // diagnostic output). Verbose is excluded to avoid log spam.
+            val tagFilter = listOf(
+                "XServerDisplayActivity",
+                "WaylandBridgeComponent",
+                "WaylandBridgeServer",
+                "WayLandIE/Bridge",
+                "WaylandDriverInstaller",
+                "VulkanRenderer",
+                "XServerSurfaceView",
+                "GuestProgramLauncherComponent",
+                "GuestLauncher",
+                "WinHandler",
+                "ContainerManager",
+                "ContainerCreation",
+                "ContainerLaunch",
+                "ImageFsInstaller",
+                "WineUtils",
+                "WineInfo",
+                "WineRequestHandler",
+                "XClientRequestHandler",
+                "XServer",
+                "XServerLogs",
+                "XServerLeakCheck",
+                "ProcessHelper",
+                "AdrenotoolsManager",
+                "GraphicsDriverExtraction",
+                "PluviaApp",
+                "LogManager",
+                "ContentsManager",
+                "ICManager",
+                "InputControls",
+                "GestureProfileManager",
+                "SGSRResize",
+                "SetupWizardActivity",
+                "Shortcut",
+                "ShortcutsFragment",
+                "SHORTCUTS",
+                "UnifiedActivity",
+                "EPIC",
+                "WnSteamQr",
+                "WnSteamSession",
+                "RestoreOp",
+                "SeekBar",
+            ).joinToString(":") + ":I"
             appLogProcess =
                 Runtime.getRuntime().exec(
-                    arrayOf("logcat", "-f", logFile.absolutePath, "--pid=$pid", "*:W"),
+                    arrayOf("logcat", "-f", logFile.absolutePath, tagFilter, "*:S"),
                 )
             closeProcessStdin(appLogProcess)
-            Log.i(TAG, "Application debug logging started (PID=$pid)")
+            Log.i(TAG, "Application debug logging started (tag-filtered, all PIDs)")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start application logging: ${e.message}")
         }
