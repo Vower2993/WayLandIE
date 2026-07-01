@@ -106,33 +106,40 @@ public final class WaylandDriverInstaller {
                 Log.i(TAG, "ensureDriverInstalled: arm64ec-windows dir not present — skipping arm64ec copies");
             }
 
-            // CRITICAL: Binary-patch winevulkan.dll to change the Vulkan surface
-            // extension from VK_KHR_wayland_surface to VK_KHR_xlib_surface.
+            // CRITICAL: Binary-patch winevulkan.dll to replace Vulkan surface
+            // extension strings with VK_KHR_android_surface.
             //
-            // WHY: Wine's winevulkan.dll contains the hardcoded string
-            // "VK_KHR_wayland_surface" which it reports to the Vulkan loader
-            // as a required extension. But the Android Vulkan wrapper (loaded
-            // via VK_ICD_FILENAMES) only supports VK_KHR_xlib_surface (which
-            // it translates to VK_KHR_android_surface). So vkCreateInstance
-            // fails with VK_ERROR_EXTENSION_NOT_PRESENT.
+            // WHY: Wine's winevulkan.dll contains hardcoded extension name
+            // strings: "VK_KHR_wayland_surface" and "VK_KHR_win32_surface".
+            // DXVK requests VK_KHR_win32_surface (Wine maps it to the native
+            // platform surface). But the Android Vulkan wrapper (Turnip/Adreno)
+            // only supports VK_KHR_android_surface. So vkCreateInstance fails
+            // with VK_ERROR_EXTENSION_NOT_PRESENT.
             //
-            // PREVIOUS BUG: We were patching winewayland.so, but the string
-            // "VK_KHR_wayland_surface" does NOT exist in winewayland.so —
-            // it lives in winevulkan.dll. The patch was always a no-op
-            // (surface_patched=false in every test log).
+            // FIX: Replace BOTH strings with "VK_KHR_android_surface" (21 bytes)
+            // using same-length null-patched binary patch:
+            //   "VK_KHR_wayland_surface" (22B) → "VK_KHR_android_surface\0" (22B)
+            //   "VK_KHR_win32_surface" (19B) → "VK_KHR_android_surface\0\0\0" (22B)
+            // Also patch winex11.drv which contains VK_KHR_win32_surface too.
             //
-            // FIX: Replace the string "VK_KHR_wayland_surface" (22 bytes) with
-            // "VK_KHR_xlib_surface\0\0\0" (19 bytes + 3 null padding = 22 bytes)
-            // in winevulkan.dll. winevulkan.dll then requests
-            // VK_KHR_xlib_surface, which the Android wrapper handles.
-            //
-            // winevulkan.dll locations (try both aarch64-windows and arm64ec-windows):
+            // winevulkan.dll locations — patch ALL copies that wine might load:
+            // 1. winePath/lib/wine/aarch64-windows/winevulkan.dll (Proton install)
+            // 2. winePath/lib/wine/arm64ec-windows/winevulkan.dll (arm64ec, may not exist)
+            // 3. prefix/drive_c/windows/system32/winevulkan.dll (container's system32)
+            // 4. prefix/drive_c/windows/syswow64/winevulkan.dll (32-bit, may not exist)
             File winevulkanAarch64 = new File(wineAarch64Windows, "winevulkan.dll");
             File winevulkanArm64ec = new File(winePath, "lib/wine/arm64ec-windows/winevulkan.dll");
             File winevulkanPrefix = new File(prefix, "drive_c/windows/system32/winevulkan.dll");
+            File winevulkanSyswow64 = new File(prefix, "drive_c/windows/syswow64/winevulkan.dll");
             patchSurfaceExtension(winevulkanAarch64);
             patchSurfaceExtension(winevulkanArm64ec);
             patchSurfaceExtension(winevulkanPrefix);
+            patchSurfaceExtension(winevulkanSyswow64);
+            // Also patch winex11.drv — it also contains VK_KHR_win32_surface
+            File winex11Aarch64 = new File(wineAarch64Windows, "winex11.drv");
+            File winex11Prefix = new File(prefix, "drive_c/windows/system32/winex11.drv");
+            patchSurfaceExtension(winex11Aarch64);
+            patchSurfaceExtension(winex11Prefix);
             // Also patch winewayland.so (in case it has the string too)
             patchSurfaceExtension(new File(wineAarch64Unix, "winewayland.so"));
             patchSurfaceExtension(new File(prefix, "lib/wine/aarch64-unix/winewayland.so"));
@@ -162,27 +169,29 @@ public final class WaylandDriverInstaller {
         // Always set GraphicsDriver (idempotent — removes old entries first)
         setGraphicsDriver(prefix);
 
-        // Check if winevulkan.dll was patched (look for VK_KHR_xlib_surface)
-        // We check winevulkan.dll in system32, since that's what wine actually loads
+        // Check if winevulkan.dll was patched (look for VK_KHR_android_surface)
+        // We check ALL copies: system32 (what wine loads) AND winePath (the source)
         boolean patched = false;
         String probeInfo = "";
         try {
-            File winevulkanToCheck = new File(prefix, "drive_c/windows/system32/winevulkan.dll");
-            if (!winevulkanToCheck.exists()) {
-                winevulkanToCheck = new File(winePath, "lib/wine/aarch64-windows/winevulkan.dll");
-            }
+            File winevulkanSys32 = new File(prefix, "drive_c/windows/system32/winevulkan.dll");
+            File winevulkanWinePath = new File(winePath, "lib/wine/aarch64-windows/winevulkan.dll");
+            File winevulkanToCheck = winevulkanSys32.exists() ? winevulkanSys32 : winevulkanWinePath;
             if (winevulkanToCheck.exists()) {
                 byte[] vulkanData = java.nio.file.Files.readAllBytes(winevulkanToCheck.toPath());
-                byte[] xlibSearch = "VK_KHR_xlib_surface".getBytes("ASCII");
-                for (int i = 0; i <= vulkanData.length - xlibSearch.length; i++) {
+                // Search for VK_KHR_android_surface (the replacement string)
+                byte[] androidSearch = "VK_KHR_android_surface".getBytes("ASCII");
+                int androidCount = 0;
+                for (int i = 0; i <= vulkanData.length - androidSearch.length; i++) {
                     boolean match = true;
-                    for (int j = 0; j < xlibSearch.length; j++) {
-                        if (vulkanData[i + j] != xlibSearch[j]) { match = false; break; }
+                    for (int j = 0; j < androidSearch.length; j++) {
+                        if (vulkanData[i + j] != androidSearch[j]) { match = false; break; }
                     }
-                    if (match) { patched = true; break; }
+                    if (match) androidCount++;
                 }
-                // Also probe for wayland_surface to see if it's still there
-                byte[] waylandSearch = "wayland_surface".getBytes("ASCII");
+                patched = androidCount > 0;
+                // Also count remaining unpatched strings
+                byte[] waylandSearch = "VK_KHR_wayland_surface".getBytes("ASCII");
                 int waylandCount = 0;
                 for (int i = 0; i <= vulkanData.length - waylandSearch.length; i++) {
                     boolean match = true;
@@ -191,10 +200,36 @@ public final class WaylandDriverInstaller {
                     }
                     if (match) waylandCount++;
                 }
-                probeInfo = " winevulkan_patched=" + patched + " wayland_surface_count=" + waylandCount
-                    + " winevulkan=" + winevulkanToCheck.getName() + "(" + vulkanData.length + "B)";
+                byte[] win32Search = "VK_KHR_win32_surface".getBytes("ASCII");
+                int win32Count = 0;
+                for (int i = 0; i <= vulkanData.length - win32Search.length; i++) {
+                    boolean match = true;
+                    for (int j = 0; j < win32Search.length; j++) {
+                        if (vulkanData[i + j] != win32Search[j]) { match = false; break; }
+                    }
+                    if (match) win32Count++;
+                }
+                probeInfo = " winevulkan_patched=" + patched
+                    + " android_surface=" + androidCount
+                    + " wayland_surface=" + waylandCount
+                    + " win32_surface=" + win32Count
+                    + " file=" + winevulkanToCheck.getAbsolutePath()
+                    + "(" + vulkanData.length + "B)";
+                // Also check if the winePath copy is patched
+                if (winevulkanWinePath.exists() && !winevulkanToCheck.equals(winevulkanWinePath)) {
+                    byte[] wpData = java.nio.file.Files.readAllBytes(winevulkanWinePath.toPath());
+                    int wpAndroid = 0;
+                    for (int i = 0; i <= wpData.length - androidSearch.length; i++) {
+                        boolean match = true;
+                        for (int j = 0; j < androidSearch.length; j++) {
+                            if (wpData[i + j] != androidSearch[j]) { match = false; break; }
+                        }
+                        if (match) wpAndroid++;
+                    }
+                    probeInfo += " winePath_android_surface=" + wpAndroid;
+                }
             } else {
-                probeInfo = " winevulkan.dll NOT FOUND for patch verification";
+                probeInfo = " winevulkan.dll NOT FOUND in system32 or winePath";
             }
         } catch (Exception e) {
             Log.w(TAG, "Failed to check patch status: " + e.getMessage());
@@ -414,8 +449,9 @@ public final class WaylandDriverInstaller {
             String reg = new String(java.nio.file.Files.readAllBytes(systemReg.toPath()));
             // Wine constructs the driver filename as: wine + <GraphicsDriver value> + .drv
             // So GraphicsDriver=wayland → winewayland.drv (correct)
-            // GraphicsDriver=winewayland.drv → winewinewayland.drv.drv (WRONG — doubled)
-            String graphicsValue = "\"GraphicsDriver\"=\"wayland\"";
+            // GraphicsDriver=wayland,x11 → try winewayland.drv first, then winex11.drv
+            // This allows fallback when Wayland isn't ready (rundll32, services.exe)
+            String graphicsValue = "\"GraphicsDriver\"=\"wayland,x11\"";
 
             // Remove old GraphicsDriver entries that point to winex11.drv
             // (but keep any that the user might have set to other drivers).
@@ -457,7 +493,7 @@ public final class WaylandDriverInstaller {
             }
 
             java.nio.file.Files.write(systemReg.toPath(), result.toString().getBytes());
-            Log.i(TAG, "Set system.reg: GraphicsDriver=wayland (all Video keys)");
+            Log.i(TAG, "Set system.reg: GraphicsDriver=wayland,x11 (all Video keys)");
 
             // Also set fallback in user.reg: [Software\\Wine\\Drivers] "Graphics"="wayland,x11"
             // Wine's USER_LoadDriver reads this value and tries each driver in order.
