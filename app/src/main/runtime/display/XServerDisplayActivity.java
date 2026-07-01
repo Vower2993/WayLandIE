@@ -6094,9 +6094,18 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
 
                 String wineStartCmd = getWineStartCommand(guestProgramLauncherComponent);
                 String guestExecutable;
-            
-            // Launcher resolves Wine vs ARM64EC execution internally.
-            guestExecutable = "wine explorer /desktop=shell," + xServer.screenInfo + " " + wineStartCmd;
+
+            if ("wayland".equals(displayMode)) {
+                // In Wayland mode, DON'T use "wine explorer /desktop=shell" —
+                // the Wayland compositor IS the desktop. The explorer wrapper
+                // launches a separate explorer.exe process that can crash and
+                // trigger LdrShutdownProcess, killing the wine session before
+                // the game finishes loading. Instead, launch the game directly.
+                guestExecutable = "wine " + wineStartCmd;
+            } else {
+                // X11 mode: use virtual desktop (no window manager available)
+                guestExecutable = "wine explorer /desktop=shell," + xServer.screenInfo + " " + wineStartCmd;
+            }
 
             Log.d("XServerDisplayActivity", "=== GAME LAUNCH DEBUG ===");
             Log.d("XServerDisplayActivity", "Wine start command: " + wineStartCmd);
