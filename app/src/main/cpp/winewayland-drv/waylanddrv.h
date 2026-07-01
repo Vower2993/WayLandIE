@@ -3,6 +3,9 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <pthread.h>
+typedef int BOOL;
+#define TRUE 1
+#define FALSE 0
 struct wl_display;
 struct wl_surface;
 struct wl_buffer;
