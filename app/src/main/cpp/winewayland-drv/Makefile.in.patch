@@ -1,0 +1,11 @@
+--- a/dlls/winewayland.drv/Makefile.in
++++ b/dlls/winewayland.drv/Makefile.in
+@@ -12,6 +12,8 @@
+ 	cursor-shape-v1.xml \
+ 	display.c \
+ 	dllmain.c \
++	linux-dmabuf-unstable-v1.xml \
++	wayland_dmabuf.c \
+ 	fractional-scale-v1.xml \
+ 	opengl.c \
+ 	pointer-constraints-unstable-v1.xml \

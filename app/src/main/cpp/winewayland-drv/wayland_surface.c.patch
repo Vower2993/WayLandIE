@@ -1,0 +1,59 @@
+--- a/dlls/winewayland.drv/wayland_surface.c
++++ b/dlls/winewayland.drv/wayland_surface.c
+@@ -542,6 +542,55 @@
+     surface->content_height = win_height;
+ }
+ 
++/**********************************************************************
++ *          wayland_surface_attach_dmabuf
++ *
++ * Attaches a dmabuf buffer to a wayland surface for zero-copy presentation.
++ * The buffer is marked busy until the compositor releases it.
++ */
++void wayland_surface_attach_dmabuf(struct wayland_surface *surface,
++                                   struct wayland_dmabuf_buffer *dmabuf_buffer,
++                                   HRGN surface_damage_region)
++{
++    RGNDATA *surface_damage;
++    int win_width, win_height;
++
++    TRACE("surface=%p dmabuf_buffer=%p (%dx%d)\n",
++          surface, dmabuf_buffer, dmabuf_buffer->width, dmabuf_buffer->height);
++
++    dmabuf_buffer->busy = TRUE;
++
++    wl_surface_attach(surface->wl_surface, dmabuf_buffer->wl_buffer, 0, 0);
++
++    surface_damage = get_region_data(surface_damage_region);
++    if (surface_damage)
++    {
++        RECT *rgn_rect = (RECT *)surface_damage->Buffer;
++        RECT *rgn_rect_end = rgn_rect + surface_damage->rdh.nCount;
++
++        for (;rgn_rect < rgn_rect_end; rgn_rect++)
++        {
++            wl_surface_damage_buffer(surface->wl_surface,
++                                     rgn_rect->left, rgn_rect->top,
++                                     rgn_rect->right - rgn_rect->left,
++                                     rgn_rect->bottom - rgn_rect->top);
++        }
++        free(surface_damage);
++    }
++
++    win_width = surface->window.rect.right - surface->window.rect.left;
++    win_height = surface->window.rect.bottom - surface->window.rect.top;
++
++    win_width = max(1, min(win_width, dmabuf_buffer->width));
++    win_height = max(1, min(win_height, dmabuf_buffer->height));
++
++    wp_viewport_set_source(surface->wp_viewport, 0, 0,
++                           wl_fixed_from_int(win_width),
++                           wl_fixed_from_int(win_height));
++
++    surface->content_width = win_width;
++    surface->content_height = win_height;
++}
++
+ /**********************************************************************
+  *          wayland_surface_config_is_compatible
+  *

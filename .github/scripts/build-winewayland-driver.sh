@@ -58,6 +58,34 @@ cd /tmp
 rm -rf proton-wine
 git clone --depth=1 --branch proton_11.0 https://github.com/GameNative/proton-wine.git
 cd proton-wine
+
+# === Copy winewayland.drv dmabuf sources from WayLandIE workspace ===
+WLD_SRC="$WORKSPACE/app/src/main/cpp/winewayland-drv"
+if [ -d "$WLD_SRC" ]; then
+    echo "Patching winewayland.drv with dmabuf sources from WayLandIE..."
+    cp "$WLD_SRC"/wayland_dmabuf.c dlls/winewayland.drv/ 2>/dev/null || true
+    cp "$WLD_SRC"/linux-dmabuf-unstable-v1.xml dlls/winewayland.drv/ 2>/dev/null || true
+    # Patch registry handler to bind dmabuf global
+    if [ -f "$WLD_SRC"/wayland.c.patch ] && command -v patch >/dev/null 2>&1; then
+        patch -p1 < "$WLD_SRC"/wayland.c.patch 2>/dev/null || echo "  Warning: wayland.c patch failed (may already be applied)"
+    fi
+    # Patch header for dmabuf types
+    if [ -f "$WLD_SRC"/waylanddrv.h.patch ] && command -v patch >/dev/null 2>&1; then
+        patch -p1 < "$WLD_SRC"/waylanddrv.h.patch 2>/dev/null || echo "  Warning: waylanddrv.h patch failed"
+    fi
+    # Patch Makefile.in for new sources
+    if [ -f "$WLD_SRC"/Makefile.in.patch ] && command -v patch >/dev/null 2>&1; then
+        patch -p1 < "$WLD_SRC"/Makefile.in.patch 2>/dev/null || echo "  Warning: Makefile.in patch failed"
+    fi
+    # Patch wayland_surface.c for attach_dmabuf
+    if [ -f "$WLD_SRC"/wayland_surface.c.patch ] && command -v patch >/dev/null 2>&1; then
+        patch -p1 < "$WLD_SRC"/wayland_surface.c.patch 2>/dev/null || echo "  Warning: wayland_surface.c patch failed"
+    fi
+    echo "  dmabuf sources applied"
+else
+    echo "  WARNING: $WLD_SRC not found — building without dmabuf support"
+fi
+
 chmod +x autogen.sh
 ./autogen.sh 2>&1 | tail -5
 
