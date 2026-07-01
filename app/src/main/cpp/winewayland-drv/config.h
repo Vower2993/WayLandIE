@@ -1,0 +1,2 @@
+#define HAVE_VULKAN 1
+#define HAVE_LINUX_DMA_BUF 1
