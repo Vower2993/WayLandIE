@@ -67,19 +67,34 @@ typedef VkResult (VKAPI_PTR *PFN_vkCreateAndroidSurfaceKHR_local)(
 
 /* Load vkCreateAndroidSurfaceKHR at runtime via vkGetInstanceProcAddr.
  * Wine's vulkan_instance struct doesn't have p_vkCreateAndroidSurfaceKHR. */
-static PFN_vkCreateAndroidSurfaceKHR_local load_vkCreateAndroidSurfaceKHR(
-    const struct vulkan_instance *instance)
+static PFN_vkCreateAndroidSurfaceKHR_local load_vkCreateAndroidSurfaceKHR(VkInstance host_instance)
 {
     static PFN_vkCreateAndroidSurfaceKHR_local fn = NULL;
-    if (!fn && instance && instance->host.instance)
+    if (!fn && host_instance)
     {
-        fn = (PFN_vkCreateAndroidSurfaceKHR_local)
-            instance->p_vkGetInstanceProcAddr(instance->host.instance,
-                                              "vkCreateAndroidSurfaceKHR");
-        if (fn)
-            ERR("Loaded vkCreateAndroidSurfaceKHR at %p\n", fn);
-        else
-            ERR("vkCreateAndroidSurfaceKHR not available — Vulkan surface creation will fail\n");
+        /* Wine's vulkan_instance doesn't expose p_vkGetInstanceProcAddr.
+         * Use dlopen/dlsym to get it from libvulkan.so directly. */
+        static PFN_vkGetInstanceProcAddr gipa = NULL;
+        if (!gipa)
+        {
+            void *lib = dlopen(SONAME_LIBVULKAN, RTLD_NOW);
+            if (lib)
+            {
+                gipa = (PFN_vkGetInstanceProcAddr)dlsym(lib, "vkGetInstanceProcAddr");
+                if (!gipa)
+                    ERR("dlsym(vkGetInstanceProcAddr) failed\n");
+            }
+            else
+                ERR("dlopen(%s) failed\n", SONAME_LIBVULKAN);
+        }
+        if (gipa)
+        {
+            fn = (PFN_vkCreateAndroidSurfaceKHR_local)gipa(host_instance, "vkCreateAndroidSurfaceKHR");
+            if (fn)
+                ERR("Loaded vkCreateAndroidSurfaceKHR at %p\n", fn);
+            else
+                ERR("vkCreateAndroidSurfaceKHR not available\n");
+        }
     }
     return fn;
 }
@@ -111,7 +126,7 @@ static VkResult wayland_vulkan_surface_create(HWND hwnd, BOOL raw, const struct 
         VkAndroidSurfaceCreateInfoKHR_Local create_info;
         PFN_vkCreateAndroidSurfaceKHR_local pfn;
 
-        pfn = load_vkCreateAndroidSurfaceKHR(instance);
+        pfn = load_vkCreateAndroidSurfaceKHR(instance->host.instance);
         if (!pfn)
         {
             ERR("Cannot create Android surface — vkCreateAndroidSurfaceKHR not loaded\n");
