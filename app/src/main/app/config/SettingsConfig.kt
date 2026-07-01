@@ -5,7 +5,7 @@ import androidx.preference.PreferenceManager
 
 object SettingsConfig {
     @JvmField
-    val DEFAULT_WINE_DEBUG_CHANNELS: String = "warn,err,fixme,module,loaddll,seh"
+    val DEFAULT_WINE_DEBUG_CHANNELS: String = "warn,err,fixme,module,loaddll,seh,thread"
 
     @JvmField
     val DEFAULT_WINLATOR_PATH: String =

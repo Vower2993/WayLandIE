@@ -3911,9 +3911,14 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
 
         List<String> gestureProfileNames = new ArrayList<>();
         int gestureSelectedIndex = 0;
+        // gestureProfileManager may be null if renderDrawerMenu() is called
+        // before it's initialized (it's created at line ~1524, but
+        // renderDrawerMenu() can be called from onCreate at line ~1037).
         try {
-            gestureProfileNames = gestureProfileManager.getProfileNames();
-            gestureSelectedIndex = Math.max(0, gestureProfileManager.indexOfProfile(selectedGestureProfileId()));
+            if (gestureProfileManager != null) {
+                gestureProfileNames = gestureProfileManager.getProfileNames();
+                gestureSelectedIndex = Math.max(0, gestureProfileManager.indexOfProfile(selectedGestureProfileId()));
+            }
         } catch (Throwable t) {
             android.util.Log.e("XServerDisplayActivity", "gesture drawer names failed", t);
         }
@@ -6028,6 +6033,38 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
 
         boolean enableWineDebug = preferences.getBoolean("enable_wine_debug", false);
         String wineDebugChannels = preferences.getString("wine_debug_channels", SettingsConfig.DEFAULT_WINE_DEBUG_CHANNELS);
+        // Safety: if the user accidentally enabled ALL debug channels (e.g. +relay),
+        // wine becomes 100x slower and produces 300MB+ logs. Filter out the
+        // most expensive channels that are not useful for our debugging.
+        // +relay logs every function call — only useful for API tracing, not
+        // for crash debugging. +snoop is similar. +loaddll is redundant with
+        // +module.
+        if (enableWineDebug && wineDebugChannels.contains("relay")) {
+            Log.w("XServerDisplayActivity",
+                    "WINEDEBUG contains +relay — filtering it out to prevent extreme slowdown");
+            wineDebugChannels = wineDebugChannels.replace("relay,", "").replace(",relay", "")
+                    .replace("relay", "");
+        }
+        if (enableWineDebug && wineDebugChannels.contains("snoop")) {
+            wineDebugChannels = wineDebugChannels.replace("snoop,", "").replace(",snoop", "")
+                    .replace("snoop", "");
+        }
+        // Cap at 20 channels to prevent the WINEDEBUG string from becoming
+        // too long (Android has a ~128KB env var limit, but very long
+        // WINEDEBUG values slow wine's channel parsing).
+        if (enableWineDebug) {
+            String[] parts = wineDebugChannels.split(",");
+            if (parts.length > 20) {
+                Log.w("XServerDisplayActivity",
+                        "WINEDEBUG has " + parts.length + " channels — trimming to 20");
+                StringBuilder sb = new StringBuilder();
+                for (int i = 0; i < 20; i++) {
+                    if (i > 0) sb.append(",");
+                    sb.append(parts[i]);
+                }
+                wineDebugChannels = sb.toString();
+            }
+        }
         String wineDebugValue;
         if (enableWineDebug && !wineDebugChannels.isEmpty()) {
             wineDebugValue = "+" + wineDebugChannels.replace(",", ",+");
@@ -6495,14 +6532,27 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
             // exist, potentially causing explorer.exe to crash after
             // process_attach completes.
             //
-            // Also disable winex11.drv entirely so Wine doesn't fall back
-            // to X11 and hide Wayland failures.
+            // CRITICAL: Do NOT disable winex11.drv. Wine's system services
+            // (services.exe, rpcss.exe, plugplay.exe) start BEFORE explorer.exe.
+            // These services need a display driver for internal window
+            // operations. USER_LoadDriver reads Graphics=wayland from the
+            // registry and tries to load winewayland.drv first. If that fails
+            // (e.g. Wayland socket not yet ready, or DllMain returns FALSE),
+            // Wine falls back to winex11.drv. If winex11.drv is ALSO disabled
+            // (winex11.drv=), there is NO fallback, and the driver function
+            // table stays NULL. Services.exe then crashes with
+            // EXCEPTION_ACCESS_VIOLATION at address 0x4 (NULL function pointer
+            // call) when it tries to invoke a driver function through the NULL
+            // table.
+            //
+            // winex11.drv connects to Xvfb (which is always running), so it
+            // works as a safe fallback. When explorer.exe starts later and
+            // USER_LoadDriver successfully loads winewayland.drv, explorer
+            // uses the Wayland driver for actual rendering.
             if (!wlOverrides.contains("winewayland.drv")) {
                 wlOverrides += (wlOverrides.isEmpty() ? "" : ";") + "winewayland.drv=b";
             }
-            if (!wlOverrides.contains("winex11.drv")) {
-                wlOverrides += (wlOverrides.isEmpty() ? "" : ";") + "winex11.drv=";
-            }
+            // Do NOT add winex11.drv= — let it load as fallback
             envVars.put("WINEDLLOVERRIDES", wlOverrides);
             Log.d("XServerDisplayActivity", "Wayland WINEDLLOVERRIDES: " + wlOverrides);
         }

@@ -114,13 +114,15 @@ object LogManager {
             //     lines (tag "WayLandIE/Bridge") would be filtered out by
             //     --pid.
             //   - Wine subprocesses also have different PIDs.
-            // Use a tag-include filter to keep the log size manageable.
-            // Tag list covers all app components: activity, bridge, server,
-            // installer, wine launcher, container manager, graphics, input.
             //
-            // Levels: *:I captures Info+ (the app uses Log.i for most
-            // diagnostic output). Verbose is excluded to avoid log spam.
-            val tagFilter = listOf(
+            // CRITICAL: logcat filter syntax is "Tag:Level" as SEPARATE args.
+            // joinToString(":") + ":I" produces "Tag1:Tag2:Tag3:I" which
+            // logcat parses as a SINGLE tag named "Tag1:Tag2:Tag3" at level I
+            // — matches nothing, file stays empty.
+            // Each "Tag:I" MUST be its own array element.
+            //
+            // Levels: I = Info+ (app uses Log.i for diagnostic output).
+            val tags = listOf(
                 "XServerDisplayActivity",
                 "WaylandBridgeComponent",
                 "WaylandBridgeServer",
@@ -162,13 +164,17 @@ object LogManager {
                 "WnSteamSession",
                 "RestoreOp",
                 "SeekBar",
-            ).joinToString(":") + ":I"
-            appLogProcess =
-                Runtime.getRuntime().exec(
-                    arrayOf("logcat", "-f", logFile.absolutePath, tagFilter, "*:S"),
-                )
+            ).map { "$it:I" }
+
+            // Build the logcat command: logcat -f <file> -s Tag1:I Tag2:I ... *:S
+            // -s = silent by default (only show explicitly listed tags)
+            // *:S = suppress everything else (redundant with -s but explicit)
+            val cmd = mutableListOf("logcat", "-f", logFile.absolutePath, "-s")
+            cmd.addAll(tags)
+            cmd.add("*:S")
+            appLogProcess = Runtime.getRuntime().exec(cmd.toTypedArray())
             closeProcessStdin(appLogProcess)
-            Log.i(TAG, "Application debug logging started (tag-filtered, all PIDs)")
+            Log.i(TAG, "Application debug logging started (${tags.size} tags, all PIDs)")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start application logging: ${e.message}")
         }
