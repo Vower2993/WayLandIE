@@ -25,12 +25,6 @@
 #include <stdlib.h>
 #include <unistd.h>
 
-#ifdef __ANDROID__
-#include <android/hardware_buffer.h>
-#include <android/native_window.h>
-#include <vulkan/vulkan_android.h>
-#endif
-
 #include "ntstatus.h"
 #define WIN32_NO_STATUS
 #include "waylanddrv.h"
@@ -38,6 +32,14 @@
 
 #include "wine/vulkan.h"
 #include "wine/vulkan_driver.h"
+
+#ifdef __ANDROID__
+/* Include Android headers AFTER wine/vulkan.h so Vulkan types are defined.
+ * The NDK's vulkan/vulkan_android.h expects vulkan/vulkan_core.h first,
+ * but wine/vulkan.h provides equivalent definitions. */
+#include <android/hardware_buffer.h>
+#include <android/native_window.h>
+#endif
 
 WINE_DEFAULT_DEBUG_CHANNEL(vulkan);
 
