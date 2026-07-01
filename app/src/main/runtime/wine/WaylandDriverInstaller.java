@@ -343,20 +343,19 @@ public final class WaylandDriverInstaller {
     }
 
     /**
-     * Binary-patches winewayland.so to replace the Vulkan surface extension
-     * string "VK_KHR_wayland_surface" with "VK_KHR_xlib_surface".
+     * Binary-patches PE/ELF binaries to replace Vulkan surface extension
+     * strings with VK_KHR_android_surface.
      *
-     * This is necessary because the Android Vulkan wrapper only supports
-     * VK_KHR_xlib_surface (which it translates to VK_KHR_android_surface).
-     * Without this patch, vkCreateInstance fails with VK_ERROR_EXTENSION_NOT_PRESENT
-     * when winewayland.drv reports VK_KHR_wayland_surface.
+     * Patches BOTH winevulkan.dll AND DXVK DLLs (dxgi.dll, d3d11.dll, etc.)
+     * because DXVK hardcodes VK_KHR_win32_surface in its own binaries.
      *
-     * The patch is safe because:
-     * - "VK_KHR_wayland_surface" (22 bytes) is replaced with
-     *   "VK_KHR_xlib_surface\0\0" (20 bytes + 2 null padding = 22 bytes)
-     * - C string functions stop at the first null, so padding is ignored
-     * - The .so's checksum/structure is unchanged (same-length replacement)
-     * - Idempotent: if already patched, the string isn't found and no change is made
+     * String lengths (bytes, NOT including null terminator):
+     *   "VK_KHR_wayland_surface"  = 22 bytes → "VK_KHR_android_surface" = 22 bytes (same)
+     *   "VK_KHR_win32_surface"    = 20 bytes → "VK_KHR_android_surface" = 22 bytes (2B longer)
+     *
+     * For same-length: replace in-place + null terminator.
+     * For longer replacement: write replacement + null, overwriting 3 bytes past
+     * the original string. The null prevents bleeding into the next string.
      */
     private static void patchSurfaceExtension(File soFile) {
         if (soFile == null || !soFile.exists()) {
@@ -534,15 +533,6 @@ public final class WaylandDriverInstaller {
             Log.i(TAG, "Set system.reg: GraphicsDriver=wayland,x11 (all Video keys)");
 
             // Also set fallback in user.reg: [Software\\Wine\\Drivers] "Graphics"="wayland,x11"
-            // Wine's USER_LoadDriver reads this value and tries each driver in order.
-            // "wayland,x11" means: try winewayland.drv first, and if it fails to load
-            // (e.g. Wayland socket not ready, or DllMain returns FALSE), fall back to
-            // winex11.drv. This prevents nodrv_CreateWindow in processes that start
-            // before the Wayland driver is fully initialized (rundll32, services.exe).
-            //
-            // Wine constructs the filename as: wine + value + .drv
-            // So "wayland" → winewayland.drv, "x11" → winex11.drv
-            // Multiple drivers are comma-separated: "wayland,x11" → try both in order.
             File userReg = new File(prefix, "user.reg");
             if (userReg.exists()) {
                 String userRegContent = new String(java.nio.file.Files.readAllBytes(userReg.toPath()));
@@ -566,7 +556,7 @@ public final class WaylandDriverInstaller {
                     userRegContent += "\n" + driversKey + "\n" + graphicsUserValue + "\n";
                 }
                 java.nio.file.Files.write(userReg.toPath(), userRegContent.getBytes());
-                Log.i(TAG, "Set user.reg: [Software\\Wine\\Drivers] Graphics=wayland");
+                Log.i(TAG, "Set user.reg: [Software\\Wine\\Drivers] Graphics=wayland,x11");
             }
         } catch (Exception e) {
             Log.w(TAG, "Failed to set GraphicsDriver: " + e.getMessage());
