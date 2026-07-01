@@ -313,11 +313,30 @@ public final class WaylandDriverInstaller {
         }
         try {
             byte[] data = java.nio.file.Files.readAllBytes(soFile.toPath());
-            byte[] search = "VK_KHR_wayland_surface".getBytes("ASCII");
-            byte[] replace = "VK_KHR_xlib_surface\0\0\0".getBytes("ASCII");
 
-            // First, search for various substrings to understand the .so's string table
-            String[] probes = {"wayland_surface", "VK_KHR_wayland", "VK_KHR_xlib", "VK_KHR_surface", "winewayland"};
+            // Patch multiple surface extension strings.
+            // The Android Vulkan wrapper only supports VK_KHR_android_surface.
+            // Wine's winevulkan.dll contains these extension name strings:
+            //   - "VK_KHR_wayland_surface" (22 bytes) — used by winewayland.drv
+            //   - "VK_KHR_win32_surface" (19 bytes) — used by winex11.drv (the default)
+            // DXVK requests VK_KHR_win32_surface (since Wine maps it to the native
+            // platform surface). We must replace BOTH with VK_KHR_android_surface
+            // (21 bytes) so the Android Vulkan wrapper accepts the extension.
+            //
+            // Same-length replacements with null padding:
+            //   "VK_KHR_wayland_surface\0" (22B) → "VK_KHR_android_surface\0" (22B)
+            //   "VK_KHR_win32_surface\0\0\0" (22B) → "VK_KHR_android_surface\0" (22B)
+            // We pad VK_KHR_win32_surface (19B) to 22B with nulls so the
+            // replacement doesn't shift subsequent strings.
+            String[][] patches = {
+                {"VK_KHR_wayland_surface", "VK_KHR_android_surface"},
+                {"VK_KHR_win32_surface",   "VK_KHR_android_surface"},
+            };
+
+            // First, probe for all relevant substrings
+            String[] probes = {"wayland_surface", "win32_surface", "VK_KHR_wayland",
+                               "VK_KHR_win32", "VK_KHR_android", "VK_KHR_xlib",
+                               "VK_KHR_surface", "winewayland"};
             StringBuilder probeReport = new StringBuilder();
             for (String probe : probes) {
                 byte[] probeBytes = probe.getBytes("ASCII");
@@ -333,23 +352,37 @@ public final class WaylandDriverInstaller {
             }
             Log.i(TAG, "patchSurfaceExtension: probe '" + soFile.getName() + "' (" + data.length + " bytes): " + probeReport);
 
-            int patched = 0;
-            for (int i = 0; i <= data.length - search.length; i++) {
-                boolean match = true;
-                for (int j = 0; j < search.length; j++) {
-                    if (data[i + j] != search[j]) { match = false; break; }
+            int totalPatched = 0;
+            for (String[] patch : patches) {
+                byte[] search = patch[0].getBytes("ASCII");
+                byte[] replace = patch[1].getBytes("ASCII");
+                // Pad replacement to same length as search (null-fill)
+                byte[] replacePadded = new byte[search.length];
+                System.arraycopy(replace, 0, replacePadded, 0,
+                                 Math.min(replace.length, search.length));
+
+                int patched = 0;
+                for (int i = 0; i <= data.length - search.length; i++) {
+                    boolean match = true;
+                    for (int j = 0; j < search.length; j++) {
+                        if (data[i + j] != search[j]) { match = false; break; }
+                    }
+                    if (match) {
+                        System.arraycopy(replacePadded, 0, data, i, replacePadded.length);
+                        patched++;
+                    }
                 }
-                if (match) {
-                    System.arraycopy(replace, 0, data, i, replace.length);
-                    patched++;
+                if (patched > 0) {
+                    Log.i(TAG, "patchSurfaceExtension: replaced '" + patch[0] + "' → '" + patch[1] + "' (" + patched + "x) in " + soFile.getName());
+                    totalPatched += patched;
                 }
             }
 
-            if (patched > 0) {
+            if (totalPatched > 0) {
                 java.nio.file.Files.write(soFile.toPath(), data);
-                Log.i(TAG, "patchSurfaceExtension: patched " + patched + " occurrence(s) in " + soFile.getName());
+                Log.i(TAG, "patchSurfaceExtension: total " + totalPatched + " patch(es) applied to " + soFile.getName());
             } else {
-                Log.w(TAG, "patchSurfaceExtension: 'VK_KHR_wayland_surface' NOT FOUND in " + soFile.getName() + " — probe results: " + probeReport);
+                Log.w(TAG, "patchSurfaceExtension: no surface extension strings found in " + soFile.getName() + " — probe results: " + probeReport);
             }
         } catch (Exception e) {
             Log.w(TAG, "patchSurfaceExtension failed: " + e.getMessage());
