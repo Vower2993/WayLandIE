@@ -6477,16 +6477,20 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
         if ("wayland".equals(displayMode)) {
             String wlOverrides = envVars.get("WINEDLLOVERRIDES");
             if (wlOverrides == null) wlOverrides = "";
-            // winewayland.drv is a BUILTIN driver — it needs the Unix .so
-            // companion (winewayland.so in winePath/lib/wine/aarch64-unix/)
-            // to load. Using "native" alone fails with STATUS_NOT_FOUND
-            // because Wine finds the PE but can't initialize it without the
-            // .so. Use "b,native" so Wine tries builtin loading first
-            // (which uses the .so), then falls back to native PE.
+            // winewayland.drv is a BUILTIN graphics driver — it loads via
+            // Wine's internal loader which pairs the PE stub (.drv) with the
+            // Unix companion (.so in winePath/lib/wine/aarch64-unix/).
+            //
+            // Use "b" (builtin only) — there is NO native PE fallback for
+            // graphics drivers. Using "b,native" confuses USER_LoadDriver
+            // because the native path searches for a Windows DLL that doesn't
+            // exist, potentially causing explorer.exe to crash after
+            // process_attach completes.
+            //
             // Also disable winex11.drv entirely so Wine doesn't fall back
-            // to X11.
+            // to X11 and hide Wayland failures.
             if (!wlOverrides.contains("winewayland.drv")) {
-                wlOverrides += (wlOverrides.isEmpty() ? "" : ";") + "winewayland.drv=b,native";
+                wlOverrides += (wlOverrides.isEmpty() ? "" : ";") + "winewayland.drv=b";
             }
             if (!wlOverrides.contains("winex11.drv")) {
                 wlOverrides += (wlOverrides.isEmpty() ? "" : ";") + "winex11.drv=";
