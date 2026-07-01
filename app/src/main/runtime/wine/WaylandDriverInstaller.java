@@ -144,15 +144,22 @@ public final class WaylandDriverInstaller {
             patchSurfaceExtension(new File(wineAarch64Unix, "winewayland.so"));
             patchSurfaceExtension(new File(prefix, "lib/wine/aarch64-unix/winewayland.so"));
 
-            // DXVK PATCHING: dxgi.dll + d3d11.dll + d3d12.dll hardcode
-            // VK_KHR_win32_surface internally and request it directly,
-            // bypassing winevulkan's extension mapping. The Android wrapper
-            // only exposes VK_KHR_android_surface. Binary-patch the DLLs.
-            padDxvkSurfaceExtension(new File(system32, "dxgi.dll"));
-            padDxvkSurfaceExtension(new File(system32, "d3d11.dll"));
-            padDxvkSurfaceExtension(new File(system32, "d3d12.dll"));
-            padDxvkSurfaceExtension(new File(new File(prefix, "drive_c/windows"), "syswow64/dxgi.dll"));
-            padDxvkSurfaceExtension(new File(new File(prefix, "drive_c/windows"), "syswow64/d3d11.dll"));
+            // CRITICAL: Patch DXVK DLLs — DXVK has VK_KHR_win32_surface hardcoded
+            // in its own binaries (dxgi.dll, d3d11.dll, d3d9.dll, d3d8.dll).
+            // These are NOT affected by the winevulkan.dll patch because DXVK
+            // requests the extension by its own hardcoded name, not by reading
+            // it from winevulkan.dll's data section.
+            // Must patch BOTH system32 (64-bit) and syswow64 (32-bit) copies.
+            File dxvkSystem32 = new File(prefix, "drive_c/windows/system32");
+            File dxvkSyswow64 = new File(prefix, "drive_c/windows/syswow64");
+            String[] dxvkDlls = {"dxgi.dll", "d3d11.dll", "d3d9.dll", "d3d8.dll",
+                                 "d3d10.dll", "d3d10core.dll", "wined3d.dll"};
+            for (String dll : dxvkDlls) {
+                patchSurfaceExtension(new File(dxvkSystem32, dll));
+                if (dxvkSyswow64.isDirectory()) {
+                    patchSurfaceExtension(new File(dxvkSyswow64, dll));
+                }
+            }
         } else {
             Log.w(TAG, "ensureDriverInstalled: winePath is null or not a directory — "
                     + "cannot copy .so companion, driver will fail to load");
@@ -359,20 +366,22 @@ public final class WaylandDriverInstaller {
         try {
             byte[] data = java.nio.file.Files.readAllBytes(soFile.toPath());
 
-            // Patch multiple surface extension strings.
-            // The Android Vulkan wrapper only supports VK_KHR_android_surface.
-            // Wine's winevulkan.dll contains these extension name strings:
-            //   - "VK_KHR_wayland_surface" (22 bytes) — used by winewayland.drv
-            //   - "VK_KHR_win32_surface" (19 bytes) — used by winex11.drv (the default)
-            // DXVK requests VK_KHR_win32_surface (since Wine maps it to the native
-            // platform surface). We must replace BOTH with VK_KHR_android_surface
-            // (21 bytes) so the Android Vulkan wrapper accepts the extension.
+            // Patch multiple surface extension strings to VK_KHR_android_surface.
             //
-            // Same-length replacements with null padding:
-            //   "VK_KHR_wayland_surface\0" (22B) → "VK_KHR_android_surface\0" (22B)
-            //   "VK_KHR_win32_surface\0\0\0" (22B) → "VK_KHR_android_surface\0" (22B)
-            // We pad VK_KHR_win32_surface (19B) to 22B with nulls so the
-            // replacement doesn't shift subsequent strings.
+            // String lengths (bytes, NOT including null terminator):
+            //   "VK_KHR_wayland_surface"  = 22 bytes
+            //   "VK_KHR_win32_surface"    = 20 bytes
+            //   "VK_KHR_android_surface"  = 22 bytes
+            //
+            // For wayland_surface (22B) → android_surface (22B): same length, easy.
+            // For win32_surface (20B) → android_surface (22B): replacement is 2 bytes
+            // LONGER. We overwrite the original 20 bytes + 2 bytes of whatever follows.
+            // In PE .rdata sections, strings are null-terminated and often followed by
+            // padding or other strings. Overwriting 2 extra bytes is safe because:
+            //   - If followed by null (end of string), we overwrite the null + 1 padding byte
+            //   - If followed by another extension string we're also patching, it gets patched too
+            //   - The null terminator of the replacement is at position 22, which is past
+            //     the original string's null terminator at position 20
             String[][] patches = {
                 {"VK_KHR_wayland_surface", "VK_KHR_android_surface"},
                 {"VK_KHR_win32_surface",   "VK_KHR_android_surface"},
@@ -401,10 +410,6 @@ public final class WaylandDriverInstaller {
             for (String[] patch : patches) {
                 byte[] search = patch[0].getBytes("ASCII");
                 byte[] replace = patch[1].getBytes("ASCII");
-                // Pad replacement to same length as search (null-fill)
-                byte[] replacePadded = new byte[search.length];
-                System.arraycopy(replace, 0, replacePadded, 0,
-                                 Math.min(replace.length, search.length));
 
                 int patched = 0;
                 for (int i = 0; i <= data.length - search.length; i++) {
@@ -413,12 +418,24 @@ public final class WaylandDriverInstaller {
                         if (data[i + j] != search[j]) { match = false; break; }
                     }
                     if (match) {
-                        System.arraycopy(replacePadded, 0, data, i, replacePadded.length);
-                        patched++;
+                        // Write the full replacement string (may be longer than search).
+                        // If replacement is shorter, pad with nulls.
+                        int writeLen = Math.max(replace.length, search.length);
+                        byte[] writeData = new byte[writeLen];
+                        System.arraycopy(replace, 0, writeData, 0, replace.length);
+                        // Null-fill remaining bytes (if replacement is shorter)
+                        for (int j = replace.length; j < writeLen; j++) {
+                            writeData[j] = 0;
+                        }
+                        // Only write if we have room (don't overflow past end of data)
+                        if (i + writeLen <= data.length) {
+                            System.arraycopy(writeData, 0, data, i, writeLen);
+                            patched++;
+                        }
                     }
                 }
                 if (patched > 0) {
-                    Log.i(TAG, "patchSurfaceExtension: replaced '" + patch[0] + "' → '" + patch[1] + "' (" + patched + "x) in " + soFile.getName());
+                    Log.i(TAG, "patchSurfaceExtension: replaced '" + patch[0] + "' (" + search.length + "B) → '" + patch[1] + "' (" + replace.length + "B) (" + patched + "x) in " + soFile.getName());
                     totalPatched += patched;
                 }
             }
@@ -431,44 +448,6 @@ public final class WaylandDriverInstaller {
             }
         } catch (Exception e) {
             Log.w(TAG, "patchSurfaceExtension failed: " + e.getMessage());
-        }
-    }
-/**
-     * Binary-patches DXVK DLLs to replace hardcoded VK_KHR_win32_surface
-     * with VK_KHR_android_surface so DXVK's createInstance succeeds on
-     * the Android Vulkan wrapper (which only exposes android_surface).
-     * Same-length patch: "VK_KHR_win32_surface" (21B) with "VK_KHR_android_surface\0".
-     * Idempotent — skips if string already replaced.
-     */
-    private static void padDxvkSurfaceExtension(File dllFile) {
-        if (dllFile == null || !dllFile.exists()) return;
-        try {
-            byte[] data = java.nio.file.Files.readAllBytes(dllFile.toPath());
-            byte[] search = "VK_KHR_win32_surface".getBytes("ASCII");
-            byte[] replace = "VK_KHR_android_surface\0".getBytes("ASCII");
-
-            if (search.length != replace.length) {
-                Log.w(TAG, "padDxvk: length mismatch — aborting");
-                return;
-            }
-
-            int patched = 0;
-            for (int i = 0; i <= data.length - search.length; i++) {
-                boolean match = true;
-                for (int j = 0; j < search.length; j++) {
-                    if (data[i + j] != search[j]) { match = false; break; }
-                }
-                if (match) {
-                    System.arraycopy(replace, 0, data, i, replace.length);
-                    patched++;
-                }
-            }
-            if (patched > 0) {
-                java.nio.file.Files.write(dllFile.toPath(), data);
-                Log.i(TAG, "padDxvk: patched " + patched + " occ in " + dllFile.getName());
-            }
-        } catch (Exception e) {
-            Log.w(TAG, "padDxvk: failed " + dllFile.getName() + ": " + e.getMessage());
         }
     }
 
