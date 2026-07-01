@@ -108,73 +108,22 @@ object LogManager {
 
         try {
             stopAppLogging()
-            // Capture logcat from ALL processes (not just our PID) because:
-            //   - The WaylandIE bionic bridge runs as a SEPARATE process
-            //     (libwaylandie_bridge_exe.so) with its own PID — its log
-            //     lines (tag "WayLandIE/Bridge") would be filtered out by
-            //     --pid.
-            //   - Wine subprocesses also have different PIDs.
+            // Capture logcat from ALL processes at Info+ level.
+            // Previous approach used -s with 41 individual tag:I args, which
+            // produced empty logs — possibly due to Android's argument count
+            // limit or the -s flag behavior with many tags.
             //
-            // CRITICAL: logcat filter syntax is "Tag:Level" as SEPARATE args.
-            // joinToString(":") + ":I" produces "Tag1:Tag2:Tag3:I" which
-            // logcat parses as a SINGLE tag named "Tag1:Tag2:Tag3" at level I
-            // — matches nothing, file stays empty.
-            // Each "Tag:I" MUST be its own array element.
+            // New approach: capture ALL tags at Info+ level (*:I) without -s.
+            // This produces more output but GUARANTEES we capture the tags
+            // we need (XServerDisplayActivity, WaylandBridgeComponent, etc.)
+            // plus any wine/bridge output that goes through logcat.
             //
-            // Levels: I = Info+ (app uses Log.i for diagnostic output).
-            val tags = listOf(
-                "XServerDisplayActivity",
-                "WaylandBridgeComponent",
-                "WaylandBridgeServer",
-                "WayLandIE/Bridge",
-                "WaylandDriverInstaller",
-                "VulkanRenderer",
-                "XServerSurfaceView",
-                "GuestProgramLauncherComponent",
-                "GuestLauncher",
-                "WinHandler",
-                "ContainerManager",
-                "ContainerCreation",
-                "ContainerLaunch",
-                "ImageFsInstaller",
-                "WineUtils",
-                "WineInfo",
-                "WineRequestHandler",
-                "XClientRequestHandler",
-                "XServer",
-                "XServerLogs",
-                "XServerLeakCheck",
-                "ProcessHelper",
-                "AdrenotoolsManager",
-                "GraphicsDriverExtraction",
-                "PluviaApp",
-                "LogManager",
-                "ContentsManager",
-                "ICManager",
-                "InputControls",
-                "GestureProfileManager",
-                "SGSRResize",
-                "SetupWizardActivity",
-                "Shortcut",
-                "ShortcutsFragment",
-                "SHORTCUTS",
-                "UnifiedActivity",
-                "EPIC",
-                "WnSteamQr",
-                "WnSteamSession",
-                "RestoreOp",
-                "SeekBar",
-            ).map { "$it:I" }
-
-            // Build the logcat command: logcat -f <file> -s Tag1:I Tag2:I ... *:S
-            // -s = silent by default (only show explicitly listed tags)
-            // *:S = suppress everything else (redundant with -s but explicit)
-            val cmd = mutableListOf("logcat", "-f", logFile.absolutePath, "-s")
-            cmd.addAll(tags)
-            cmd.add("*:S")
-            appLogProcess = Runtime.getRuntime().exec(cmd.toTypedArray())
+            // We don't use --pid because the bridge process has a different PID.
+            appLogProcess = Runtime.getRuntime().exec(
+                arrayOf("logcat", "-f", logFile.absolutePath, "*:I")
+            )
             closeProcessStdin(appLogProcess)
-            Log.i(TAG, "Application debug logging started (${tags.size} tags, all PIDs)")
+            Log.i(TAG, "Application debug logging started (*:I all tags, all PIDs)")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start application logging: ${e.message}")
         }
