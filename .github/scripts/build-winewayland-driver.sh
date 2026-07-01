@@ -85,9 +85,10 @@ if [ -d "$WLD_SRC" ]; then
     sed -i '/xdg_toplevel_icon_manager_v1_interface, 1);/a \    }\n    else if (strcmp(interface, "zwp_linux_dmabuf_v1") == 0)\n    {\n        wayland_dmabuf_init(registry, id, version);' \
         dlls/winewayland.drv/wayland.c
 
-    # 6. wayland_surface.c: insert attach_dmabuf function after attach_shm
-    sed -i "/^[[:space:]]*surface->content_height = win_height;[[:space:]]*$/r ${WLD_SRC}/wayland_surface_attach_dmabuf.inc" \
-        dlls/winewayland.drv/wayland_surface.c
+    # 6. wayland_surface.c: insert attach_dmabuf after closing brace of attach_shm
+    #    Match 'content_height = win_height;' followed by '}' on next line, insert after '}'
+    sed -i '/^[[:space:]]*surface->content_height = win_height;[[:space:]]*$/{n;/^}$/r '"${WLD_SRC}"'/wayland_surface_attach_dmabuf.inc'"
+}" dlls/winewayland.drv/wayland_surface.c
 
     # 7. Makefile.in: add new source files
     sed -i '/^[[:space:]]*dllmain\.c \\$/a \\tlinux-dmabuf-unstable-v1.xml \\\n\twayland_dmabuf.c \\' \
