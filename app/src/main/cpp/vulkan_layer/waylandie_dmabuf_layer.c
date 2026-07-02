@@ -1100,7 +1100,6 @@ static void layer_destroy_instance(VkInstance instance,
 /* ------------------------------------------------------------------ */
 
 #define WINEVULKAN_DISPATCH_TABLE_MAX_ENTRIES 2048
-#define WINEVULKAN_TABLE_POPULATED_THRESHOLD 900
 
 static void *g_real_create_swapchain = NULL;
 static void *g_real_destroy_swapchain = NULL;
@@ -1148,7 +1147,7 @@ static int find_winevulkan_thunks(void *winevulkan_mod,
 
 /* Patch the dispatch table by finding and overwriting swapchain entries. */
 static int patch_dispatch_table_now(VkDevice device) {
-    void **dispatch_table = *(void ***)((char *)device + 8);
+    void **dispatch_table = (void **)((char *)device + 8);
     if (!dispatch_table) {
         LOGE("patch: dispatch table is NULL");
         return -1;
@@ -1156,7 +1155,7 @@ static int patch_dispatch_table_now(VkDevice device) {
 
     int non_null = count_non_null_entries(dispatch_table, 256);
     LOGI("patch: table=%p, %d/256 non-null in first 256", (void *)dispatch_table, non_null);
-    if (non_null < WINEVULKAN_TABLE_POPULATED_THRESHOLD / 4) {
+    if (non_null < 100) {
         LOGW("patch: table not populated enough (%d/256), aborting", non_null);
         return -1;
     }
@@ -1251,12 +1250,20 @@ static void *dispatch_watcher_thread(void *arg) {
     VkDevice device = (VkDevice)arg;
     LOGI("watcher: started, waiting for dispatch table to populate (device=%p)", (void *)device);
 
-    for (int attempt = 0; attempt < 100; attempt++) {
+    /* The dispatch table is INLINE at offset 8 (struct vulkan_device_funcs).
+     * It's populated by winevulkan AFTER vkCreateDevice returns.
+     * We poll until it has enough non-NULL entries to indicate population. */
+    for (int attempt = 0; attempt < 200; attempt++) {
         usleep(10000);  /* 10ms */
-        void **dispatch_table = *(void ***)((char *)device + 8);
-        if (!dispatch_table) continue;
+        void **dispatch_table = (void **)((char *)device + 8);
         int non_null = count_non_null_entries(dispatch_table, 256);
-        if (non_null >= 200) {
+        /* Log first few attempts and every 10th for diagnostics. */
+        if (attempt < 3 || (attempt % 20) == 0) {
+            LOGI("watcher: attempt %d, %d/256 non-null in first 256", attempt + 1, non_null);
+        }
+        /* The table has ~201 non-null entries in first 256 when populated.
+         * Use 150 as threshold (robust against minor variations). */
+        if (non_null >= 150) {
             LOGI("watcher: table populated (%d/256 non-null) after %d attempts", non_null, attempt + 1);
             int rc = patch_dispatch_table_now(device);
             if (rc == 0) {
@@ -1436,44 +1443,14 @@ static VkResult layer_create_device(VkPhysicalDevice physicalDevice,
 /* Lazy vtable resolver — called on first use of any device function.
  * At this point winevulkan's vkCreateDevice has completed and fp_gdpa
  * is safe to call. */
-static atomic_int g_dispatch_patched = 0;
 
 static void ensure_device_vtable(device_data *data) {
     if (data->vtable.destroy_device) return;  /* already resolved */
     if (!data->device) return;
 
-    /* Read function pointers DIRECTLY from winevulkan's dispatch table
-     * instead of calling fp_gdpa. This avoids triggering assertions in
-     * winevulkan/loader.c that occur when fp_gdpa is called for functions
-     * whose extensions aren't enabled.
-     *
-     * The dispatch table is at offset 8 from the device handle. We know
-     * the indices from diagnostic logs:
-     *   [253] = vkCreateSwapchainKHR
-     *   [254] = vkDestroySwapchainKHR
-     *   [255] = vkGetSwapchainImagesKHR
-     *   [256] = vkAcquireNextImageKHR
-     *   [257] = vkQueuePresentKHR
-     *
-     * For non-swapchain functions, we call fp_gdpa lazily on first use.
-     * This is safe because by the time DXVK calls our hooks, winevulkan's
-     * vkCreateDevice has fully completed. */
-    void **dispatch_table = *(void ***)((char *)data->device + 8);
-    if (!dispatch_table) {
-        LOGE("ensure_device_vtable: dispatch table is NULL");
-        return;
-    }
-
-    /* Read swapchain function pointers from the dispatch table BEFORE patching.
-     * These are the real winevulkan thunks that we'll call as pass-through. */
-    data->vtable.real_create_swapchain = (PFN_vkCreateSwapchainKHR)dispatch_table[253];
-    data->vtable.real_destroy_swapchain = (PFN_vkDestroySwapchainKHR)dispatch_table[254];
-    data->vtable.real_get_swapchain_images = (PFN_vkGetSwapchainImagesKHR)dispatch_table[255];
-    data->vtable.real_acquire_next_image = (PFN_vkAcquireNextImageKHR)dispatch_table[256];
-    data->vtable.real_queue_present = (PFN_vkQueuePresentKHR)dispatch_table[257];
-
-    /* Mark destroy_device as non-NULL to indicate vtable is "resolved".
-     * Other functions will be resolved lazily via fp_gdpa on first use. */
+    /* Resolve all device functions via fp_gdpa. This is safe because
+     * ensure_device_vtable is only called from layer_create_swapchain,
+     * which fires AFTER winevulkan's vkCreateDevice has fully completed. */
     PFN_vkGetDeviceProcAddr fp_gdpa = data->vtable.get_device_proc_addr;
     if (fp_gdpa) {
         data->vtable.destroy_device = (PFN_vkDestroyDevice)
