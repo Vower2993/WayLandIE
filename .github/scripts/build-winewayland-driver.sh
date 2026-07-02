@@ -747,6 +747,15 @@ python3 make_vulkan 2>&1 | tail -5
 # Verify android_surface is now in the generated headers
 echo "  VK_KHR_xlib_surface count: $(grep -c "VK_KHR_xlib_surface" /tmp/proton-wine/include/wine/vulkan.h || true)"
 echo "  vkCreateAndroidSurfaceKHR count: $(grep -c "vkCreateAndroidSurfaceKHR" /tmp/proton-wine/include/wine/vulkan.h || true)"
+# Fix: Add typedef for AHardwareBuffer so generated thunk32_ code compiles.
+# The generated code uses bare 'AHardwareBuffer' but vulkan.h only has
+# 'struct AHardwareBuffer;' forward declaration without a typedef.
+sed -i 's/^struct AHardwareBuffer;$/struct AHardwareBuffer;\ntypedef struct AHardwareBuffer AHardwareBuffer;/' /tmp/proton-wine/include/wine/vulkan.h
+echo "  AHardwareBuffer typedef added: $(grep -c 'typedef struct AHardwareBuffer AHardwareBuffer' /tmp/proton-wine/include/wine/vulkan.h || true)"
+# Fix: The generated thunk32_ for vkGetMemoryAndroidHardwareBufferANDROID has
+# a const-correctness bug: writes through a (const PTR32 *) pointer.
+# Fix by casting away the const.
+sed -i 's/\*(const PTR32 \*)UlongToPtr(params->pBuffer) = PtrToUlong(pBuffer_host);/*(PTR32 *)UlongToPtr(params->pBuffer) = PtrToUlong(pBuffer_host);/' /tmp/proton-wine/dlls/winevulkan/vulkan_thunks.c
 cd /tmp/proton-wine
 
 make -j$(nproc) -k \
