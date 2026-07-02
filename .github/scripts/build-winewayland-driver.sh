@@ -105,9 +105,14 @@ fi
 # Add swapchain/present functions to MANUAL_UNIX_THUNKS so our custom
 # thunks in winevulkan_dmabuf.c are used instead of auto-generated ones.
 echo "=== Patching make_vulkan for dmabuf thunks ==="
-sed -i '/"vkGetSwapchainTimeDomainPropertiesEXT",/a\    "vkCreateSwapchainKHR",\n    "vkDestroySwapchainKHR",\n    "vkGetSwapchainImagesKHR",\n    "vkAcquireNextImageKHR",\n    "vkQueuePresentKHR",' dlls/winevulkan/make_vulkan
-echo "  Added 5 swapchain functions to MANUAL_UNIX_THUNKS"
-grep -c "vkCreateSwapchainKHR" dlls/winevulkan/make_vulkan
+sed -i '/"vkGetSwapchainTimeDomainPropertiesEXT",/a\    "vkCreateSwapchainKHR",\n    "vkDestroySwapchainKHR",\n    "vkGetSwapchainImagesKHR",\n    "vkAcquireNextImageKHR",\n    "vkAcquireNextImage2KHR",\n    "vkQueuePresentKHR",' dlls/winevulkan/make_vulkan
+echo "  Added 6 swapchain functions to MANUAL_UNIX_THUNKS"
+THUNK_COUNT=$(grep -c "vkCreateSwapchainKHR" dlls/winevulkan/make_vulkan)
+if [ "$THUNK_COUNT" -lt 2 ]; then
+    echo "FATAL: MANUAL_UNIX_THUNKS patch failed — expected vkCreateSwapchainKHR in make_vulkan"
+    exit 1
+fi
+echo "  Verified: $THUNK_COUNT occurrences of vkCreateSwapchainKHR in make_vulkan"
 
 # === Copy winevulkan_dmabuf.c (our manual thunk implementations) ===
 cp "$WLD_SRC/winevulkan_dmabuf.c" dlls/winevulkan/
