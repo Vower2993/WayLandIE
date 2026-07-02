@@ -923,11 +923,8 @@ if [ "$SO_SIZE" -lt 1000 ]; then
   exit 1
 fi
 
-if [ "$VULKAN_SIZE" -lt 1000 ]; then
-  echo "FATAL: winevulkan.dll not built — cannot continue without it"
-  exit 1
-fi
-
+# winevulkan.dll is NOT collected (we keep Proton's original PE side).
+# Only winevulkan.so is required.
 if [ "$VULKAN_SO_SIZE" -lt 1000 ]; then
   echo "FATAL: winevulkan.so not built — our dmabuf hooks are not compiled in!"
   echo "  This means winevulkan_dmabuf.c failed to compile or link."
