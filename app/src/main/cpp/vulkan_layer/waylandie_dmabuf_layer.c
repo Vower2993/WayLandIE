@@ -1113,16 +1113,64 @@ static void *g_real_acquire_next_image = NULL;
 static void *g_real_queue_present = NULL;
 
 static int patch_dispatch_table(VkDevice device) {
-    /* The dispatch table is at *(void***)device — the first field of the
-     * VkDevice handle is a pointer to the dispatch table (array of void*).
-     * Each entry is a function pointer to winevulkan's thunk for that
-     * Vulkan function. */
-    void ***p_disp_ptr = (void ***)device;
-    void **dispatch_table = *p_disp_ptr;
-    if (!dispatch_table) {
-        LOGE("patch_dispatch_table: dispatch table is NULL");
-        return -1;
+    /* winevulkan's VkDevice handle is a `struct wine_vk_device` whose layout is:
+     *   struct wine_vk_device {
+     *       struct wine_vk_base base;            // offset 0: { void *loader_magic; ... }
+     *       struct vulkan_device_funcs funcs;    // offset 8: THE dispatch table (array of fn ptrs)
+     *       VkDevice host_device;                // offset 8 + sizeof(funcs)
+     *       ...
+     *   };
+     *
+     * The first 8 bytes are the loader dispatch magic (0x10aded040410aded),
+     * NOT a pointer to the dispatch table. The actual function pointers live
+     * in the `funcs` struct at offset 8.
+     *
+     * We try multiple base offsets (8, 16, 0, 24) to find the dispatch table
+     * empirically — winevulkan versions may differ slightly. */
+    void *device_base = (void *)device;
+    void **dispatch_table = NULL;
+    int table_base_offset = -1;
+
+    /* Try offsets 8, 16, 0, 24, 32 bytes. Look for a table with many non-NULL
+     * entries (a real dispatch table has hundreds of function pointers). */
+    int offsets_to_try[] = {8, 16, 0, 24, 32};
+    int best_offset = -1;
+    int best_non_null = 0;
+    for (size_t i = 0; i < sizeof(offsets_to_try)/sizeof(offsets_to_try[0]); i++) {
+        int off = offsets_to_try[i];
+        void **candidate = (void **)((char *)device_base + off);
+        /* Count non-NULL entries in the first 256 slots. */
+        int non_null = 0;
+        for (int j = 0; j < 256; j++) {
+            if (candidate[j]) non_null++;
+        }
+        LOGI("patch_dispatch_table: offset %d: first entry=%p, %d/256 non-null",
+             off, candidate[0], non_null);
+        if (non_null > best_non_null) {
+            best_non_null = non_null;
+            best_offset = off;
+        }
+        /* Heuristic: a real dispatch table has at least 50 non-NULL entries. */
+        if (non_null >= 50) {
+            dispatch_table = candidate;
+            table_base_offset = off;
+            break;
+        }
     }
+    if (!dispatch_table) {
+        /* Fall back to the best offset found, even if it has few entries. */
+        if (best_offset >= 0) {
+            dispatch_table = (void **)((char *)device_base + best_offset);
+            table_base_offset = best_offset;
+            LOGW("patch_dispatch_table: no offset had >=50 entries, using offset %d (%d non-null)",
+                 best_offset, best_non_null);
+        } else {
+            LOGE("patch_dispatch_table: could not find dispatch table");
+            return -1;
+        }
+    }
+    LOGI("patch_dispatch_table: using dispatch_table at offset %d = %p (device=%p)",
+         table_base_offset, (void *)dispatch_table, (void *)device);
 
     /* We need to find our target function pointers by comparing against
      * the ones we resolved via vkGetDeviceProcAddr. */
@@ -1200,19 +1248,28 @@ static int patch_dispatch_table(VkDevice device) {
             winevulkan = dlopen("winevulkan.dll.so", RTLD_NOW | RTLD_NOLOAD);
         }
         if (!winevulkan) {
-            /* Try to find it via /proc/self/maps */
-            LOGW("patch_dispatch_table: dlopen winevulkan failed: %s — trying dladdr", dlerror());
+            const char *err = dlerror();
+            LOGW("patch_dispatch_table: dlopen winevulkan failed: %s — trying dladdr", err ? err : "(no error)");
             /* Use dladdr on the GDPA targets to find the loaded module. */
             Dl_info info;
+            memset(&info, 0, sizeof(info));
             if (dladdr((void *)target_create_swapchain, &info)) {
-                LOGI("patch_dispatch_table: create_swapchain lives in %s @ %p",
-                     info.dli_fname ? info.dli_fname : "?", info.dli_fbase);
+                LOGI("patch_dispatch_table: dladdr create_swapchain: fname=%s fbase=%p sname=%s saddr=%p",
+                     info.dli_fname ? info.dli_fname : "(null)",
+                     info.dli_fbase,
+                     info.dli_sname ? info.dli_sname : "(null)",
+                     info.dli_saddr);
                 if (info.dli_fname) {
                     winevulkan = dlopen(info.dli_fname, RTLD_NOW | RTLD_NOLOAD);
                     if (winevulkan) {
                         LOGI("patch_dispatch_table: opened %s via dladdr", info.dli_fname);
+                    } else {
+                        LOGW("patch_dispatch_table: dlopen(%s) failed: %s",
+                             info.dli_fname, dlerror());
                     }
                 }
+            } else {
+                LOGW("patch_dispatch_table: dladdr failed for %p", (void *)target_create_swapchain);
             }
         }
 
