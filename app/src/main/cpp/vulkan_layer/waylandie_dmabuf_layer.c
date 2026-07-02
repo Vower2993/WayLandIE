@@ -32,6 +32,17 @@
 #include <sys/un.h>
 #include <unistd.h>
 
+/* Fallback defines for older NDK / Vulkan header versions. */
+#ifndef VK_LAYER_EXPORT
+#define VK_LAYER_EXPORT __attribute__((visibility("default")))
+#endif
+
+/* AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM was added in API 26 but may not be
+ * exposed in all NDK versions. Define it if missing. */
+#ifndef AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM
+#define AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM 5
+#endif
+
 #define LOG_TAG "WayLandIE/Layer"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
 #define LOGW(...) __android_log_print(ANDROID_LOG_WARN,  LOG_TAG, __VA_ARGS__)
