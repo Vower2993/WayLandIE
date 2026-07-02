@@ -740,3 +740,33 @@ VkResult wine_vkAcquireNextImage2KHR(VkDevice client_device,
     /* Force DXVK to fall back to vkAcquireNextImageKHR. */
     return VK_ERROR_OUT_OF_DATE_KHR;
 }
+
+/* No-op implementations for android-specific functions.
+ * These are in MANUAL_UNIX_THUNKS to suppress auto-generated thunks
+ * that have compile errors (AHardwareBuffer type mismatch on Android NDK).
+ * They must exist to maintain the same enum order as the Proton PE side. */
+
+VkResult wine_vkCreateAndroidSurfaceKHR(VkInstance instance,
+                                        const VkAndroidSurfaceCreateInfoKHR *pCreateInfo,
+                                        const VkAllocationCallbacks *pAllocator,
+                                        VkSurfaceKHR *pSurface)
+{
+    /* We use VK_KHR_xlib_surface instead. Return error if called. */
+    return VK_ERROR_EXTENSION_NOT_PRESENT;
+}
+
+VkResult wine_vkGetAndroidHardwareBufferPropertiesANDROID(VkDevice device,
+                                                          const struct AHardwareBuffer *buffer,
+                                                          VkAndroidHardwareBufferPropertiesANDROID *pProperties)
+{
+    /* VK_ANDROID_external_memory_android_hardware_buffer not supported. */
+    return VK_ERROR_EXTENSION_NOT_PRESENT;
+}
+
+VkResult wine_vkGetMemoryAndroidHardwareBufferANDROID(VkDevice device,
+                                                      const VkMemoryGetAndroidHardwareBufferInfoANDROID *pInfo,
+                                                      struct AHardwareBuffer **pBuffer)
+{
+    /* VK_ANDROID_external_memory_android_hardware_buffer not supported. */
+    return VK_ERROR_EXTENSION_NOT_PRESENT;
+}
