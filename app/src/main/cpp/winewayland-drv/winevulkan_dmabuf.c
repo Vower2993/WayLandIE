@@ -1,5 +1,4 @@
-/*
- * WayLandIE dmabuf forwarding hooks for winevulkan.
+/* WayLandIE dmabuf forwarding hooks for winevulkan.
  *
  * This file provides manual unix-side thunks for swapchain/present functions.
  * Instead of calling the host driver's vkCreateSwapchainKHR (which creates a
@@ -13,6 +12,11 @@
  * Build: compiled into winevulkan.so alongside the generated thunks.
  * Enabled at runtime via WAYLANDIE_DMABUF_FORWARD=1 env var.
  */
+
+#if 0
+#pragma makedep unix
+#endif
+
 
 #include "config.h"
 #include <stdlib.h>
