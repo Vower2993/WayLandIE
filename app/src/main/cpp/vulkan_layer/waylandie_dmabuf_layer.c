@@ -1364,6 +1364,29 @@ static int patch_dispatch_table(VkDevice device) {
         if (patched_count == 5) break;
     }
 
+    /* If we found destroy_swapchain but NOT create_swapchain, the create
+     * entry is at index (destroy_index - 1). winevulkan's dispatch table
+     * stores functions in alphabetical-ish order: CreateSwapchainKHR is
+     * right before DestroySwapchainKHR. Patch by index. */
+    if (!found_create_swapchain && found_destroy_swapchain) {
+        /* Re-scan to find the destroy_swapchain index. */
+        for (int i = 1; i < WINEVULKAN_DISPATCH_TABLE_MAX_ENTRIES; i++) {
+            if (dispatch_table[i] == (void *)layer_destroy_swapchain) {
+                /* The entry at i-1 should be the original create_swapchain. */
+                void *orig = dispatch_table[i - 1];
+                if (orig && orig != (void *)layer_create_swapchain) {
+                    dispatch_table[i - 1] = (void *)layer_create_swapchain;
+                    g_real_create_swapchain = orig;
+                    found_create_swapchain = 1;
+                    patched_count++;
+                    LOGI("patch_dispatch_table: [%d] swapchain (by index): %p -> %p",
+                         i - 1, orig, (void *)layer_create_swapchain);
+                }
+                break;
+            }
+        }
+    }
+
     /* Restore read-only protection (best effort — not fatal if it fails). */
     if (mprotect((void *)page_start, prot_len, PROT_READ) != 0) {
         LOGW("patch_dispatch_table: mprotect RO restore failed (non-fatal) errno=%d", errno);
