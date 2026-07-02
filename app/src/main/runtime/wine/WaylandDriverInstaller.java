@@ -254,7 +254,78 @@ public final class WaylandDriverInstaller {
         // Wine's USER_LoadDriver needs specific exports (DllMain + driver funcs).
         // If exports are missing, the driver loads but can't be used.
         dumpPeExports(ctx, driverInSystem32, "winewayland.drv");
+
+        // Install the WaylandIE dmabuf Vulkan layer (Level 2 zero-copy).
+        // This layer intercepts vkQueuePresentKHR to export dmabuf fds from
+        // AHardwareBuffer-backed swapchain images and forward them to the
+        // WaylandIE bridge socket for zero-copy display via SurfaceControl.
+        installDmabufLayer(ctx, prefix);
+
         return true;
+    }
+
+    /**
+     * Installs the WaylandIE dmabuf zero-copy Vulkan layer.
+     *
+     * Copies libvk_layer_waylandie_dmabuf.so from the app's nativeLibraryDir
+     * into rootDir/usr/lib/ (which is in LD_LIBRARY_PATH), and writes the
+     * layer manifest JSON into rootDir/usr/share/vulkan/implicit_layer.d/.
+     *
+     * The layer is enabled at runtime via WAYLANDIE_DMABUF_LAYER_ENABLE=1
+     * (set by GuestProgramLauncherComponent when display mode is wayland).
+     */
+    private static void installDmabufLayer(Context ctx, File prefix) {
+        try {
+            String nativeLibDir = ctx.getApplicationInfo().nativeLibraryDir;
+            File layerSo = new File(nativeLibDir, "libvk_layer_waylandie_dmabuf.so");
+            if (!layerSo.exists() || layerSo.length() < 1000) {
+                Log.w(TAG, "installDmabufLayer: libvk_layer_waylandie_dmabuf.so not found in " + nativeLibDir
+                        + " — dmabuf zero-copy layer will not be available");
+                return;
+            }
+
+            // rootDir is prefix's parent (prefix = rootDir/home/xuser/.wine)
+            File rootDir = prefix.getParentFile();
+            while (rootDir != null && !new File(rootDir, "usr/lib").isDirectory()) {
+                File candidate = rootDir.getParentFile();
+                if (candidate == rootDir) break;
+                rootDir = candidate;
+            }
+            if (rootDir == null) {
+                Log.e(TAG, "installDmabufLayer: could not locate rootDir from prefix " + prefix);
+                return;
+            }
+
+            // Copy the .so into rootDir/usr/lib/ (in LD_LIBRARY_PATH).
+            File targetLibDir = new File(rootDir, "usr/lib");
+            File targetSo = new File(targetLibDir, "libvk_layer_waylandie_dmabuf.so");
+            copyFile(layerSo, targetSo);
+            Log.i(TAG, "installDmabufLayer: copied " + layerSo.getName()
+                    + " (" + targetSo.length() + " bytes) to " + targetLibDir);
+
+            // Write the layer manifest JSON into rootDir/usr/share/vulkan/implicit_layer.d/.
+            File layerDir = new File(rootDir, "usr/share/vulkan/implicit_layer.d");
+            layerDir.mkdirs();
+            File manifestFile = new File(layerDir, "waylandie_dmabuf_layer.json");
+            try {
+                java.io.InputStream is = ctx.getAssets().open("waylandie_dmabuf_layer.json");
+                java.io.FileOutputStream fos = new java.io.FileOutputStream(manifestFile);
+                byte[] buf = new byte[4096];
+                int len;
+                while ((len = is.read(buf)) > 0) fos.write(buf, 0, len);
+                fos.close();
+                is.close();
+                Log.i(TAG, "installDmabufLayer: wrote manifest to " + manifestFile
+                        + " (" + manifestFile.length() + " bytes)");
+            } catch (IOException e) {
+                Log.e(TAG, "installDmabufLayer: failed to write manifest", e);
+            }
+
+            Log.i(TAG, "installDmabufLayer: layer installed — will be enabled by "
+                    + "WAYLANDIE_DMABUF_LAYER_ENABLE=1 env var at runtime");
+        } catch (Exception e) {
+            Log.e(TAG, "installDmabufLayer: unexpected error", e);
+        }
     }
 
     /**
@@ -569,6 +640,23 @@ public final class WaylandDriverInstaller {
             Log.i(TAG, "  copied to system32: " + src.getName() + " (" + dst.length() + " bytes)");
         } catch (IOException e) {
             Log.w(TAG, "  copy failed: " + src.getName() + " — " + e.getMessage());
+        }
+    }
+
+    private static void copyFile(File src, File dst) throws IOException {
+        dst.getParentFile().mkdirs();
+        InputStream is = new FileInputStream(src);
+        try {
+            FileOutputStream fos = new FileOutputStream(dst);
+            try {
+                byte[] buf = new byte[65536];
+                int n;
+                while ((n = is.read(buf)) > 0) fos.write(buf, 0, n);
+            } finally {
+                fos.close();
+            }
+        } finally {
+            is.close();
         }
     }
 

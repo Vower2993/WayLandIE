@@ -130,6 +130,14 @@ jobs:
         echo "Using NDK: $NDK_ROOT"
         bash .github/scripts/build-winewayland-driver.sh 2>&1 || echo "WARNING: winewayland driver build failed (non-fatal)"
 
+    - name: Build WaylandIE dmabuf Vulkan layer
+      run: |
+        export ANDROID_NDK_HOME=$(ls -d /usr/local/lib/android/sdk/ndk/* 2>/dev/null | head -1)
+        export ANDROID_NDK=$ANDROID_NDK_HOME
+        echo "Using NDK: $ANDROID_NDK_HOME"
+        bash .github/scripts/build-waylandie-dmabuf-layer.sh
+        ls -la app/src/main/jniLibs/arm64-v8a/libvk_layer_waylandie_dmabuf.so
+
     - name: Set up JDK 17
       uses: actions/setup-java@v5
       with:
