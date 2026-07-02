@@ -11,6 +11,9 @@
  *
  * Copyright 2024 WayLandIE Project */
 
+/* Must come before any system header for Dl_info / dladdr. */
+#define _GNU_SOURCE
+
 /* Vulkan header must come first for the layer dispatch macros. */
 #include <vulkan/vk_layer.h>
 #include <vulkan/vulkan.h>
@@ -1137,7 +1140,8 @@ static int patch_dispatch_table(VkDevice device) {
     void *target_acquire_next_image = (void *)dev_data->vtable.real_acquire_next_image;
     void *target_queue_present = (void *)dev_data->vtable.real_queue_present;
 
-    LOGI("patch_dispatch_table: scanning for targets: swapchain=%p present=%p acquire=%p",
+    LOGI("patch_dispatch_table: dispatch_table=%p device=%p", (void *)dispatch_table, (void *)device);
+    LOGI("patch_dispatch_table: GDPA targets: swapchain=%p present=%p acquire=%p",
          target_create_swapchain, target_queue_present, target_acquire_next_image);
 
     /* If real_create_swapchain is NULL, we couldn't resolve it via GDPA.
@@ -1145,6 +1149,102 @@ static int patch_dispatch_table(VkDevice device) {
     if (!target_create_swapchain || !target_queue_present) {
         LOGW("patch_dispatch_table: swapchain functions not available — skipping patch");
         return -1;
+    }
+
+    /* DIAGNOSTIC: Dump the first 64 entries of the dispatch table so we can
+     * see what's actually there. winevulkan's dispatch table contains its
+     * OWN thunk wrappers (wine_vkCreateSwapchainKHR etc.), not the raw
+     * driver functions. The GDPA targets above are the raw driver functions
+     * (or the next layer's wrappers), so they won't match.
+     *
+     * We dump:
+     *   - First 16 entries (core Vulkan functions)
+     *   - Any entries that match our GDPA targets
+     *   - Total non-NULL entry count
+     * This lets us determine the table layout empirically. */
+    int total_non_null = 0;
+    int match_count = 0;
+    for (int i = 0; i < WINEVULKAN_DISPATCH_TABLE_MAX_ENTRIES; i++) {
+        void *entry = dispatch_table[i];
+        if (!entry) continue;
+        total_non_null++;
+        if (i < 16) {
+            LOGI("patch_dispatch_table: [%d] = %p", i, entry);
+        }
+        if (entry == target_create_swapchain) {
+            LOGI("patch_dispatch_table: [%d] MATCHES create_swapchain target!", i);
+            match_count++;
+        }
+        if (entry == target_queue_present) {
+            LOGI("patch_dispatch_table: [%d] MATCHES queue_present target!", i);
+            match_count++;
+        }
+        if (entry == target_acquire_next_image) {
+            LOGI("patch_dispatch_table: [%d] MATCHES acquire_next_image target!", i);
+            match_count++;
+        }
+    }
+    LOGI("patch_dispatch_table: scanned %d entries, %d non-null, %d matches",
+         WINEVULKAN_DISPATCH_TABLE_MAX_ENTRIES, total_non_null, match_count);
+
+    /* If we found no matches, the dispatch table contains winevulkan's
+     * thunks, not the raw driver functions. We need a different strategy:
+     * dlopen winevulkan.so and dlsym its thunk functions to get their
+     * addresses, then match those. */
+    if (match_count == 0) {
+        LOGW("patch_dispatch_table: no matches via GDPA targets — trying winevulkan thunk addresses");
+
+        /* Try to dlopen winevulkan.so and get the thunk addresses. */
+        void *winevulkan = dlopen("winevulkan.so", RTLD_NOW | RTLD_NOLOAD);
+        if (!winevulkan) {
+            winevulkan = dlopen("winevulkan.dll.so", RTLD_NOW | RTLD_NOLOAD);
+        }
+        if (!winevulkan) {
+            /* Try to find it via /proc/self/maps */
+            LOGW("patch_dispatch_table: dlopen winevulkan failed: %s — trying dladdr", dlerror());
+            /* Use dladdr on the GDPA targets to find the loaded module. */
+            Dl_info info;
+            if (dladdr((void *)target_create_swapchain, &info)) {
+                LOGI("patch_dispatch_table: create_swapchain lives in %s @ %p",
+                     info.dli_fname ? info.dli_fname : "?", info.dli_fbase);
+                if (info.dli_fname) {
+                    winevulkan = dlopen(info.dli_fname, RTLD_NOW | RTLD_NOLOAD);
+                    if (winevulkan) {
+                        LOGI("patch_dispatch_table: opened %s via dladdr", info.dli_fname);
+                    }
+                }
+            }
+        }
+
+        if (winevulkan) {
+            /* winevulkan's thunks are named wine_vkXxxKHR (or wine_vkXxx).
+             * dlsym them and use as targets. */
+            void *thunk_create_swapchain = dlsym(winevulkan, "wine_vkCreateSwapchainKHR");
+            void *thunk_destroy_swapchain = dlsym(winevulkan, "wine_vkDestroySwapchainKHR");
+            void *thunk_get_swapchain_images = dlsym(winevulkan, "wine_vkGetSwapchainImagesKHR");
+            void *thunk_acquire_next_image = dlsym(winevulkan, "wine_vkAcquireNextImageKHR");
+            void *thunk_queue_present = dlsym(winevulkan, "wine_vkQueuePresentKHR");
+
+            LOGI("patch_dispatch_table: winevulkan thunks: swapchain=%p present=%p acquire=%p",
+                 thunk_create_swapchain, thunk_queue_present, thunk_acquire_next_image);
+
+            if (thunk_create_swapchain) target_create_swapchain = thunk_create_swapchain;
+            if (thunk_destroy_swapchain) target_destroy_swapchain = thunk_destroy_swapchain;
+            if (thunk_get_swapchain_images) target_get_swapchain_images = thunk_get_swapchain_images;
+            if (thunk_acquire_next_image) target_acquire_next_image = thunk_acquire_next_image;
+            if (thunk_queue_present) target_queue_present = thunk_queue_present;
+
+            /* Also try without the "wine_" prefix — some builds export vkXxx. */
+            if (!thunk_create_swapchain) {
+                void *alt = dlsym(winevulkan, "vkCreateSwapchainKHR");
+                if (alt) {
+                    target_create_swapchain = alt;
+                    LOGI("patch_dispatch_table: alt vkCreateSwapchainKHR=%p", alt);
+                }
+            }
+        } else {
+            LOGE("patch_dispatch_table: could not open winevulkan — cannot match thunks");
+        }
     }
 
     /* Determine the page-aligned region of the dispatch table for mprotect. */
