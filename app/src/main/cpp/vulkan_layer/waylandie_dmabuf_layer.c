@@ -1083,319 +1083,213 @@ static void layer_destroy_instance(VkInstance instance,
 /* ------------------------------------------------------------------ */
 /* winevulkan dispatch table patching                                 */
 /*                                                                    */
-/* winevulkan.so builds its OWN dispatch table by calling             */
-/* vkGetDeviceProcAddr once per function name at vkCreateDevice       */
-/* time. After that, all per-frame calls (vkQueuePresentKHR, etc.)    */
-/* go through that table — NOT through the Vulkan loader's layer      */
-/* chain. So our implicit layer hooks are bypassed for swapchain and  */
-/* present calls.                                                     */
+/* PROBLEM: winevulkan.so builds its OWN dispatch table AFTER          */
+/* vkCreateDevice returns. Our layer_create_device runs DURING          */
+/* vkCreateDevice (in the layer chain), so the table is NOT yet        */
+/* populated when we try to patch it.                                 */
 /*                                                                    */
-/* Fix: after the real vkCreateDevice returns, we walk the dispatch   */
-/* table at *(void***)*pDevice looking for the real driver's          */
-/* vkCreateSwapchainKHR / vkQueuePresentKHR / etc. pointers, and      */
-/* overwrite them in-place with our hooks. The table is in mmap'd     */
-/* memory, so we mprotect it RW first.                                */
+/* SOLUTION: Spawn a watcher thread from layer_create_device that      */
+/* polls the dispatch table until it's fully populated (>= 900 non-    */
+/* null entries), then patches it. The watcher finds swapchain          */
+/* function indices dynamically by dlopen'ing winevulkan.so and         */
+/* dlsym'ing the wine_vkXxx thunks, then scanning the table for        */
+/* matching pointers.                                                 */
 /*                                                                    */
-/* This is the same technique MangoHud, vkBasalt, and adrenotools     */
-/* use to inject into winevulkan's dispatch path.                     */
+/* This completely decouples patching from the vkCreateDevice call      */
+/* chain, avoiding all timing/assertion issues.                        */
 /* ------------------------------------------------------------------ */
 
-/* winevulkan's dispatch table has ~1024+ entries (one per Vulkan      */
-/* function). We scan a generous range to find our targets.            */
 #define WINEVULKAN_DISPATCH_TABLE_MAX_ENTRIES 2048
+#define WINEVULKAN_TABLE_POPULATED_THRESHOLD 900
 
 static void *g_real_create_swapchain = NULL;
 static void *g_real_destroy_swapchain = NULL;
 static void *g_real_get_swapchain_images = NULL;
 static void *g_real_acquire_next_image = NULL;
 static void *g_real_queue_present = NULL;
+static atomic_int g_watcher_started = 0;
 
-static int patch_dispatch_table(VkDevice device) {
-    /* winevulkan's VkDevice handle is a `struct wine_vk_device` whose layout is:
-     *   struct wine_vk_device {
-     *       struct wine_vk_base base;            // offset 0: { void *loader_magic; ... }
-     *       struct vulkan_device_funcs funcs;    // offset 8: THE dispatch table (array of fn ptrs)
-     *       VkDevice host_device;                // offset 8 + sizeof(funcs)
-     *       ...
-     *   };
-     *
-     * The first 8 bytes are the loader dispatch magic (0x10aded040410aded),
-     * NOT a pointer to the dispatch table. The actual function pointers live
-     * in the `funcs` struct at offset 8.
-     *
-     * We try multiple base offsets (8, 16, 0, 24) to find the dispatch table
-     * empirically — winevulkan versions may differ slightly. */
-    void *device_base = (void *)device;
-    void **dispatch_table = NULL;
-    int table_base_offset = -1;
+/* Count non-NULL entries in the first N slots of a dispatch table. */
+static int count_non_null_entries(void **table, int max) {
+    int count = 0;
+    for (int i = 0; i < max; i++) {
+        if (table[i]) count++;
+    }
+    return count;
+}
 
-    /* Try offsets 8, 16, 0, 24, 32 bytes. Look for a table with many non-NULL
-     * entries (a real dispatch table has hundreds of function pointers). */
-    int offsets_to_try[] = {8, 16, 0, 24, 32};
-    int best_offset = -1;
-    int best_non_null = 0;
-    for (size_t i = 0; i < sizeof(offsets_to_try)/sizeof(offsets_to_try[0]); i++) {
-        int off = offsets_to_try[i];
-        void **candidate = (void **)((char *)device_base + off);
-        /* Count non-NULL entries in the first 256 slots. */
-        int non_null = 0;
-        for (int j = 0; j < 256; j++) {
-            if (candidate[j]) non_null++;
-        }
-        LOGI("patch_dispatch_table: offset %d: first entry=%p, %d/256 non-null",
-             off, candidate[0], non_null);
-        if (non_null > best_non_null) {
-            best_non_null = non_null;
-            best_offset = off;
-        }
-        /* Heuristic: a real dispatch table has at least 50 non-NULL entries. */
-        if (non_null >= 50) {
-            dispatch_table = candidate;
-            table_base_offset = off;
+/* Find the winevulkan module handle via dladdr on a known function. */
+static void *find_winevulkan_module(void *known_ptr) {
+    if (!known_ptr) return NULL;
+    Dl_info info;
+    memset(&info, 0, sizeof(info));
+    if (dladdr(known_ptr, &info) && info.dli_fname) {
+        LOGI("patch: dladdr: fname=%s fbase=%p", info.dli_fname, info.dli_fbase);
+        return dlopen(info.dli_fname, RTLD_NOW | RTLD_NOLOAD);
+    }
+    return NULL;
+}
+
+/* Try to find winevulkan thunk addresses via dlsym. */
+static int find_winevulkan_thunks(void *winevulkan_mod,
+                                   void **out_create, void **out_destroy,
+                                   void **out_get_images, void **out_acquire,
+                                   void **out_present) {
+    if (!winevulkan_mod) return -1;
+    *out_create = dlsym(winevulkan_mod, "wine_vkCreateSwapchainKHR");
+    *out_destroy = dlsym(winevulkan_mod, "wine_vkDestroySwapchainKHR");
+    *out_get_images = dlsym(winevulkan_mod, "wine_vkGetSwapchainImagesKHR");
+    *out_acquire = dlsym(winevulkan_mod, "wine_vkAcquireNextImageKHR");
+    *out_present = dlsym(winevulkan_mod, "wine_vkQueuePresentKHR");
+    LOGI("patch: winevulkan thunks: create=%p destroy=%p images=%p acquire=%p present=%p",
+         *out_create, *out_destroy, *out_get_images, *out_acquire, *out_present);
+    return (*out_create && *out_present) ? 0 : -1;
+}
+
+/* Patch the dispatch table by finding and overwriting swapchain entries. */
+static int patch_dispatch_table_now(VkDevice device) {
+    void **dispatch_table = *(void ***)((char *)device + 8);
+    if (!dispatch_table) {
+        LOGE("patch: dispatch table is NULL");
+        return -1;
+    }
+
+    int non_null = count_non_null_entries(dispatch_table, 256);
+    LOGI("patch: table=%p, %d/256 non-null in first 256", (void *)dispatch_table, non_null);
+    if (non_null < WINEVULKAN_TABLE_POPULATED_THRESHOLD / 4) {
+        LOGW("patch: table not populated enough (%d/256), aborting", non_null);
+        return -1;
+    }
+
+    /* Find winevulkan thunk addresses. We need a known pointer from
+     * winevulkan — use the first non-NULL entry in the dispatch table
+     * (it's a winevulkan thunk). */
+    void *known_ptr = NULL;
+    for (int i = 0; i < 256; i++) {
+        if (dispatch_table[i]) {
+            known_ptr = dispatch_table[i];
             break;
         }
     }
-    if (!dispatch_table) {
-        /* Fall back to the best offset found, even if it has few entries. */
-        if (best_offset >= 0) {
-            dispatch_table = (void **)((char *)device_base + best_offset);
-            table_base_offset = best_offset;
-            LOGW("patch_dispatch_table: no offset had >=50 entries, using offset %d (%d non-null)",
-                 best_offset, best_non_null);
-        } else {
-            LOGE("patch_dispatch_table: could not find dispatch table");
-            return -1;
-        }
+    void *winevulkan_mod = find_winevulkan_module(known_ptr);
+    if (!winevulkan_mod) {
+        /* Try direct dlopen. */
+        winevulkan_mod = dlopen("winevulkan.so", RTLD_NOW | RTLD_NOLOAD);
+        if (!winevulkan_mod) winevulkan_mod = dlopen("winevulkan.dll.so", RTLD_NOW | RTLD_NOLOAD);
     }
-    LOGI("patch_dispatch_table: using dispatch_table at offset %d = %p (device=%p)",
-         table_base_offset, (void *)dispatch_table, (void *)device);
-
-    /* We need to find our target function pointers by comparing against
-     * the ones we resolved via vkGetDeviceProcAddr. */
-    device_data *dev_data = find_device_data(device);
-    if (!dev_data) {
-        LOGE("patch_dispatch_table: no device_data for %p", (void *)device);
+    if (!winevulkan_mod) {
+        LOGE("patch: could not find winevulkan module");
         return -1;
     }
 
-    /* Get the real driver's function pointers via GDPA. These are what
-     * winevulkan stored in its dispatch table during vkCreateDevice. */
-    void *target_create_swapchain = (void *)dev_data->vtable.real_create_swapchain;
-    void *target_destroy_swapchain = (void *)dev_data->vtable.real_destroy_swapchain;
-    void *target_get_swapchain_images = (void *)dev_data->vtable.real_get_swapchain_images;
-    void *target_acquire_next_image = (void *)dev_data->vtable.real_acquire_next_image;
-    void *target_queue_present = (void *)dev_data->vtable.real_queue_present;
-
-    LOGI("patch_dispatch_table: dispatch_table=%p device=%p", (void *)dispatch_table, (void *)device);
-    LOGI("patch_dispatch_table: GDPA targets: swapchain=%p present=%p acquire=%p",
-         target_create_swapchain, target_queue_present, target_acquire_next_image);
-
-    /* If real_create_swapchain is NULL, we couldn't resolve it via GDPA.
-     * This happens if VK_KHR_swapchain isn't enabled — abort gracefully. */
-    if (!target_create_swapchain || !target_queue_present) {
-        LOGW("patch_dispatch_table: swapchain functions not available — skipping patch");
+    void *thunk_create, *thunk_destroy, *thunk_images, *thunk_acquire, *thunk_present;
+    if (find_winevulkan_thunks(winevulkan_mod, &thunk_create, &thunk_destroy,
+                                &thunk_images, &thunk_acquire, &thunk_present) != 0) {
+        LOGE("patch: could not find winevulkan thunks");
         return -1;
     }
 
-    /* DIAGNOSTIC: Dump the first 64 entries of the dispatch table so we can
-     * see what's actually there. winevulkan's dispatch table contains its
-     * OWN thunk wrappers (wine_vkCreateSwapchainKHR etc.), not the raw
-     * driver functions. The GDPA targets above are the raw driver functions
-     * (or the next layer's wrappers), so they won't match.
-     *
-     * We dump:
-     *   - First 16 entries (core Vulkan functions)
-     *   - Any entries that match our GDPA targets
-     *   - Total non-NULL entry count
-     * This lets us determine the table layout empirically. */
-    int total_non_null = 0;
-    int match_count = 0;
-    for (int i = 0; i < WINEVULKAN_DISPATCH_TABLE_MAX_ENTRIES; i++) {
-        void *entry = dispatch_table[i];
-        if (!entry) continue;
-        total_non_null++;
-        if (i < 16) {
-            LOGI("patch_dispatch_table: [%d] = %p", i, entry);
-        }
-        if (entry == target_create_swapchain) {
-            LOGI("patch_dispatch_table: [%d] MATCHES create_swapchain target!", i);
-            match_count++;
-        }
-        if (entry == target_queue_present) {
-            LOGI("patch_dispatch_table: [%d] MATCHES queue_present target!", i);
-            match_count++;
-        }
-        if (entry == target_acquire_next_image) {
-            LOGI("patch_dispatch_table: [%d] MATCHES acquire_next_image target!", i);
-            match_count++;
-        }
-    }
-    LOGI("patch_dispatch_table: scanned %d entries, %d non-null, %d matches",
-         WINEVULKAN_DISPATCH_TABLE_MAX_ENTRIES, total_non_null, match_count);
-
-    /* If we found no matches, the dispatch table contains winevulkan's
-     * thunks, not the raw driver functions. We need a different strategy:
-     * dlopen winevulkan.so and dlsym its thunk functions to get their
-     * addresses, then match those. */
-    if (match_count == 0) {
-        LOGW("patch_dispatch_table: no matches via GDPA targets — trying winevulkan thunk addresses");
-
-        /* Try to dlopen winevulkan.so and get the thunk addresses. */
-        void *winevulkan = dlopen("winevulkan.so", RTLD_NOW | RTLD_NOLOAD);
-        if (!winevulkan) {
-            winevulkan = dlopen("winevulkan.dll.so", RTLD_NOW | RTLD_NOLOAD);
-        }
-        if (!winevulkan) {
-            const char *err = dlerror();
-            LOGW("patch_dispatch_table: dlopen winevulkan failed: %s — trying dladdr", err ? err : "(no error)");
-            /* Use dladdr on the GDPA targets to find the loaded module. */
-            Dl_info info;
-            memset(&info, 0, sizeof(info));
-            if (dladdr((void *)target_create_swapchain, &info)) {
-                LOGI("patch_dispatch_table: dladdr create_swapchain: fname=%s fbase=%p sname=%s saddr=%p",
-                     info.dli_fname ? info.dli_fname : "(null)",
-                     info.dli_fbase,
-                     info.dli_sname ? info.dli_sname : "(null)",
-                     info.dli_saddr);
-                if (info.dli_fname) {
-                    winevulkan = dlopen(info.dli_fname, RTLD_NOW | RTLD_NOLOAD);
-                    if (winevulkan) {
-                        LOGI("patch_dispatch_table: opened %s via dladdr", info.dli_fname);
-                    } else {
-                        LOGW("patch_dispatch_table: dlopen(%s) failed: %s",
-                             info.dli_fname, dlerror());
-                    }
-                }
-            } else {
-                LOGW("patch_dispatch_table: dladdr failed for %p", (void *)target_create_swapchain);
-            }
-        }
-
-        if (winevulkan) {
-            /* winevulkan's thunks are named wine_vkXxxKHR (or wine_vkXxx).
-             * dlsym them and use as targets. */
-            void *thunk_create_swapchain = dlsym(winevulkan, "wine_vkCreateSwapchainKHR");
-            void *thunk_destroy_swapchain = dlsym(winevulkan, "wine_vkDestroySwapchainKHR");
-            void *thunk_get_swapchain_images = dlsym(winevulkan, "wine_vkGetSwapchainImagesKHR");
-            void *thunk_acquire_next_image = dlsym(winevulkan, "wine_vkAcquireNextImageKHR");
-            void *thunk_queue_present = dlsym(winevulkan, "wine_vkQueuePresentKHR");
-
-            LOGI("patch_dispatch_table: winevulkan thunks: swapchain=%p present=%p acquire=%p",
-                 thunk_create_swapchain, thunk_queue_present, thunk_acquire_next_image);
-
-            if (thunk_create_swapchain) target_create_swapchain = thunk_create_swapchain;
-            if (thunk_destroy_swapchain) target_destroy_swapchain = thunk_destroy_swapchain;
-            if (thunk_get_swapchain_images) target_get_swapchain_images = thunk_get_swapchain_images;
-            if (thunk_acquire_next_image) target_acquire_next_image = thunk_acquire_next_image;
-            if (thunk_queue_present) target_queue_present = thunk_queue_present;
-
-            /* Also try without the "wine_" prefix — some builds export vkXxx. */
-            if (!thunk_create_swapchain) {
-                void *alt = dlsym(winevulkan, "vkCreateSwapchainKHR");
-                if (alt) {
-                    target_create_swapchain = alt;
-                    LOGI("patch_dispatch_table: alt vkCreateSwapchainKHR=%p", alt);
-                }
-            }
-        } else {
-            LOGE("patch_dispatch_table: could not open winevulkan — cannot match thunks");
-        }
-    }
-
-    /* Determine the page-aligned region of the dispatch table for mprotect. */
+    /* mprotect the table region RW. */
     uintptr_t table_start = (uintptr_t)dispatch_table;
     uintptr_t table_end = table_start + (WINEVULKAN_DISPATCH_TABLE_MAX_ENTRIES * sizeof(void *));
     uintptr_t page_start = table_start & ~(uintptr_t)(sysconf(_SC_PAGE_SIZE) - 1);
     uintptr_t page_end = (table_end + sysconf(_SC_PAGE_SIZE) - 1) & ~(uintptr_t)(sysconf(_SC_PAGE_SIZE) - 1);
     size_t prot_len = page_end - page_start;
-
-    /* Make the table writable. */
     if (mprotect((void *)page_start, prot_len, PROT_READ | PROT_WRITE) != 0) {
-        LOGE("patch_dispatch_table: mprotect RW failed errno=%d (%s)", errno, strerror(errno));
+        LOGE("patch: mprotect RW failed errno=%d", errno);
         return -1;
     }
 
-    int found_create_swapchain = 0, found_destroy_swapchain = 0;
-    int found_get_swapchain_images = 0, found_acquire_next_image = 0;
-    int found_queue_present = 0;
-    int patched_count = 0;
-
-    /* Scan the table for our target pointers. */
-    for (int i = 0; i < WINEVULKAN_DISPATCH_TABLE_MAX_ENTRIES; i++) {
+    /* Scan for thunk pointers and overwrite with our hooks. */
+    int patched = 0;
+    int idx_create = -1, idx_destroy = -1, idx_images = -1, idx_acquire = -1, idx_present = -1;
+    for (int i = 0; i < WINEVULKAN_DISPATCH_TABLE_MAX_ENTRIES && patched < 5; i++) {
         void *entry = dispatch_table[i];
-        if (entry == target_create_swapchain && !found_create_swapchain) {
-            dispatch_table[i] = (void *)layer_create_swapchain;
+        if (entry == thunk_create && idx_create < 0) {
+            idx_create = i;
             g_real_create_swapchain = entry;
-            found_create_swapchain = 1;
-            patched_count++;
-            LOGI("patch_dispatch_table: [%d] swapchain: %p -> %p",
-                 i, entry, (void *)layer_create_swapchain);
-        } else if (entry == target_destroy_swapchain && !found_destroy_swapchain) {
-            dispatch_table[i] = (void *)layer_destroy_swapchain;
+            dispatch_table[i] = (void *)layer_create_swapchain;
+            patched++;
+            LOGI("patch: [%d] create_swapchain: %p -> %p", i, entry, (void *)layer_create_swapchain);
+        } else if (entry == thunk_destroy && idx_destroy < 0) {
+            idx_destroy = i;
             g_real_destroy_swapchain = entry;
-            found_destroy_swapchain = 1;
-            patched_count++;
-            LOGI("patch_dispatch_table: [%d] destroy_swapchain: %p -> %p",
-                 i, entry, (void *)layer_destroy_swapchain);
-        } else if (entry == target_get_swapchain_images && !found_get_swapchain_images) {
-            dispatch_table[i] = (void *)layer_get_swapchain_images;
+            dispatch_table[i] = (void *)layer_destroy_swapchain;
+            patched++;
+            LOGI("patch: [%d] destroy_swapchain: %p -> %p", i, entry, (void *)layer_destroy_swapchain);
+        } else if (entry == thunk_images && idx_images < 0) {
+            idx_images = i;
             g_real_get_swapchain_images = entry;
-            found_get_swapchain_images = 1;
-            patched_count++;
-            LOGI("patch_dispatch_table: [%d] get_swapchain_images: %p -> %p",
-                 i, entry, (void *)layer_get_swapchain_images);
-        } else if (entry == target_acquire_next_image && !found_acquire_next_image) {
-            dispatch_table[i] = (void *)layer_acquire_next_image;
+            dispatch_table[i] = (void *)layer_get_swapchain_images;
+            patched++;
+            LOGI("patch: [%d] get_images: %p -> %p", i, entry, (void *)layer_get_swapchain_images);
+        } else if (entry == thunk_acquire && idx_acquire < 0) {
+            idx_acquire = i;
             g_real_acquire_next_image = entry;
-            found_acquire_next_image = 1;
-            patched_count++;
-            LOGI("patch_dispatch_table: [%d] acquire_next_image: %p -> %p",
-                 i, entry, (void *)layer_acquire_next_image);
-        } else if (entry == target_queue_present && !found_queue_present) {
-            dispatch_table[i] = (void *)layer_queue_present;
+            dispatch_table[i] = (void *)layer_acquire_next_image;
+            patched++;
+            LOGI("patch: [%d] acquire: %p -> %p", i, entry, (void *)layer_acquire_next_image);
+        } else if (entry == thunk_present && idx_present < 0) {
+            idx_present = i;
             g_real_queue_present = entry;
-            found_queue_present = 1;
-            patched_count++;
-            LOGI("patch_dispatch_table: [%d] queue_present: %p -> %p",
-                 i, entry, (void *)layer_queue_present);
-        }
-        if (patched_count == 5) break;
-    }
-
-    /* If we found destroy_swapchain but NOT create_swapchain, the create
-     * entry is at index (destroy_index - 1). winevulkan's dispatch table
-     * stores functions in alphabetical-ish order: CreateSwapchainKHR is
-     * right before DestroySwapchainKHR. Patch by index. */
-    if (!found_create_swapchain && found_destroy_swapchain) {
-        /* Re-scan to find the destroy_swapchain index. */
-        for (int i = 1; i < WINEVULKAN_DISPATCH_TABLE_MAX_ENTRIES; i++) {
-            if (dispatch_table[i] == (void *)layer_destroy_swapchain) {
-                /* The entry at i-1 should be the original create_swapchain. */
-                void *orig = dispatch_table[i - 1];
-                if (orig && orig != (void *)layer_create_swapchain) {
-                    dispatch_table[i - 1] = (void *)layer_create_swapchain;
-                    g_real_create_swapchain = orig;
-                    found_create_swapchain = 1;
-                    patched_count++;
-                    LOGI("patch_dispatch_table: [%d] swapchain (by index): %p -> %p",
-                         i - 1, orig, (void *)layer_create_swapchain);
-                }
-                break;
-            }
+            dispatch_table[i] = (void *)layer_queue_present;
+            patched++;
+            LOGI("patch: [%d] present: %p -> %p", i, entry, (void *)layer_queue_present);
         }
     }
 
-    /* Restore read-only protection (best effort — not fatal if it fails). */
-    if (mprotect((void *)page_start, prot_len, PROT_READ) != 0) {
-        LOGW("patch_dispatch_table: mprotect RO restore failed (non-fatal) errno=%d", errno);
-    }
+    /* Restore RO. */
+    mprotect((void *)page_start, prot_len, PROT_READ);
 
-    LOGI("patch_dispatch_table: patched %d/5 functions (swapchain=%d destroy=%d images=%d acquire=%d present=%d)",
-         patched_count, found_create_swapchain, found_destroy_swapchain,
-         found_get_swapchain_images, found_acquire_next_image, found_queue_present);
-
-    return patched_count > 0 ? 0 : -1;
+    LOGI("patch: patched %d/5 (create=%d destroy=%d images=%d acquire=%d present=%d)",
+         patched, idx_create, idx_destroy, idx_images, idx_acquire, idx_present);
+    return patched > 0 ? 0 : -1;
 }
+
+/* Watcher thread: polls until the dispatch table is populated, then patches. */
+static void *dispatch_watcher_thread(void *arg) {
+    VkDevice device = (VkDevice)arg;
+    LOGI("watcher: started, waiting for dispatch table to populate (device=%p)", (void *)device);
+
+    for (int attempt = 0; attempt < 100; attempt++) {
+        usleep(10000);  /* 10ms */
+        void **dispatch_table = *(void ***)((char *)device + 8);
+        if (!dispatch_table) continue;
+        int non_null = count_non_null_entries(dispatch_table, 256);
+        if (non_null >= 200) {
+            LOGI("watcher: table populated (%d/256 non-null) after %d attempts", non_null, attempt + 1);
+            int rc = patch_dispatch_table_now(device);
+            if (rc == 0) {
+                LOGI("watcher: dispatch table patched successfully — layer hooks active");
+            } else {
+                LOGE("watcher: patch_dispatch_table_now failed (rc=%d)", rc);
+            }
+            return NULL;
+        }
+    }
+    LOGE("watcher: timed out waiting for dispatch table to populate");
+    return NULL;
+}
+
+static int patch_dispatch_table(VkDevice device) {
+    /* Spawn a watcher thread that polls until the table is populated. */
+    int expected = 0;
+    if (atomic_compare_exchange_strong(&g_watcher_started, &expected, 1)) {
+        pthread_t tid;
+        if (pthread_create(&tid, NULL, dispatch_watcher_thread, (void *)device) == 0) {
+            pthread_detach(tid);
+            LOGI("patch_dispatch_table: watcher thread spawned");
+            return 0;
+        } else {
+            LOGE("patch_dispatch_table: pthread_create failed");
+            atomic_store(&g_watcher_started, 0);
+            return -1;
+        }
+    }
+    LOGW("patch_dispatch_table: watcher already started");
+    return 0;
+}
+
 
 static VkResult layer_create_device(VkPhysicalDevice physicalDevice,
                                     const VkDeviceCreateInfo *pCreateInfo,
@@ -1501,41 +1395,11 @@ static VkResult layer_create_device(VkPhysicalDevice physicalDevice,
     data->inst_data = inst_data;
     data->vtable.get_device_proc_addr = fp_gdpa;
 
-    /* Resolve device-level functions. NOTE: we must NOT call fp_gdpa here
-     * because winevulkan's vkCreateDevice is still in progress — calling
-     * fp_gdpa now can trigger assertions in winevulkan/loader.c.
-     *
-     * Instead, we read the swapchain function pointers DIRECTLY from the
-     * dispatch table (which winevulkan has already populated at this point),
-     * and patch the table immediately. Other functions are resolved lazily
-     * via fp_gdpa on first use (by which point vkCreateDevice has completed). */
-    data->vtable.get_device_proc_addr = fp_gdpa;
-
-    /* Read swapchain function pointers from the dispatch table directly.
-     * The table is at offset 8 from the device handle, and we know the
-     * indices from diagnostic logs:
-     *   [253] = vkCreateSwapchainKHR
-     *   [254] = vkDestroySwapchainKHR
-     *   [255] = vkGetSwapchainImagesKHR
-     *   [256] = vkAcquireNextImageKHR
-     *   [257] = vkQueuePresentKHR
-     * These are winevulkan's thunk functions — we save them for pass-through. */
-    void **dispatch_table = *(void ***)((char *)*pDevice + 8);
-    if (dispatch_table) {
-        data->vtable.real_create_swapchain = (PFN_vkCreateSwapchainKHR)dispatch_table[253];
-        data->vtable.real_destroy_swapchain = (PFN_vkDestroySwapchainKHR)dispatch_table[254];
-        data->vtable.real_get_swapchain_images = (PFN_vkGetSwapchainImagesKHR)dispatch_table[255];
-        data->vtable.real_acquire_next_image = (PFN_vkAcquireNextImageKHR)dispatch_table[256];
-        data->vtable.real_queue_present = (PFN_vkQueuePresentKHR)dispatch_table[257];
-        LOGI("layer_create_device: read swapchain ptrs from table: create=%p present=%p",
-             (void *)data->vtable.real_create_swapchain,
-             (void *)data->vtable.real_queue_present);
-    } else {
-        LOGE("layer_create_device: dispatch table is NULL — cannot read swapchain ptrs");
-    }
-
-    /* Get the graphics queue family from create info. The actual queue
-     * handle will be resolved lazily by ensure_device_vtable(). */
+    /* NOTE: The dispatch table at offset 8 is NOT yet populated when
+     * layer_create_device runs — winevulkan populates it AFTER vkCreateDevice
+     * returns to the caller. So we must NOT read swapchain ptrs here.
+     * Instead, we spawn a watcher thread that polls until the table is
+     * populated, then patches it. See patch_dispatch_table() above. */
     data->queue_family = 0;
     data->graphics_queue = VK_NULL_HANDLE;
     if (pCreateInfo->queueCreateInfoCount > 0) {
@@ -1550,15 +1414,15 @@ static VkResult layer_create_device(VkPhysicalDevice physicalDevice,
     /* Initialize AHB native handle resolver. */
     init_ahb_native_handle();
 
-    /* Patch the dispatch table NOW — the table is fully populated by
-     * winevulkan before our layer_create_device is called. We use direct
-     * table reads (not fp_gdpa) to find the targets, so no assertions. */
+    /* Spawn a watcher thread that waits for the dispatch table to be
+     * fully populated, then patches it with our hooks. This decouples
+     * patching from the vkCreateDevice call chain. */
     if (atomic_load(&g_enabled)) {
         int patch_rc = patch_dispatch_table(*pDevice);
         if (patch_rc == 0) {
-            LOGI("layer_create_device: dispatch table patched — layer hooks active");
+            LOGI("layer_create_device: watcher thread spawned — will patch when table is ready");
         } else {
-            LOGE("layer_create_device: dispatch table patching FAILED — layer will be bypassed!");
+            LOGE("layer_create_device: failed to spawn watcher thread");
         }
     } else {
         LOGI("layer_create_device: layer disabled — skipping dispatch table patch");
@@ -1571,7 +1435,7 @@ static VkResult layer_create_device(VkPhysicalDevice physicalDevice,
 
 /* Lazy vtable resolver — called on first use of any device function.
  * At this point winevulkan's vkCreateDevice has completed and fp_gdpa
- * is safe to call. Also triggers dispatch table patching once. */
+ * is safe to call. */
 static atomic_int g_dispatch_patched = 0;
 
 static void ensure_device_vtable(device_data *data) {
@@ -1654,6 +1518,17 @@ static void ensure_device_vtable(device_data *data) {
             fp_gdpa(data->device, "vkGetImageMemoryRequirements2");
         data->vtable.get_memory_fd = (PFN_vkGetMemoryFdKHR)
             fp_gdpa(data->device, "vkGetMemoryFdKHR");
+        /* Also resolve swapchain functions for pass-through fallback. */
+        data->vtable.real_create_swapchain = (PFN_vkCreateSwapchainKHR)
+            fp_gdpa(data->device, "vkCreateSwapchainKHR");
+        data->vtable.real_destroy_swapchain = (PFN_vkDestroySwapchainKHR)
+            fp_gdpa(data->device, "vkDestroySwapchainKHR");
+        data->vtable.real_get_swapchain_images = (PFN_vkGetSwapchainImagesKHR)
+            fp_gdpa(data->device, "vkGetSwapchainImagesKHR");
+        data->vtable.real_acquire_next_image = (PFN_vkAcquireNextImageKHR)
+            fp_gdpa(data->device, "vkAcquireNextImageKHR");
+        data->vtable.real_queue_present = (PFN_vkQueuePresentKHR)
+            fp_gdpa(data->device, "vkQueuePresentKHR");
     }
 
     /* Get the graphics queue. */
@@ -1665,19 +1540,8 @@ static void ensure_device_vtable(device_data *data) {
 
     LOGI("ensure_device_vtable: resolved for device=%p queue=%p",
          (void *)data->device, (void *)data->graphics_queue);
-
-    /* Now patch the dispatch table — winevulkan's vkCreateDevice is done. */
-    int expected = 0;
-    if (atomic_load(&g_enabled) &&
-        atomic_compare_exchange_strong(&g_dispatch_patched, &expected, 1)) {
-        int patch_rc = patch_dispatch_table(data->device);
-        if (patch_rc == 0) {
-            LOGI("ensure_device_vtable: dispatch table patched — layer hooks active");
-        } else {
-            LOGE("ensure_device_vtable: dispatch table patching FAILED — layer will be bypassed!");
-            atomic_store(&g_dispatch_patched, 0);  /* allow retry */
-        }
-    }
+    /* Note: dispatch table patching is handled by the watcher thread
+     * spawned in layer_create_device. No need to patch here. */
 }
 
 static void layer_destroy_device(VkDevice device,
