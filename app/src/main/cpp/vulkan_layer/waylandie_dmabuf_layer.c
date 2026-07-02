@@ -28,6 +28,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
@@ -370,6 +371,25 @@ static uint32_t vk_format_to_ahb(VkFormat format) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Forward declarations for layer swapchain/present hooks.            */
+/* Needed because patch_dispatch_table references them, and           */
+/* layer_create_swapchain references layer_destroy_swapchain.         */
+/* ------------------------------------------------------------------ */
+static VkResult layer_create_swapchain(VkDevice device,
+                                       const VkSwapchainCreateInfoKHR *pCreateInfo,
+                                       const VkAllocationCallbacks *pAllocator,
+                                       VkSwapchainKHR *pSwapchain);
+static void layer_destroy_swapchain(VkDevice device, VkSwapchainKHR swapchain,
+                                    const VkAllocationCallbacks *pAllocator);
+static VkResult layer_get_swapchain_images(VkDevice device, VkSwapchainKHR swapchain,
+                                           uint32_t *pSwapchainImageCount,
+                                           VkImage *pSwapchainImages);
+static VkResult layer_acquire_next_image(VkDevice device, VkSwapchainKHR swapchain,
+                                         uint64_t timeout, VkSemaphore semaphore,
+                                         VkFence fence, uint32_t *pImageIndex);
+static VkResult layer_queue_present(VkQueue queue, const VkPresentInfoKHR *pPresentInfo);
+
+/* ------------------------------------------------------------------ */
 /* Layer create/destroy swapchain (AHB-backed)                        */
 /* ------------------------------------------------------------------ */
 
@@ -570,10 +590,6 @@ static void destroy_ahb_backed_image(device_data *dev_data, swapchain_image *img
         img->ahb = NULL;
     }
 }
-
-/* Forward declaration — needed for oldSwapchain handling. */
-static void layer_destroy_swapchain(VkDevice device, VkSwapchainKHR swapchain,
-                                    const VkAllocationCallbacks *pAllocator);
 
 static VkResult layer_create_swapchain(VkDevice device,
                                        const VkSwapchainCreateInfoKHR *pCreateInfo,
@@ -1063,6 +1079,146 @@ static void layer_destroy_instance(VkInstance instance,
     if (fp_destroy) fp_destroy(instance, pAllocator);
 }
 
+/* ------------------------------------------------------------------ */
+/* winevulkan dispatch table patching                                 */
+/*                                                                    */
+/* winevulkan.so builds its OWN dispatch table by calling             */
+/* vkGetDeviceProcAddr once per function name at vkCreateDevice       */
+/* time. After that, all per-frame calls (vkQueuePresentKHR, etc.)    */
+/* go through that table — NOT through the Vulkan loader's layer      */
+/* chain. So our implicit layer hooks are bypassed for swapchain and  */
+/* present calls.                                                     */
+/*                                                                    */
+/* Fix: after the real vkCreateDevice returns, we walk the dispatch   */
+/* table at *(void***)*pDevice looking for the real driver's          */
+/* vkCreateSwapchainKHR / vkQueuePresentKHR / etc. pointers, and      */
+/* overwrite them in-place with our hooks. The table is in mmap'd     */
+/* memory, so we mprotect it RW first.                                */
+/*                                                                    */
+/* This is the same technique MangoHud, vkBasalt, and adrenotools     */
+/* use to inject into winevulkan's dispatch path.                     */
+/* ------------------------------------------------------------------ */
+
+/* winevulkan's dispatch table has ~1024+ entries (one per Vulkan      */
+/* function). We scan a generous range to find our targets.            */
+#define WINEVULKAN_DISPATCH_TABLE_MAX_ENTRIES 2048
+
+static void *g_real_create_swapchain = NULL;
+static void *g_real_destroy_swapchain = NULL;
+static void *g_real_get_swapchain_images = NULL;
+static void *g_real_acquire_next_image = NULL;
+static void *g_real_queue_present = NULL;
+
+static int patch_dispatch_table(VkDevice device) {
+    /* The dispatch table is at *(void***)device — the first field of the
+     * VkDevice handle is a pointer to the dispatch table (array of void*).
+     * Each entry is a function pointer to winevulkan's thunk for that
+     * Vulkan function. */
+    void ***p_disp_ptr = (void ***)device;
+    void **dispatch_table = *p_disp_ptr;
+    if (!dispatch_table) {
+        LOGE("patch_dispatch_table: dispatch table is NULL");
+        return -1;
+    }
+
+    /* We need to find our target function pointers by comparing against
+     * the ones we resolved via vkGetDeviceProcAddr. */
+    device_data *dev_data = find_device_data(device);
+    if (!dev_data) {
+        LOGE("patch_dispatch_table: no device_data for %p", (void *)device);
+        return -1;
+    }
+
+    /* Get the real driver's function pointers via GDPA. These are what
+     * winevulkan stored in its dispatch table during vkCreateDevice. */
+    void *target_create_swapchain = (void *)dev_data->vtable.real_create_swapchain;
+    void *target_destroy_swapchain = (void *)dev_data->vtable.real_destroy_swapchain;
+    void *target_get_swapchain_images = (void *)dev_data->vtable.real_get_swapchain_images;
+    void *target_acquire_next_image = (void *)dev_data->vtable.real_acquire_next_image;
+    void *target_queue_present = (void *)dev_data->vtable.real_queue_present;
+
+    LOGI("patch_dispatch_table: scanning for targets: swapchain=%p present=%p acquire=%p",
+         target_create_swapchain, target_queue_present, target_acquire_next_image);
+
+    /* If real_create_swapchain is NULL, we couldn't resolve it via GDPA.
+     * This happens if VK_KHR_swapchain isn't enabled — abort gracefully. */
+    if (!target_create_swapchain || !target_queue_present) {
+        LOGW("patch_dispatch_table: swapchain functions not available — skipping patch");
+        return -1;
+    }
+
+    /* Determine the page-aligned region of the dispatch table for mprotect. */
+    uintptr_t table_start = (uintptr_t)dispatch_table;
+    uintptr_t table_end = table_start + (WINEVULKAN_DISPATCH_TABLE_MAX_ENTRIES * sizeof(void *));
+    uintptr_t page_start = table_start & ~(uintptr_t)(sysconf(_SC_PAGE_SIZE) - 1);
+    uintptr_t page_end = (table_end + sysconf(_SC_PAGE_SIZE) - 1) & ~(uintptr_t)(sysconf(_SC_PAGE_SIZE) - 1);
+    size_t prot_len = page_end - page_start;
+
+    /* Make the table writable. */
+    if (mprotect((void *)page_start, prot_len, PROT_READ | PROT_WRITE) != 0) {
+        LOGE("patch_dispatch_table: mprotect RW failed errno=%d (%s)", errno, strerror(errno));
+        return -1;
+    }
+
+    int found_create_swapchain = 0, found_destroy_swapchain = 0;
+    int found_get_swapchain_images = 0, found_acquire_next_image = 0;
+    int found_queue_present = 0;
+    int patched_count = 0;
+
+    /* Scan the table for our target pointers. */
+    for (int i = 0; i < WINEVULKAN_DISPATCH_TABLE_MAX_ENTRIES; i++) {
+        void *entry = dispatch_table[i];
+        if (entry == target_create_swapchain && !found_create_swapchain) {
+            dispatch_table[i] = (void *)layer_create_swapchain;
+            g_real_create_swapchain = entry;
+            found_create_swapchain = 1;
+            patched_count++;
+            LOGI("patch_dispatch_table: [%d] swapchain: %p -> %p",
+                 i, entry, (void *)layer_create_swapchain);
+        } else if (entry == target_destroy_swapchain && !found_destroy_swapchain) {
+            dispatch_table[i] = (void *)layer_destroy_swapchain;
+            g_real_destroy_swapchain = entry;
+            found_destroy_swapchain = 1;
+            patched_count++;
+            LOGI("patch_dispatch_table: [%d] destroy_swapchain: %p -> %p",
+                 i, entry, (void *)layer_destroy_swapchain);
+        } else if (entry == target_get_swapchain_images && !found_get_swapchain_images) {
+            dispatch_table[i] = (void *)layer_get_swapchain_images;
+            g_real_get_swapchain_images = entry;
+            found_get_swapchain_images = 1;
+            patched_count++;
+            LOGI("patch_dispatch_table: [%d] get_swapchain_images: %p -> %p",
+                 i, entry, (void *)layer_get_swapchain_images);
+        } else if (entry == target_acquire_next_image && !found_acquire_next_image) {
+            dispatch_table[i] = (void *)layer_acquire_next_image;
+            g_real_acquire_next_image = entry;
+            found_acquire_next_image = 1;
+            patched_count++;
+            LOGI("patch_dispatch_table: [%d] acquire_next_image: %p -> %p",
+                 i, entry, (void *)layer_acquire_next_image);
+        } else if (entry == target_queue_present && !found_queue_present) {
+            dispatch_table[i] = (void *)layer_queue_present;
+            g_real_queue_present = entry;
+            found_queue_present = 1;
+            patched_count++;
+            LOGI("patch_dispatch_table: [%d] queue_present: %p -> %p",
+                 i, entry, (void *)layer_queue_present);
+        }
+        if (patched_count == 5) break;
+    }
+
+    /* Restore read-only protection (best effort — not fatal if it fails). */
+    if (mprotect((void *)page_start, prot_len, PROT_READ) != 0) {
+        LOGW("patch_dispatch_table: mprotect RO restore failed (non-fatal) errno=%d", errno);
+    }
+
+    LOGI("patch_dispatch_table: patched %d/5 functions (swapchain=%d destroy=%d images=%d acquire=%d present=%d)",
+         patched_count, found_create_swapchain, found_destroy_swapchain,
+         found_get_swapchain_images, found_acquire_next_image, found_queue_present);
+
+    return patched_count > 0 ? 0 : -1;
+}
+
 static VkResult layer_create_device(VkPhysicalDevice physicalDevice,
                                     const VkDeviceCreateInfo *pCreateInfo,
                                     const VkAllocationCallbacks *pAllocator,
@@ -1153,6 +1309,18 @@ static VkResult layer_create_device(VkPhysicalDevice physicalDevice,
     data->vtable.get_image_memory_requirements2 = (PFN_vkGetImageMemoryRequirements2)
         fp_gdpa(*pDevice, "vkGetImageMemoryRequirements2");
 
+    /* Resolve swapchain functions (real driver's, for dispatch table matching). */
+    data->vtable.real_create_swapchain = (PFN_vkCreateSwapchainKHR)
+        fp_gdpa(*pDevice, "vkCreateSwapchainKHR");
+    data->vtable.real_destroy_swapchain = (PFN_vkDestroySwapchainKHR)
+        fp_gdpa(*pDevice, "vkDestroySwapchainKHR");
+    data->vtable.real_get_swapchain_images = (PFN_vkGetSwapchainImagesKHR)
+        fp_gdpa(*pDevice, "vkGetSwapchainImagesKHR");
+    data->vtable.real_acquire_next_image = (PFN_vkAcquireNextImageKHR)
+        fp_gdpa(*pDevice, "vkAcquireNextImageKHR");
+    data->vtable.real_queue_present = (PFN_vkQueuePresentKHR)
+        fp_gdpa(*pDevice, "vkQueuePresentKHR");
+
     /* Get the graphics queue. Use the first queue family from create info. */
     data->queue_family = 0;
     data->graphics_queue = VK_NULL_HANDLE;
@@ -1171,6 +1339,20 @@ static VkResult layer_create_device(VkPhysicalDevice physicalDevice,
 
     /* Initialize AHB native handle resolver. */
     init_ahb_native_handle();
+
+    /* CRITICAL: Patch winevulkan's dispatch table to install our hooks.
+     * Without this, DXVK's swapchain/present calls go through winevulkan's
+     * internal dispatch table and bypass our layer entirely. */
+    if (atomic_load(&g_enabled)) {
+        int patch_rc = patch_dispatch_table(*pDevice);
+        if (patch_rc == 0) {
+            LOGI("layer_create_device: dispatch table patched — layer hooks active");
+        } else {
+            LOGE("layer_create_device: dispatch table patching FAILED — layer will be bypassed!");
+        }
+    } else {
+        LOGI("layer_create_device: layer disabled — skipping dispatch table patch");
+    }
 
     LOGI("layer_create_device: device=%p queue=%p family=%u",
          (void *)*pDevice, (void *)data->graphics_queue, data->queue_family);
