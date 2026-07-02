@@ -257,10 +257,10 @@ public final class WaylandDriverInstaller {
         // If exports are missing, the driver loads but can't be used.
         dumpPeExports(ctx, driverInSystem32, "winewayland.drv");
 
-        // Note: dmabuf forwarding is now built into winevulkan.so itself
-        // (via winevulkan_dmabuf.c compiled from source in CI). No separate
-        // layer installation needed — the thunks are part of winevulkan.so.
-        // Enabled at runtime via WAYLANDIE_DMABUF_FORWARD=1 env var.
+        // Install the WaylandIE dmabuf Vulkan layer.
+        // This layer intercepts vkCreateSwapchainKHR/vkQueuePresentKHR to create
+        // opaque-fd-backed images and forward their dmabuf fds to the WaylandIE bridge.
+        installDmabufLayer(ctx, prefix);
 
         return true;
     }

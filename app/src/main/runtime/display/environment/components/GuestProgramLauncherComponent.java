@@ -1221,7 +1221,7 @@ public class GuestProgramLauncherComponent extends EnvironmentComponent {
             fw.write("  WAYLAND_DISPLAY=" + envVars.get("WAYLAND_DISPLAY") + "\n");
             fw.write("  WINEDEBUG=" + envVars.get("WINEDEBUG") + "\n");
             fw.write("  WINEDLLOVERRIDES=" + envVars.get("WINEDLLOVERRIDES") + "\n");
-            fw.write("  WAYLANDIE_DMABUF_FORWARD=" + envVars.get("WAYLANDIE_DMABUF_FORWARD") + "\n");
+            fw.write("  WAYLANDIE_DMABUF_LAYER_ENABLE=" + envVars.get("WAYLANDIE_DMABUF_LAYER_ENABLE") + "\n");
             fw.close();
           } catch (Exception e) {
             Log.w("GuestProgramLauncherComponent", "Failed to write exit log file", e);

@@ -870,26 +870,10 @@ echo "=== Skipping winevulkan.dll collection (keeping Proton's original PE side)
 # 3. Actually calling vkCreateInstance with the requested extensions
 # Without android support on the Unix side, it rejects VK_KHR_xlib_surface
 # during vkCreateInstance, even though the PE side has the flag.
-echo "=== Collecting winevulkan.so ==="
-for f in \
-  "/tmp/proton-wine/dlls/winevulkan/winevulkan.so" \
-  "/tmp/proton-wine/dlls/winevulkan/winevulkan.dll.so"; do
-  if [ -f "$f" ] && [ "$(stat -c%s "$f")" -gt 1000 ]; then
-    echo "Found winevulkan.so: $f ($(stat -c%s "$f") bytes)"
-    cp "$f" "$PROTON_OUT/lib/wine/aarch64-unix/winevulkan.so"
-    break
-  fi
-done
-if [ -f "$PROTON_OUT/lib/wine/aarch64-unix/winevulkan.so" ]; then
-  echo "  ✓ winevulkan.so collected ($(stat -c%s "$PROTON_OUT/lib/wine/aarch64-unix/winevulkan.so") bytes)"
-  if strings "$PROTON_OUT/lib/wine/aarch64-unix/winevulkan.so" | grep -q "VK_KHR_xlib_surface"; then
-    echo "  ✓ VK_KHR_xlib_surface found in winevulkan.so"
-  else
-    echo "  ✗ VK_KHR_xlib_surface NOT found in winevulkan.so"
-  fi
-else
-  echo "  ✗ winevulkan.so NOT built — will use Proton's version (lacks android_surface)"
-fi
+# Do NOT collect winevulkan.so — we use Proton's original winevulkan.so.
+# Our Vulkan layer (libvk_layer_waylandie_dmabuf.so) patches the dispatch
+# table at runtime, so we don't need to replace winevulkan.so.
+echo "=== Skipping winevulkan.so collection (using Proton's original) ==="
 
 # Verify the new ntdll has the FEX-required exports
 echo "=== Verifying ntdll exports ==="
@@ -939,14 +923,9 @@ if [ "$SO_SIZE" -lt 1000 ]; then
   exit 1
 fi
 
-# winevulkan.dll is NOT collected (we keep Proton's original PE side).
-# Only winevulkan.so is required.
-if [ "$VULKAN_SO_SIZE" -lt 1000 ]; then
-  echo "FATAL: winevulkan.so not built — our dmabuf hooks are not compiled in!"
-  echo "  This means winevulkan_dmabuf.c failed to compile or link."
-  echo "  Check the make output above for compile errors."
-  exit 1
-fi
+# winevulkan.so is NOT collected (we use Proton's original).
+# No FATAL check needed — our Vulkan layer patches the dispatch table at runtime.
+echo "winevulkan.so: using Proton's original (not replaced)"
 
 cd "$OUTDIR"
 mkdir -p "$WORKSPACE/app/src/main/assets"

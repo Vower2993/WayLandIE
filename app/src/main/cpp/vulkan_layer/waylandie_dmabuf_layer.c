@@ -416,7 +416,7 @@ static VkResult create_opaque_fd_image(device_data *dev_data,
     ext_mem_info.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO;
     ext_mem_info.pNext = NULL;
     ext_mem_info.handleTypes =
-        VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT_KHR;
+        VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
 
     VkImageCreateInfo img_info;
     memset(&img_info, 0, sizeof(img_info));
@@ -528,7 +528,7 @@ static VkResult create_opaque_fd_image(device_data *dev_data,
     fd_info.sType = VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR;
     fd_info.pNext = NULL;
     fd_info.memory = out->memory;
-    fd_info.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT_KHR;
+    fd_info.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
     int fd = -1;
     res = dev_data->vtable.get_memory_fd(dev_data->device, &fd_info, &fd);
     if (res != VK_SUCCESS || fd < 0) {

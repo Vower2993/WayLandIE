@@ -6577,8 +6577,9 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
             // backed images and forward their dmabuf fds to the WaylandIE bridge.
             // The bridge receives the dmabuf and presents it via SurfaceControl.
             // This is the Level 2 zero-copy path — no CPU memcpy, no runtime patching.
-            envVars.put("WAYLANDIE_DMABUF_FORWARD", "1");
-            Log.i("XServerDisplayActivity", "WaylandIE dmabuf forwarding enabled");
+            envVars.put("WAYLANDIE_DMABUF_LAYER_ENABLE", "1");
+            envVars.put("WAYLANDIE_BRIDGE_SOCKET", "waylandie.display.bridge.v1");
+            Log.i("XServerDisplayActivity", "WaylandIE dmabuf layer enabled");
         }
         environment.addComponent(guestProgramLauncherComponent);
 
