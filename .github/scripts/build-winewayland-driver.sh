@@ -101,6 +101,23 @@ else
     echo "  WARNING: $WLD_SRC not found — building without dmabuf support"
 fi
 
+# === Apply WayLandIE dmabuf forwarding patch for winevulkan ===
+# Add swapchain/present functions to MANUAL_UNIX_THUNKS so our custom
+# thunks in winevulkan_dmabuf.c are used instead of auto-generated ones.
+echo "=== Patching make_vulkan for dmabuf thunks ==="
+sed -i '/"vkGetSwapchainTimeDomainPropertiesEXT",/a\    "vkCreateSwapchainKHR",\n    "vkDestroySwapchainKHR",\n    "vkGetSwapchainImagesKHR",\n    "vkAcquireNextImageKHR",\n    "vkQueuePresentKHR",' dlls/winevulkan/make_vulkan
+echo "  Added 5 swapchain functions to MANUAL_UNIX_THUNKS"
+grep -c "vkCreateSwapchainKHR" dlls/winevulkan/make_vulkan
+
+# === Copy winevulkan_dmabuf.c (our manual thunk implementations) ===
+cp "$WLD_SRC/winevulkan_dmabuf.c" dlls/winevulkan/
+# Add it to winevulkan's Makefile.in SOURCES list
+sed -i 's/^\tvulkan.c \\/\tvulkan.c \\\n\twinevulkan_dmabuf.c \\/' dlls/winevulkan/Makefile.in
+# Also need -landroid for __android_log_print and socket functions
+sed -i 's/^UNIX_LIBS = -lwin32u $(PTHREAD_LIBS)/UNIX_LIBS = -lwin32u $(PTHREAD_LIBS) -landroid -llog/' dlls/winevulkan/Makefile.in
+echo "  winevulkan_dmabuf.c added to Makefile.in"
+cat dlls/winevulkan/Makefile.in
+
 chmod +x autogen.sh
 ./autogen.sh 2>&1 | tail -5
 

@@ -6571,15 +6571,14 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
             envVars.put("WINEDLLOVERRIDES", wlOverrides);
             Log.d("XServerDisplayActivity", "Wayland WINEDLLOVERRIDES: " + wlOverrides);
 
-            // Enable the WaylandIE dmabuf zero-copy Vulkan layer.
-            // The layer (libvk_layer_waylandie_dmabuf.so) intercepts
-            // vkQueuePresentKHR to export dmabuf fds from AHardwareBuffer-backed
-            // swapchain images and forward them to the WaylandIE bridge socket.
+            // Enable the WaylandIE dmabuf forwarding in winevulkan.so.
+            // Our custom thunks (winevulkan_dmabuf.c, compiled into winevulkan.so)
+            // intercept vkCreateSwapchainKHR/vkQueuePresentKHR to create opaque-fd
+            // backed images and forward their dmabuf fds to the WaylandIE bridge.
             // The bridge receives the dmabuf and presents it via SurfaceControl.
-            // This is the Level 2 zero-copy path — no CPU memcpy.
-            envVars.put("WAYLANDIE_DMABUF_LAYER_ENABLE", "1");
-            envVars.put("WAYLANDIE_BRIDGE_SOCKET", "waylandie.display.bridge.v1");
-            Log.d("XServerDisplayActivity", "WaylandIE dmabuf layer enabled");
+            // This is the Level 2 zero-copy path — no CPU memcpy, no runtime patching.
+            envVars.put("WAYLANDIE_DMABUF_FORWARD", "1");
+            Log.d("XServerDisplayActivity", "WaylandIE dmabuf forwarding enabled");
         }
         environment.addComponent(guestProgramLauncherComponent);
 

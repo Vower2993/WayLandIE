@@ -255,11 +255,10 @@ public final class WaylandDriverInstaller {
         // If exports are missing, the driver loads but can't be used.
         dumpPeExports(ctx, driverInSystem32, "winewayland.drv");
 
-        // Install the WaylandIE dmabuf Vulkan layer (Level 2 zero-copy).
-        // This layer intercepts vkQueuePresentKHR to export dmabuf fds from
-        // AHardwareBuffer-backed swapchain images and forward them to the
-        // WaylandIE bridge socket for zero-copy display via SurfaceControl.
-        installDmabufLayer(ctx, prefix);
+        // Note: dmabuf forwarding is now built into winevulkan.so itself
+        // (via winevulkan_dmabuf.c compiled from source in CI). No separate
+        // layer installation needed — the thunks are part of winevulkan.so.
+        // Enabled at runtime via WAYLANDIE_DMABUF_FORWARD=1 env var.
 
         return true;
     }

@@ -1,0 +1,17 @@
+Add swapchain/present functions to MANUAL_UNIX_THUNKS so winevulkan uses
+our custom thunks from winevulkan_dmabuf.c instead of auto-generated ones.
+
+--- a/dlls/winevulkan/make_vulkan
++++ b/dlls/winevulkan/make_vulkan
+@@ -270,6 +270,12 @@ MANUAL_UNIX_THUNKS = {
+     "vkGetPhysicalDeviceExternalFenceProperties",
+     "vkGetPhysicalDeviceExternalFencePropertiesKHR",
+     "vkGetSwapchainTimeDomainPropertiesEXT",
++    "vkCreateSwapchainKHR",
++    "vkDestroySwapchainKHR",
++    "vkGetSwapchainImagesKHR",
++    "vkAcquireNextImageKHR",
++    "vkQueuePresentKHR",
+ }
+ 
+ # loader functions which are entirely manually implemented
