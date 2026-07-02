@@ -6605,6 +6605,7 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
 
         // Start Wayland bridge server only when display mode is "wayland"
         if ("wayland".equals(displayMode)) {
+            xServerView.setWaylandMode(true);
             waylandBridgeServer = new WaylandBridgeServer();
             waylandBridgeServer.start(xServerView, this);
         }

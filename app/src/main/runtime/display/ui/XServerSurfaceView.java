@@ -42,6 +42,7 @@ public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Cal
 
     private volatile int width;
     private volatile int height;
+    private volatile boolean waylandMode;
 
     public XServerSurfaceView(Context context, XServer xServer) {
         super(context);
@@ -49,6 +50,10 @@ public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Cal
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         renderer = new VulkanRenderer(this, xServer);
         getHolder().addCallback(this);
+    }
+
+    public void setWaylandMode(boolean wayland) {
+        this.waylandMode = wayland;
     }
 
     public VulkanRenderer getRenderer() {
@@ -121,7 +126,7 @@ public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Cal
         }
         renderer.attachSurface(holder.getSurface());
         // In Wayland mode, pass the ANativeWindow to winewayland.drv for
-        // vkCreateAndroidSurfaceKHR (Android doesn't support VK_KHR_wayland_surface)
+        // vkCreateXlibSurfaceKHR (adrenotools wrapper supports xlib_surface)
         try {
             com.winlator.cmod.runtime.display.environment.components.WaylandBridgeServer
                     .nativeSetAnativeWindow(holder.getSurface());
@@ -171,6 +176,14 @@ public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Cal
 
     private void startRenderThreadIfNeeded() {
         if (renderThread != null && renderThread.isAlive()) return;
+        // In Wayland mode, DXVK presents directly to the ANativeWindow via
+        // vkCreateXlibSurfaceKHR. The VulkanRenderer would create its own
+        // swapchain on the same Surface, causing a conflict. Skip the render
+        // thread — DXVK is the sole presenter.
+        if (waylandMode) {
+            android.util.Log.i("XServerSurfaceView", "Wayland mode — skipping VulkanRenderer render thread");
+            return;
+        }
         running = true;
         renderThread = new Thread(this::renderLoop, "VkRenderer");
         renderThread.start();
