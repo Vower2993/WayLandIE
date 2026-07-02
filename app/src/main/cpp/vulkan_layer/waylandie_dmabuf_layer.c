@@ -100,7 +100,7 @@ typedef struct {
     PFN_vkAllocateMemory     allocate_memory;
     PFN_vkFreeMemory         free_memory;
     PFN_vkBindImageMemory    bind_image_memory;
-    PFN_vkGetImageMemoryRequirements2 get_image_memory_requirements2;
+    PFN_vkGetImageMemoryRequirements2 get_image_memory_requirements2;  /* returns void */
     PFN_vkGetMemoryFdKHR     get_memory_fd;
     /* Swapchain functions (real driver). We don't create a real swapchain,
      * but we keep the pointers for completeness. */
@@ -456,17 +456,12 @@ static VkResult create_opaque_fd_image(device_data *dev_data,
     memset(&img_req_info, 0, sizeof(img_req_info));
     img_req_info.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_REQUIREMENTS_INFO_2;
     img_req_info.image = out->image;
-    /* Use vkGetImageMemoryRequirements2 if available, else fallback to v1. */
+    /* Use vkGetImageMemoryRequirements2 (returns void, not VkResult). */
     if (dev_data->vtable.get_image_memory_requirements2) {
-        res = dev_data->vtable.get_image_memory_requirements2(
+        dev_data->vtable.get_image_memory_requirements2(
             dev_data->device, &img_req_info, &mem_reqs2);
     } else {
-        /* Fallback — shouldn't happen since we resolve it in ensure_device_vtable. */
         LOGE("vkGetImageMemoryRequirements2 not available");
-        goto err_img;
-    }
-    if (res != VK_SUCCESS) {
-        LOGE("vkGetImageMemoryRequirements2 failed res=%d", res);
         goto err_img;
     }
     out->allocation_size = mem_reqs2.memoryRequirements.size;
