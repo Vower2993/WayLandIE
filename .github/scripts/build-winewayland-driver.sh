@@ -751,6 +751,13 @@ make -j$(nproc) -k \
   dlls/winevulkan/winevulkan.so \
   2>&1 | tail -300 || true
 
+# If winevulkan.so wasn't built, run verbose make to see the actual error
+if [ ! -f /tmp/proton-wine/dlls/winevulkan/winevulkan.so ] || \
+   [ "$(stat -c%s /tmp/proton-wine/dlls/winevulkan/winevulkan.so 2>/dev/null || echo 0)" -lt 1000 ]; then
+    echo "=== winevulkan.so build failed — running verbose make to see errors ==="
+    make -j1 dlls/winevulkan/winevulkan.so V=1 2>&1 | tail -100 || true
+fi
+
 echo "=== Searching for built artifacts ==="
 find /tmp/proton-wine -name "winewayland*" -type f -newer /tmp/proton-wine/configure 2>/dev/null | head -20
 find /tmp/proton-wine -name "*.drv" -type f -newer /tmp/proton-wine/configure 2>/dev/null | head -10
