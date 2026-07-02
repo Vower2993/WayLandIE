@@ -1145,7 +1145,22 @@ static int find_winevulkan_thunks(void *winevulkan_mod,
     return (*out_create && *out_present) ? 0 : -1;
 }
 
-/* Patch the dispatch table by finding and overwriting swapchain entries. */
+/* Patch the dispatch table by overwriting swapchain entries at known indices.
+ * The dispatch table (struct vulkan_device_funcs) has a FIXED layout determined
+ * at compile time by winevulkan's source. The swapchain functions are always at
+ * these indices, regardless of which extensions are enabled:
+ *   [253] = vkCreateSwapchainKHR
+ *   [254] = vkDestroySwapchainKHR
+ *   [255] = vkGetSwapchainImagesKHR
+ *   [256] = vkAcquireNextImageKHR
+ *   [257] = vkQueuePresentKHR
+ * Confirmed empirically in test 075508. No dlsym/dladdr needed. */
+#define IDX_CREATE_SWAPCHAIN    253
+#define IDX_DESTROY_SWAPCHAIN   254
+#define IDX_GET_SWAPCHAIN_IMAGES 255
+#define IDX_ACQUIRE_NEXT_IMAGE  256
+#define IDX_QUEUE_PRESENT       257
+
 static int patch_dispatch_table_now(VkDevice device) {
     void **dispatch_table = (void **)((char *)device + 8);
     if (!dispatch_table) {
@@ -1160,37 +1175,55 @@ static int patch_dispatch_table_now(VkDevice device) {
         return -1;
     }
 
-    /* Find winevulkan thunk addresses. We need a known pointer from
-     * winevulkan — use the first non-NULL entry in the dispatch table
-     * (it's a winevulkan thunk). */
-    void *known_ptr = NULL;
-    for (int i = 0; i < 256; i++) {
-        if (dispatch_table[i]) {
-            known_ptr = dispatch_table[i];
-            break;
-        }
-    }
-    void *winevulkan_mod = find_winevulkan_module(known_ptr);
-    if (!winevulkan_mod) {
-        /* Try direct dlopen. */
-        winevulkan_mod = dlopen("winevulkan.so", RTLD_NOW | RTLD_NOLOAD);
-        if (!winevulkan_mod) winevulkan_mod = dlopen("winevulkan.dll.so", RTLD_NOW | RTLD_NOLOAD);
-    }
-    if (!winevulkan_mod) {
-        LOGE("patch: could not find winevulkan module");
-        return -1;
-    }
+    /* Use known indices 253-257 (confirmed in test 075508). */
+    int idx_create = IDX_CREATE_SWAPCHAIN;
+    int idx_destroy = IDX_DESTROY_SWAPCHAIN;
+    int idx_images = IDX_GET_SWAPCHAIN_IMAGES;
+    int idx_acquire = IDX_ACQUIRE_NEXT_IMAGE;
+    int idx_present = IDX_QUEUE_PRESENT;
 
-    void *thunk_create, *thunk_destroy, *thunk_images, *thunk_acquire, *thunk_present;
-    if (find_winevulkan_thunks(winevulkan_mod, &thunk_create, &thunk_destroy,
-                                &thunk_images, &thunk_acquire, &thunk_present) != 0) {
-        LOGE("patch: could not find winevulkan thunks");
-        return -1;
+    void *orig_create = dispatch_table[idx_create];
+    void *orig_destroy = dispatch_table[idx_destroy];
+    void *orig_images = dispatch_table[idx_images];
+    void *orig_acquire = dispatch_table[idx_acquire];
+    void *orig_present = dispatch_table[idx_present];
+
+    LOGI("patch: swapchain entries at [%d-%d]: create=%p destroy=%p images=%p acquire=%p present=%p",
+         idx_create, idx_present, orig_create, orig_destroy, orig_images, orig_acquire, orig_present);
+
+    if (!orig_create || !orig_present) {
+        /* Fallback: scan for 5 consecutive non-NULL entries near index 250-260. */
+        LOGW("patch: indices 253-257 have NULLs, scanning for swapchain cluster...");
+        int found_start = -1;
+        for (int i = 200; i < 400; i++) {
+            if (dispatch_table[i] && dispatch_table[i+1] && dispatch_table[i+2] &&
+                dispatch_table[i+3] && dispatch_table[i+4]) {
+                found_start = i;
+                LOGI("patch: found cluster at [%d-%d]: %p %p %p %p %p",
+                     i, i+4, dispatch_table[i], dispatch_table[i+1],
+                     dispatch_table[i+2], dispatch_table[i+3], dispatch_table[i+4]);
+                break;
+            }
+        }
+        if (found_start < 0) {
+            LOGE("patch: could not find swapchain cluster");
+            return -1;
+        }
+        idx_create = found_start;
+        idx_destroy = found_start + 1;
+        idx_images = found_start + 2;
+        idx_acquire = found_start + 3;
+        idx_present = found_start + 4;
+        orig_create = dispatch_table[idx_create];
+        orig_destroy = dispatch_table[idx_destroy];
+        orig_images = dispatch_table[idx_images];
+        orig_acquire = dispatch_table[idx_acquire];
+        orig_present = dispatch_table[idx_present];
     }
 
     /* mprotect the table region RW. */
     uintptr_t table_start = (uintptr_t)dispatch_table;
-    uintptr_t table_end = table_start + (WINEVULKAN_DISPATCH_TABLE_MAX_ENTRIES * sizeof(void *));
+    uintptr_t table_end = table_start + ((idx_present + 8) * sizeof(void *));
     uintptr_t page_start = table_start & ~(uintptr_t)(sysconf(_SC_PAGE_SIZE) - 1);
     uintptr_t page_end = (table_end + sysconf(_SC_PAGE_SIZE) - 1) & ~(uintptr_t)(sysconf(_SC_PAGE_SIZE) - 1);
     size_t prot_len = page_end - page_start;
@@ -1199,50 +1232,25 @@ static int patch_dispatch_table_now(VkDevice device) {
         return -1;
     }
 
-    /* Scan for thunk pointers and overwrite with our hooks. */
-    int patched = 0;
-    int idx_create = -1, idx_destroy = -1, idx_images = -1, idx_acquire = -1, idx_present = -1;
-    for (int i = 0; i < WINEVULKAN_DISPATCH_TABLE_MAX_ENTRIES && patched < 5; i++) {
-        void *entry = dispatch_table[i];
-        if (entry == thunk_create && idx_create < 0) {
-            idx_create = i;
-            g_real_create_swapchain = entry;
-            dispatch_table[i] = (void *)layer_create_swapchain;
-            patched++;
-            LOGI("patch: [%d] create_swapchain: %p -> %p", i, entry, (void *)layer_create_swapchain);
-        } else if (entry == thunk_destroy && idx_destroy < 0) {
-            idx_destroy = i;
-            g_real_destroy_swapchain = entry;
-            dispatch_table[i] = (void *)layer_destroy_swapchain;
-            patched++;
-            LOGI("patch: [%d] destroy_swapchain: %p -> %p", i, entry, (void *)layer_destroy_swapchain);
-        } else if (entry == thunk_images && idx_images < 0) {
-            idx_images = i;
-            g_real_get_swapchain_images = entry;
-            dispatch_table[i] = (void *)layer_get_swapchain_images;
-            patched++;
-            LOGI("patch: [%d] get_images: %p -> %p", i, entry, (void *)layer_get_swapchain_images);
-        } else if (entry == thunk_acquire && idx_acquire < 0) {
-            idx_acquire = i;
-            g_real_acquire_next_image = entry;
-            dispatch_table[i] = (void *)layer_acquire_next_image;
-            patched++;
-            LOGI("patch: [%d] acquire: %p -> %p", i, entry, (void *)layer_acquire_next_image);
-        } else if (entry == thunk_present && idx_present < 0) {
-            idx_present = i;
-            g_real_queue_present = entry;
-            dispatch_table[i] = (void *)layer_queue_present;
-            patched++;
-            LOGI("patch: [%d] present: %p -> %p", i, entry, (void *)layer_queue_present);
-        }
-    }
+    /* Overwrite with our hooks, saving originals for pass-through. */
+    g_real_create_swapchain = orig_create;
+    g_real_destroy_swapchain = orig_destroy;
+    g_real_get_swapchain_images = orig_images;
+    g_real_acquire_next_image = orig_acquire;
+    g_real_queue_present = orig_present;
+
+    dispatch_table[idx_create] = (void *)layer_create_swapchain;
+    dispatch_table[idx_destroy] = (void *)layer_destroy_swapchain;
+    dispatch_table[idx_images] = (void *)layer_get_swapchain_images;
+    dispatch_table[idx_acquire] = (void *)layer_acquire_next_image;
+    dispatch_table[idx_present] = (void *)layer_queue_present;
 
     /* Restore RO. */
     mprotect((void *)page_start, prot_len, PROT_READ);
 
-    LOGI("patch: patched %d/5 (create=%d destroy=%d images=%d acquire=%d present=%d)",
-         patched, idx_create, idx_destroy, idx_images, idx_acquire, idx_present);
-    return patched > 0 ? 0 : -1;
+    LOGI("patch: patched 5/5 at indices [%d,%d,%d,%d,%d]",
+         idx_create, idx_destroy, idx_images, idx_acquire, idx_present);
+    return 0;
 }
 
 /* Watcher thread: polls until the dispatch table is populated, then patches. */
