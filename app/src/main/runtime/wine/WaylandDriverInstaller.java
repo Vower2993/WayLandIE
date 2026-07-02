@@ -99,6 +99,8 @@ public final class WaylandDriverInstaller {
             copyIfExists(prefix, "lib/wine/aarch64-windows/ntdll.dll", wineAarch64Windows);
             // Copy source-built winevulkan.so (Unix-side) — has VK_KHR_xlib_surface support
             copyIfExists(prefix, "lib/wine/aarch64-unix/winevulkan.so", wineAarch64Unix);
+            // Copy source-built winevulkan.dll (PE-side) — must match winevulkan.so version
+            copyIfExists(prefix, "lib/wine/aarch64-windows/winevulkan.dll", wineAarch64Windows);
             // arm64ec-windows dir may not exist in all Proton builds — only copy if dir exists
             File arm64ecDir = new File(winePath, "lib/wine/arm64ec-windows");
             if (arm64ecDir.isDirectory()) {
@@ -391,6 +393,7 @@ public final class WaylandDriverInstaller {
     }
 
     private static void copyToSystem32(File prefix) {
+        Log.i(TAG, "copyToSystem32 v2.0 — with winevulkan.dll copy");
         File system32 = new File(prefix, "drive_c/windows/system32");
         if (!system32.isDirectory()) {
             Log.w(TAG, "system32 not found at " + system32 + " — skipping copy");
@@ -399,7 +402,16 @@ public final class WaylandDriverInstaller {
         copyIfExists(prefix, "lib/wine/aarch64-windows/winewayland.drv", system32);
         copyIfExists(prefix, "lib/wine/aarch64-windows/libarm64ecfex.dll", system32);
         copyIfExists(prefix, "lib/wine/aarch64-windows/ntdll.dll", system32);
+        Log.i(TAG, "  attempting winevulkan.dll copy to system32");
         copyIfExists(prefix, "lib/wine/aarch64-windows/winevulkan.dll", system32);
+        // Also try copying from the Wine install dir if not in prefix
+        File vulkInPrefix = new File(prefix, "lib/wine/aarch64-windows/winevulkan.dll");
+        File vulkInSystem32 = new File(system32, "winevulkan.dll");
+        if (!vulkInSystem32.exists() || vulkInSystem32.length() != vulkInPrefix.length()) {
+            Log.i(TAG, "  force-copy winevulkan.dll to system32");
+            Log.i(TAG, "  attempting winevulkan.dll copy to system32");
+        copyIfExists(prefix, "lib/wine/aarch64-windows/winevulkan.dll", system32);
+        }
     }
 
     /**
@@ -627,7 +639,10 @@ public final class WaylandDriverInstaller {
 
     private static void copyIfExists(File srcDir, String srcPath, File dstDir) {
         File src = new File(srcDir, srcPath);
-        if (!src.exists()) return;
+        if (!src.exists()) {
+            Log.w(TAG, "  copyIfExists: source not found: " + srcPath + " in " + srcDir);
+            return;
+        }
         File dst = new File(dstDir, src.getName());
         try {
             InputStream is = new FileInputStream(src);
