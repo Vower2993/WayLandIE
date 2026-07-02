@@ -392,6 +392,9 @@ static VkResult layer_acquire_next_image(VkDevice device, VkSwapchainKHR swapcha
                                          VkFence fence, uint32_t *pImageIndex);
 static VkResult layer_queue_present(VkQueue queue, const VkPresentInfoKHR *pPresentInfo);
 
+/* Forward declaration — lazy vtable resolver + dispatch table patcher. */
+static void ensure_device_vtable(device_data *data);
+
 /* ------------------------------------------------------------------ */
 /* Layer create/destroy swapchain (AHB-backed)                        */
 /* ------------------------------------------------------------------ */
@@ -599,6 +602,7 @@ static VkResult layer_create_swapchain(VkDevice device,
                                        const VkAllocationCallbacks *pAllocator,
                                        VkSwapchainKHR *pSwapchain) {
     device_data *dev_data = find_device_data(device);
+    if (dev_data) ensure_device_vtable(dev_data);
     if (!dev_data || !atomic_load(&g_enabled)) {
         /* Layer disabled or device not tracked — pass through to real driver. */
         if (dev_data && dev_data->vtable.real_create_swapchain) {
@@ -1445,71 +1449,24 @@ static VkResult layer_create_device(VkPhysicalDevice physicalDevice,
     data->inst_data = inst_data;
     data->vtable.get_device_proc_addr = fp_gdpa;
 
-    /* Resolve device-level functions. */
-    data->vtable.destroy_device = (PFN_vkDestroyDevice)
-        fp_gdpa(*pDevice, "vkDestroyDevice");
-    data->vtable.get_device_queue = (PFN_vkGetDeviceQueue)
-        fp_gdpa(*pDevice, "vkGetDeviceQueue");
-    data->vtable.create_command_pool = (PFN_vkCreateCommandPool)
-        fp_gdpa(*pDevice, "vkCreateCommandPool");
-    data->vtable.destroy_command_pool = (PFN_vkDestroyCommandPool)
-        fp_gdpa(*pDevice, "vkDestroyCommandPool");
-    data->vtable.allocate_command_buffers = (PFN_vkAllocateCommandBuffers)
-        fp_gdpa(*pDevice, "vkAllocateCommandBuffers");
-    data->vtable.free_command_buffers = (PFN_vkFreeCommandBuffers)
-        fp_gdpa(*pDevice, "vkFreeCommandBuffers");
-    data->vtable.begin_command_buffer = (PFN_vkBeginCommandBuffer)
-        fp_gdpa(*pDevice, "vkBeginCommandBuffer");
-    data->vtable.end_command_buffer = (PFN_vkEndCommandBuffer)
-        fp_gdpa(*pDevice, "vkEndCommandBuffer");
-    data->vtable.queue_submit = (PFN_vkQueueSubmit)
-        fp_gdpa(*pDevice, "vkQueueSubmit");
-    data->vtable.queue_wait_idle = (PFN_vkQueueWaitIdle)
-        fp_gdpa(*pDevice, "vkQueueWaitIdle");
-    data->vtable.create_fence = (PFN_vkCreateFence)
-        fp_gdpa(*pDevice, "vkCreateFence");
-    data->vtable.destroy_fence = (PFN_vkDestroyFence)
-        fp_gdpa(*pDevice, "vkDestroyFence");
-    data->vtable.wait_for_fences = (PFN_vkWaitForFences)
-        fp_gdpa(*pDevice, "vkWaitForFences");
-    data->vtable.reset_fences = (PFN_vkResetFences)
-        fp_gdpa(*pDevice, "vkResetFences");
-    data->vtable.create_image = (PFN_vkCreateImage)
-        fp_gdpa(*pDevice, "vkCreateImage");
-    data->vtable.destroy_image = (PFN_vkDestroyImage)
-        fp_gdpa(*pDevice, "vkDestroyImage");
-    data->vtable.allocate_memory = (PFN_vkAllocateMemory)
-        fp_gdpa(*pDevice, "vkAllocateMemory");
-    data->vtable.free_memory = (PFN_vkFreeMemory)
-        fp_gdpa(*pDevice, "vkFreeMemory");
-    data->vtable.bind_image_memory = (PFN_vkBindImageMemory)
-        fp_gdpa(*pDevice, "vkBindImageMemory");
-    data->vtable.get_ahb_properties = (PFN_vkGetAndroidHardwareBufferPropertiesANDROID)
-        fp_gdpa(*pDevice, "vkGetAndroidHardwareBufferPropertiesANDROID");
-    data->vtable.get_image_memory_requirements2 = (PFN_vkGetImageMemoryRequirements2)
-        fp_gdpa(*pDevice, "vkGetImageMemoryRequirements2");
-
-    /* Resolve swapchain functions (real driver's, for dispatch table matching). */
-    data->vtable.real_create_swapchain = (PFN_vkCreateSwapchainKHR)
-        fp_gdpa(*pDevice, "vkCreateSwapchainKHR");
-    data->vtable.real_destroy_swapchain = (PFN_vkDestroySwapchainKHR)
-        fp_gdpa(*pDevice, "vkDestroySwapchainKHR");
-    data->vtable.real_get_swapchain_images = (PFN_vkGetSwapchainImagesKHR)
-        fp_gdpa(*pDevice, "vkGetSwapchainImagesKHR");
-    data->vtable.real_acquire_next_image = (PFN_vkAcquireNextImageKHR)
-        fp_gdpa(*pDevice, "vkAcquireNextImageKHR");
-    data->vtable.real_queue_present = (PFN_vkQueuePresentKHR)
-        fp_gdpa(*pDevice, "vkQueuePresentKHR");
+    /* Resolve device-level functions. NOTE: we must NOT call fp_gdpa here
+     * because winevulkan's vkCreateDevice is still in progress — the device
+     * dispatch table isn't fully initialized yet. Calling fp_gdpa now can
+     * trigger assertions in winevulkan/loader.c (line 764: !status).
+     *
+     * Instead, we store fp_gdpa and resolve functions lazily on first use.
+     * The dispatch table patching is also deferred — it happens on the first
+     * call to layer_get_device_proc_addr (which DXVK calls AFTER
+     * vkCreateDevice completes). */
+    data->vtable.get_device_proc_addr = fp_gdpa;
+    /* All other vtable entries are NULL — resolved lazily by
+     * ensure_device_vtable() on first use. */
 
     /* Get the graphics queue. Use the first queue family from create info. */
     data->queue_family = 0;
     data->graphics_queue = VK_NULL_HANDLE;
     if (pCreateInfo->queueCreateInfoCount > 0) {
         data->queue_family = pCreateInfo->pQueueCreateInfos[0].queueFamilyIndex;
-        if (pCreateInfo->pQueueCreateInfos[0].queueCount > 0) {
-            data->vtable.get_device_queue(*pDevice, data->queue_family, 0,
-                                          &data->graphics_queue);
-        }
     }
 
     pthread_mutex_lock(&g_device_lock);
@@ -1520,23 +1477,95 @@ static VkResult layer_create_device(VkPhysicalDevice physicalDevice,
     /* Initialize AHB native handle resolver. */
     init_ahb_native_handle();
 
-    /* CRITICAL: Patch winevulkan's dispatch table to install our hooks.
-     * Without this, DXVK's swapchain/present calls go through winevulkan's
-     * internal dispatch table and bypass our layer entirely. */
-    if (atomic_load(&g_enabled)) {
-        int patch_rc = patch_dispatch_table(*pDevice);
-        if (patch_rc == 0) {
-            LOGI("layer_create_device: dispatch table patched — layer hooks active");
-        } else {
-            LOGE("layer_create_device: dispatch table patching FAILED — layer will be bypassed!");
-        }
-    } else {
-        LOGI("layer_create_device: layer disabled — skipping dispatch table patch");
+    LOGI("layer_create_device: device=%p family=%u (vtable + patching deferred)",
+         (void *)*pDevice, data->queue_family);
+    return VK_SUCCESS;
+}
+
+/* Lazy vtable resolver — called on first use of any device function.
+ * At this point winevulkan's vkCreateDevice has completed and fp_gdpa
+ * is safe to call. Also triggers dispatch table patching once. */
+static atomic_int g_dispatch_patched = 0;
+
+static void ensure_device_vtable(device_data *data) {
+    if (data->vtable.destroy_device) return;  /* already resolved */
+    PFN_vkGetDeviceProcAddr fp_gdpa = data->vtable.get_device_proc_addr;
+    if (!fp_gdpa || !data->device) return;
+
+    data->vtable.destroy_device = (PFN_vkDestroyDevice)
+        fp_gdpa(data->device, "vkDestroyDevice");
+    data->vtable.get_device_queue = (PFN_vkGetDeviceQueue)
+        fp_gdpa(data->device, "vkGetDeviceQueue");
+    data->vtable.create_command_pool = (PFN_vkCreateCommandPool)
+        fp_gdpa(data->device, "vkCreateCommandPool");
+    data->vtable.destroy_command_pool = (PFN_vkDestroyCommandPool)
+        fp_gdpa(data->device, "vkDestroyCommandPool");
+    data->vtable.allocate_command_buffers = (PFN_vkAllocateCommandBuffers)
+        fp_gdpa(data->device, "vkAllocateCommandBuffers");
+    data->vtable.free_command_buffers = (PFN_vkFreeCommandBuffers)
+        fp_gdpa(data->device, "vkFreeCommandBuffers");
+    data->vtable.begin_command_buffer = (PFN_vkBeginCommandBuffer)
+        fp_gdpa(data->device, "vkBeginCommandBuffer");
+    data->vtable.end_command_buffer = (PFN_vkEndCommandBuffer)
+        fp_gdpa(data->device, "vkEndCommandBuffer");
+    data->vtable.queue_submit = (PFN_vkQueueSubmit)
+        fp_gdpa(data->device, "vkQueueSubmit");
+    data->vtable.queue_wait_idle = (PFN_vkQueueWaitIdle)
+        fp_gdpa(data->device, "vkQueueWaitIdle");
+    data->vtable.create_fence = (PFN_vkCreateFence)
+        fp_gdpa(data->device, "vkCreateFence");
+    data->vtable.destroy_fence = (PFN_vkDestroyFence)
+        fp_gdpa(data->device, "vkDestroyFence");
+    data->vtable.wait_for_fences = (PFN_vkWaitForFences)
+        fp_gdpa(data->device, "vkWaitForFences");
+    data->vtable.reset_fences = (PFN_vkResetFences)
+        fp_gdpa(data->device, "vkResetFences");
+    data->vtable.create_image = (PFN_vkCreateImage)
+        fp_gdpa(data->device, "vkCreateImage");
+    data->vtable.destroy_image = (PFN_vkDestroyImage)
+        fp_gdpa(data->device, "vkDestroyImage");
+    data->vtable.allocate_memory = (PFN_vkAllocateMemory)
+        fp_gdpa(data->device, "vkAllocateMemory");
+    data->vtable.free_memory = (PFN_vkFreeMemory)
+        fp_gdpa(data->device, "vkFreeMemory");
+    data->vtable.bind_image_memory = (PFN_vkBindImageMemory)
+        fp_gdpa(data->device, "vkBindImageMemory");
+    data->vtable.get_ahb_properties = NULL;  /* resolve on demand only */
+    data->vtable.get_image_memory_requirements2 = (PFN_vkGetImageMemoryRequirements2)
+        fp_gdpa(data->device, "vkGetImageMemoryRequirements2");
+
+    data->vtable.real_create_swapchain = (PFN_vkCreateSwapchainKHR)
+        fp_gdpa(data->device, "vkCreateSwapchainKHR");
+    data->vtable.real_destroy_swapchain = (PFN_vkDestroySwapchainKHR)
+        fp_gdpa(data->device, "vkDestroySwapchainKHR");
+    data->vtable.real_get_swapchain_images = (PFN_vkGetSwapchainImagesKHR)
+        fp_gdpa(data->device, "vkGetSwapchainImagesKHR");
+    data->vtable.real_acquire_next_image = (PFN_vkAcquireNextImageKHR)
+        fp_gdpa(data->device, "vkAcquireNextImageKHR");
+    data->vtable.real_queue_present = (PFN_vkQueuePresentKHR)
+        fp_gdpa(data->device, "vkQueuePresentKHR");
+
+    /* Get the graphics queue now that get_device_queue is resolved. */
+    if (data->graphics_queue == VK_NULL_HANDLE && data->queue_family >= 0) {
+        data->vtable.get_device_queue(data->device, data->queue_family, 0,
+                                      &data->graphics_queue);
     }
 
-    LOGI("layer_create_device: device=%p queue=%p family=%u",
-         (void *)*pDevice, (void *)data->graphics_queue, data->queue_family);
-    return VK_SUCCESS;
+    LOGI("ensure_device_vtable: resolved for device=%p queue=%p",
+         (void *)data->device, (void *)data->graphics_queue);
+
+    /* Now patch the dispatch table — winevulkan's vkCreateDevice is done. */
+    int expected = 0;
+    if (atomic_load(&g_enabled) &&
+        atomic_compare_exchange_strong(&g_dispatch_patched, &expected, 1)) {
+        int patch_rc = patch_dispatch_table(data->device);
+        if (patch_rc == 0) {
+            LOGI("ensure_device_vtable: dispatch table patched — layer hooks active");
+        } else {
+            LOGE("ensure_device_vtable: dispatch table patching FAILED — layer will be bypassed!");
+            atomic_store(&g_dispatch_patched, 0);  /* allow retry */
+        }
+    }
 }
 
 static void layer_destroy_device(VkDevice device,
@@ -1604,6 +1633,14 @@ layer_get_instance_proc_addr(VkInstance instance, const char *pName) {
 static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
 layer_get_device_proc_addr(VkDevice device, const char *pName) {
     if (!pName) return NULL;
+
+    /* Trigger lazy vtable resolution + dispatch table patching on first call.
+     * DXVK calls vkGetDeviceProcAddr after vkCreateDevice completes, so
+     * winevulkan's device is fully initialized at this point. */
+    if (device) {
+        device_data *data = find_device_data(device);
+        if (data) ensure_device_vtable(data);
+    }
 
     /* Device-level functions the layer implements. */
     if (strcmp(pName, "vkGetDeviceProcAddr") == 0)
