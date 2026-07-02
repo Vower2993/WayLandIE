@@ -6608,6 +6608,19 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
             xServerView.setWaylandMode(true);
             waylandBridgeServer = new WaylandBridgeServer();
             waylandBridgeServer.start(xServerView, this);
+            // Pass the ANativeWindow to winevulkan NOW — surfaceCreated fired
+            // before setupUI, so WaylandBridgeServer wasn't loaded yet and
+            // nativeSetAnativeWindow was silently skipped. Call it here after
+            // the bridge server (and its native library) is loaded.
+            if (xServerView.getHolder().getSurface() != null &&
+                    xServerView.getHolder().getSurface().isValid()) {
+                try {
+                    waylandBridgeServer.nativeSetAnativeWindow(xServerView.getHolder().getSurface());
+                    Log.i("XServerDisplayActivity", "Set ANativeWindow for Vulkan surface (from setupUI)");
+                } catch (UnsatisfiedLinkError e) {
+                    Log.e("XServerDisplayActivity", "Failed to set ANativeWindow", e);
+                }
+            }
         }
         final VulkanRenderer renderer = xServerView.getRenderer();
         // Match guest libvulkan so imported AHB tiling matches the producer.
