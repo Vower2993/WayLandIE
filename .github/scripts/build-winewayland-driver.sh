@@ -931,7 +931,15 @@ if [ "$SO_SIZE" -lt 1000 ]; then
 fi
 
 if [ "$VULKAN_SIZE" -lt 1000 ]; then
-  echo "WARNING: winevulkan.dll not built — will use Proton's version (lacks android_surface)"
+  echo "FATAL: winevulkan.dll not built — cannot continue without it"
+  exit 1
+fi
+
+if [ "$VULKAN_SO_SIZE" -lt 1000 ]; then
+  echo "FATAL: winevulkan.so not built — our dmabuf hooks are not compiled in!"
+  echo "  This means winevulkan_dmabuf.c failed to compile or link."
+  echo "  Check the make output above for compile errors."
+  exit 1
 fi
 
 cd "$OUTDIR"
