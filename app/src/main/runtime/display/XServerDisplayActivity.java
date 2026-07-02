@@ -6569,7 +6569,7 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
             }
             // Do NOT add winex11.drv= — let it load as fallback
             envVars.put("WINEDLLOVERRIDES", wlOverrides);
-            Log.d("XServerDisplayActivity", "Wayland WINEDLLOVERRIDES: " + wlOverrides);
+            Log.i("XServerDisplayActivity", "Wayland WINEDLLOVERRIDES: " + wlOverrides);
 
             // Enable the WaylandIE dmabuf forwarding in winevulkan.so.
             // Our custom thunks (winevulkan_dmabuf.c, compiled into winevulkan.so)
@@ -6578,7 +6578,7 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
             // The bridge receives the dmabuf and presents it via SurfaceControl.
             // This is the Level 2 zero-copy path — no CPU memcpy, no runtime patching.
             envVars.put("WAYLANDIE_DMABUF_FORWARD", "1");
-            Log.d("XServerDisplayActivity", "WaylandIE dmabuf forwarding enabled");
+            Log.i("XServerDisplayActivity", "WaylandIE dmabuf forwarding enabled");
         }
         environment.addComponent(guestProgramLauncherComponent);
 
