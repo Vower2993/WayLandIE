@@ -146,22 +146,9 @@ public final class WaylandDriverInstaller {
             patchSurfaceExtension(new File(wineAarch64Unix, "winewayland.so"));
             patchSurfaceExtension(new File(prefix, "lib/wine/aarch64-unix/winewayland.so"));
 
-            // CRITICAL: Patch DXVK DLLs — DXVK has VK_KHR_win32_surface hardcoded
-            // in its own binaries (dxgi.dll, d3d11.dll, d3d9.dll, d3d8.dll).
-            // These are NOT affected by the winevulkan.dll patch because DXVK
-            // requests the extension by its own hardcoded name, not by reading
-            // it from winevulkan.dll's data section.
-            // Must patch BOTH system32 (64-bit) and syswow64 (32-bit) copies.
-            File dxvkSystem32 = new File(prefix, "drive_c/windows/system32");
-            File dxvkSyswow64 = new File(prefix, "drive_c/windows/syswow64");
-            String[] dxvkDlls = {"dxgi.dll", "d3d11.dll", "d3d9.dll", "d3d8.dll",
-                                 "d3d10.dll", "d3d10core.dll", "wined3d.dll"};
-            for (String dll : dxvkDlls) {
-                patchSurfaceExtension(new File(dxvkSystem32, dll));
-                if (dxvkSyswow64.isDirectory()) {
-                    patchSurfaceExtension(new File(dxvkSyswow64, dll));
-                }
-            }
+            // Do NOT patch DXVK DLLs — DXVK should request VK_KHR_win32_surface
+            // (its natural behavior). Wine's wayland_map_instance_extensions
+            // maps win32_surface → xlib_surface internally at the flag level.
         } else {
             Log.w(TAG, "ensureDriverInstalled: winePath is null or not a directory — "
                     + "cannot copy .so companion, driver will fail to load");
@@ -380,9 +367,14 @@ public final class WaylandDriverInstaller {
             //   "VK_KHR_wayland_surface"  = 22 bytes → "VK_KHR_xlib_surface\0\0\0" = 19+3 null = 22
             //   "VK_KHR_win32_surface"    = 20 bytes → "VK_KHR_xlib_surface\0" = 19+1 null = 20
             // Both are same-length replacements with null padding — no overflow.
+            // Only patch wayland_surface → xlib_surface.
+            // Do NOT patch win32_surface — it must stay as VK_KHR_win32_surface
+            // because Wine only exposes VK_KHR_win32_surface as a CLIENT extension.
+            // DXVK requests VK_KHR_win32_surface (its natural behavior), Wine accepts it,
+            // then wayland_map_instance_extensions maps win32_surface → xlib_surface
+            // internally at the flag level for the HOST driver.
             String[][] patches = {
                 {"VK_KHR_wayland_surface", "VK_KHR_xlib_surface"},
-                {"VK_KHR_win32_surface",   "VK_KHR_xlib_surface"},
             };
 
             // First, probe for all relevant substrings
