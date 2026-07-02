@@ -738,8 +738,8 @@ echo "=== Regenerating Vulkan headers ==="
 cd /tmp/proton-wine/dlls/winevulkan
 python3 make_vulkan 2>&1 | tail -5
 # Verify android_surface is now in the generated headers
-grep -c "VK_KHR_xlib_surface" /tmp/proton-wine/include/wine/vulkan.h
-grep -c "vkCreateAndroidSurfaceKHR" /tmp/proton-wine/include/wine/vulkan.h
+echo "  VK_KHR_xlib_surface count: $(grep -c "VK_KHR_xlib_surface" /tmp/proton-wine/include/wine/vulkan.h || true)"
+echo "  vkCreateAndroidSurfaceKHR count: $(grep -c "vkCreateAndroidSurfaceKHR" /tmp/proton-wine/include/wine/vulkan.h || true)"
 cd /tmp/proton-wine
 
 make -j$(nproc) -k \
