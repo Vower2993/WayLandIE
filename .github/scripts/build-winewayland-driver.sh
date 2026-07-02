@@ -830,28 +830,21 @@ else
   echo "WARNING: ntdll.dll not built — FEX will still crash. Check make output above."
 fi
 
-# === Collect winevulkan.dll (aarch64 + arm64ec) ===
-# Built from source with VK_KHR_xlib_surface support (added via make_vulkan patch).
-# This replaces the Proton package's winevulkan.dll which lacks the android_surface
-# extension bitfield flag. Without this, DXVK's vkCreateInstance fails even though
-# the extension name string is patched in the binary.
-echo "=== Collecting winevulkan.dll ==="
-for f in \
-  "/tmp/proton-wine/dlls/winevulkan/aarch64-windows/winevulkan.dll"; do
-  if [ -f "$f" ] && [ "$(stat -c%s "$f")" -gt 1000 ]; then
-    echo "Found winevulkan: $f ($(stat -c%s "$f") bytes)"
-    cp "$f" "$PROTON_OUT/lib/wine/aarch64-windows/winevulkan.dll"
-    break
-  fi
-done
-# Verify android_surface is in the built DLL
-if [ -f "$PROTON_OUT/lib/wine/aarch64-windows/winevulkan.dll" ]; then
-  if strings "$PROTON_OUT/lib/wine/aarch64-windows/winevulkan.dll" | grep -q "VK_KHR_xlib_surface"; then
-    echo "  ✓ VK_KHR_xlib_surface found in winevulkan.dll"
-  else
-    echo "  ✗ VK_KHR_xlib_surface NOT found in winevulkan.dll!"
-  fi
-fi
+# === Do NOT collect winevulkan.dll ===
+# We do NOT replace winevulkan.dll. The Proton package's original PE-side
+# winevulkan.dll must be preserved because it was built from the SAME commit
+# as the Proton wine64 binary. Replacing it with our source-built version
+# causes an enum/dispatch table mismatch (unix_call enum indices differ
+# between commits), resulting in NULL pointer crashes.
+#
+# The PE side (winevulkan.dll) is patched at install time by
+# WaylandDriverInstaller.patchSurfaceExtension() which replaces
+# VK_KHR_wayland_surface → VK_KHR_xlib_surface string in the binary.
+#
+# We only replace winevulkan.so (Unix side) which has our dmabuf hooks.
+# The Unix side must be ABI-compatible with the PE side. Since both are
+# from proton_11.0, the enum should match.
+echo "=== Skipping winevulkan.dll collection (keeping Proton's original PE side) ==="
 
 # === Collect winevulkan.so (Unix-side) ===
 # CRITICAL: The Unix-side winevulkan.so must also be built from source with
