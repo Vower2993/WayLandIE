@@ -100,8 +100,8 @@ typedef struct {
     PFN_vkAllocateMemory     allocate_memory;
     PFN_vkFreeMemory         free_memory;
     PFN_vkBindImageMemory    bind_image_memory;
-    PFN_vkGetAndroidHardwareBufferPropertiesANDROID get_ahb_properties;
     PFN_vkGetImageMemoryRequirements2 get_image_memory_requirements2;
+    PFN_vkGetMemoryFdKHR     get_memory_fd;
     /* Swapchain functions (real driver). We don't create a real swapchain,
      * but we keep the pointers for completeness. */
     PFN_vkCreateSwapchainKHR  real_create_swapchain;
@@ -132,15 +132,15 @@ typedef struct device_data {
 } device_data;
 
 /* ------------------------------------------------------------------ */
-/* AHB-backed virtual swapchain                                       */
+/* Opaque-FD-backed virtual swapchain                                 */
 /* ------------------------------------------------------------------ */
 
 typedef struct {
-    AHardwareBuffer *ahb;
     VkImage image;
     VkDeviceMemory memory;
     VkDeviceSize allocation_size;
-    uint32_t width, height, stride;
+    int dmabuf_fd;  /* exported via vkGetMemoryFdKHR, -1 if not yet exported */
+    uint32_t width, height;
     uint32_t drm_format;
     bool in_use;
     VkFence render_fence;  /* signaled when DXVK finishes rendering */
@@ -396,122 +396,27 @@ static VkResult layer_queue_present(VkQueue queue, const VkPresentInfoKHR *pPres
 static void ensure_device_vtable(device_data *data);
 
 /* ------------------------------------------------------------------ */
-/* Layer create/destroy swapchain (AHB-backed)                        */
+/* Layer create/destroy swapchain (opaque-FD-backed)                  */
 /* ------------------------------------------------------------------ */
 
-static VkResult create_ahb_backed_image(device_data *dev_data,
-                                        VkFormat format,
-                                        VkExtent2D extent,
-                                        VkImageUsageFlags usage,
-                                        swapchain_image *out) {
+static VkResult create_opaque_fd_image(device_data *dev_data,
+                                       VkFormat format,
+                                       VkExtent2D extent,
+                                       VkImageUsageFlags usage,
+                                       swapchain_image *out) {
     memset(out, 0, sizeof(*out));
+    out->dmabuf_fd = -1;
 
-    /* If the AHB properties function isn't available, we can't import AHBs. */
-    if (!dev_data->vtable.get_ahb_properties) {
-        LOGE("vkGetAndroidHardwareBufferPropertiesANDROID not available — "
-             "VK_ANDROID_external_memory_android_hardware_buffer missing");
-        return VK_ERROR_EXTENSION_NOT_PRESENT;
-    }
-
-    /* 1. Allocate AHardwareBuffer. */
-    AHardwareBuffer_Desc ahb_desc;
-    memset(&ahb_desc, 0, sizeof(ahb_desc));
-    ahb_desc.width = extent.width;
-    ahb_desc.height = extent.height;
-    ahb_desc.layers = 1;
-    ahb_desc.format = vk_format_to_ahb(format);
-    ahb_desc.usage = AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE
-                   | AHARDWAREBUFFER_USAGE_GPU_FRAMEBUFFER
-                   | AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN
-                   | AHARDWAREBUFFER_USAGE_CPU_WRITE_NEVER;
-    ahb_desc.rfu0 = 0;
-    ahb_desc.rfu1 = 0;
-
-    int rc = AHardwareBuffer_allocate(&ahb_desc, &out->ahb);
-    if (rc != 0 || !out->ahb) {
-        LOGE("AHardwareBuffer_allocate failed rc=%d %dx%d fmt=%u",
-             rc, extent.width, extent.height, ahb_desc.format);
-        return VK_ERROR_OUT_OF_DEVICE_MEMORY;
-    }
-
-    /* Query actual stride from the allocated AHB. */
-    AHardwareBuffer_Desc actual_desc;
-    AHardwareBuffer_describe(out->ahb, &actual_desc);
-    out->width = actual_desc.width;
-    out->height = actual_desc.height;
-    out->stride = actual_desc.stride;
-    out->drm_format = vk_format_to_drm(format);
-
-    /* 2. Get AHB memory properties from Vulkan. */
-    VkAndroidHardwareBufferPropertiesANDROID ahb_props;
-    memset(&ahb_props, 0, sizeof(ahb_props));
-    ahb_props.sType = VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_PROPERTIES_ANDROID;
-    ahb_props.pNext = NULL;
-    VkResult res = dev_data->vtable.get_ahb_properties(
-        dev_data->device, out->ahb, &ahb_props);
-    if (res != VK_SUCCESS) {
-        LOGE("vkGetAndroidHardwareBufferPropertiesANDROID failed res=%d", res);
-        goto err_ahb;
-    }
-    out->allocation_size = ahb_props.allocationSize;
-
-    /* 3. Find a compatible memory type. */
-    VkPhysicalDeviceMemoryProperties mem_props;
-    dev_data->inst_data->vtable.get_physical_device_memory_properties(
-        dev_data->physical_device, &mem_props);
-    uint32_t mem_type_index = 0;
-    bool found = false;
-    for (uint32_t i = 0; i < mem_props.memoryTypeCount; i++) {
-        if ((ahb_props.memoryTypeBits & (1u << i)) &&
-            (mem_props.memoryTypes[i].propertyFlags &
-             VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
-            mem_type_index = i;
-            found = true;
-            break;
-        }
-    }
-    if (!found) {
-        for (uint32_t i = 0; i < mem_props.memoryTypeCount; i++) {
-            if (ahb_props.memoryTypeBits & (1u << i)) {
-                mem_type_index = i;
-                found = true;
-                break;
-            }
-        }
-    }
-    if (!found) {
-        LOGE("no compatible memory type for AHB import (bits=0x%x)",
-             ahb_props.memoryTypeBits);
-        goto err_ahb;
-    }
-
-    /* 4. Allocate (import) device memory backed by the AHB. */
-    VkImportAndroidHardwareBufferInfoANDROID import_info;
-    memset(&import_info, 0, sizeof(import_info));
-    import_info.sType = VK_STRUCTURE_TYPE_IMPORT_ANDROID_HARDWARE_BUFFER_INFO_ANDROID;
-    import_info.pNext = NULL;
-    import_info.buffer = out->ahb;
-
-    VkMemoryAllocateInfo alloc_info;
-    memset(&alloc_info, 0, sizeof(alloc_info));
-    alloc_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    alloc_info.pNext = &import_info;
-    alloc_info.allocationSize = ahb_props.allocationSize;
-    alloc_info.memoryTypeIndex = mem_type_index;
-
-    res = dev_data->vtable.allocate_memory(dev_data->device, &alloc_info, NULL, &out->memory);
-    if (res != VK_SUCCESS) {
-        LOGE("vkAllocateMemory (AHB import) failed res=%d", res);
-        goto err_ahb;
-    }
-
-    /* 5. Create image with external memory handle type AHB. */
+    /* 1. Create image with VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT_KHR.
+     * This allows us to export the image's memory as a dmabuf fd via
+     * vkGetMemoryFdKHR later. The driver supports VK_KHR_external_memory_fd
+     * (confirmed in the wine log's physical device extensions list). */
     VkExternalMemoryImageCreateInfo ext_mem_info;
     memset(&ext_mem_info, 0, sizeof(ext_mem_info));
     ext_mem_info.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO;
     ext_mem_info.pNext = NULL;
     ext_mem_info.handleTypes =
-        VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID;
+        VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT_KHR;
 
     VkImageCreateInfo img_info;
     memset(&img_info, 0, sizeof(img_info));
@@ -526,8 +431,6 @@ static VkResult create_ahb_backed_image(device_data *dev_data,
     img_info.arrayLayers = 1;
     img_info.samples = VK_SAMPLE_COUNT_1_BIT;
     img_info.tiling = VK_IMAGE_TILING_OPTIMAL;
-    /* Use the application's requested usage flags, OR in the ones we need
-     * for dmabuf export and internal operations. */
     img_info.usage = usage
                    | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT
                    | VK_IMAGE_USAGE_TRANSFER_SRC_BIT
@@ -538,18 +441,106 @@ static VkResult create_ahb_backed_image(device_data *dev_data,
     img_info.pQueueFamilyIndices = NULL;
     img_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
-    res = dev_data->vtable.create_image(dev_data->device, &img_info, NULL, &out->image);
+    VkResult res = dev_data->vtable.create_image(dev_data->device, &img_info, NULL, &out->image);
     if (res != VK_SUCCESS) {
-        LOGE("vkCreateImage (AHB-backed) failed res=%d", res);
+        LOGE("vkCreateImage (opaque-fd) failed res=%d format=%d %ux%u",
+             res, format, extent.width, extent.height);
+        return res;
+    }
+
+    /* 2. Get image memory requirements. */
+    VkMemoryRequirements2 mem_reqs2;
+    memset(&mem_reqs2, 0, sizeof(mem_reqs2));
+    mem_reqs2.sType = VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2;
+    VkImageMemoryRequirementsInfo2 img_req_info;
+    memset(&img_req_info, 0, sizeof(img_req_info));
+    img_req_info.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_REQUIREMENTS_INFO_2;
+    img_req_info.image = out->image;
+    /* Use vkGetImageMemoryRequirements2 if available, else fallback to v1. */
+    if (dev_data->vtable.get_image_memory_requirements2) {
+        res = dev_data->vtable.get_image_memory_requirements2(
+            dev_data->device, &img_req_info, &mem_reqs2);
+    } else {
+        /* Fallback — shouldn't happen since we resolve it in ensure_device_vtable. */
+        LOGE("vkGetImageMemoryRequirements2 not available");
+        goto err_img;
+    }
+    if (res != VK_SUCCESS) {
+        LOGE("vkGetImageMemoryRequirements2 failed res=%d", res);
+        goto err_img;
+    }
+    out->allocation_size = mem_reqs2.memoryRequirements.size;
+    uint32_t mem_type_bits = mem_reqs2.memoryRequirements.memoryTypeBits;
+
+    /* 3. Find a compatible memory type — prefer DEVICE_LOCAL. */
+    VkPhysicalDeviceMemoryProperties mem_props;
+    dev_data->inst_data->vtable.get_physical_device_memory_properties(
+        dev_data->physical_device, &mem_props);
+    uint32_t mem_type_index = 0;
+    bool found = false;
+    for (uint32_t i = 0; i < mem_props.memoryTypeCount; i++) {
+        if ((mem_type_bits & (1u << i)) &&
+            (mem_props.memoryTypes[i].propertyFlags &
+             VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
+            mem_type_index = i;
+            found = true;
+            break;
+        }
+    }
+    if (!found) {
+        for (uint32_t i = 0; i < mem_props.memoryTypeCount; i++) {
+            if (mem_type_bits & (1u << i)) {
+                mem_type_index = i;
+                found = true;
+                break;
+            }
+        }
+    }
+    if (!found) {
+        LOGE("no compatible memory type for opaque-fd image (bits=0x%x)", mem_type_bits);
+        goto err_img;
+    }
+
+    /* 4. Allocate device memory (regular allocation, not import). */
+    VkMemoryAllocateInfo alloc_info;
+    memset(&alloc_info, 0, sizeof(alloc_info));
+    alloc_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    alloc_info.pNext = NULL;
+    alloc_info.allocationSize = out->allocation_size;
+    alloc_info.memoryTypeIndex = mem_type_index;
+
+    res = dev_data->vtable.allocate_memory(dev_data->device, &alloc_info, NULL, &out->memory);
+    if (res != VK_SUCCESS) {
+        LOGE("vkAllocateMemory (opaque-fd) failed res=%d size=%llu", res,
+             (unsigned long long)out->allocation_size);
+        goto err_img;
+    }
+
+    /* 5. Bind memory to image. */
+    res = dev_data->vtable.bind_image_memory(dev_data->device, out->image, out->memory, 0);
+    if (res != VK_SUCCESS) {
+        LOGE("vkBindImageMemory (opaque-fd) failed res=%d", res);
         goto err_mem;
     }
 
-    /* 6. Bind imported memory to the image. */
-    res = dev_data->vtable.bind_image_memory(dev_data->device, out->image, out->memory, 0);
-    if (res != VK_SUCCESS) {
-        LOGE("vkBindImageMemory (AHB-backed) failed res=%d", res);
-        goto err_img;
+    /* 6. Export dmabuf fd via vkGetMemoryFdKHR. */
+    if (!dev_data->vtable.get_memory_fd) {
+        LOGE("vkGetMemoryFdKHR not available — VK_KHR_external_memory_fd missing");
+        goto err_mem;
     }
+    VkMemoryGetFdInfoKHR fd_info;
+    memset(&fd_info, 0, sizeof(fd_info));
+    fd_info.sType = VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR;
+    fd_info.pNext = NULL;
+    fd_info.memory = out->memory;
+    fd_info.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT_KHR;
+    int fd = -1;
+    res = dev_data->vtable.get_memory_fd(dev_data->device, &fd_info, &fd);
+    if (res != VK_SUCCESS || fd < 0) {
+        LOGE("vkGetMemoryFdKHR failed res=%d fd=%d", res, fd);
+        goto err_mem;
+    }
+    out->dmabuf_fd = fd;
 
     /* 7. Create a fence for render completion signaling. */
     VkFenceCreateInfo fence_info;
@@ -558,30 +549,38 @@ static VkResult create_ahb_backed_image(device_data *dev_data,
     res = dev_data->vtable.create_fence(dev_data->device, &fence_info, NULL, &out->render_fence);
     if (res != VK_SUCCESS) {
         LOGE("vkCreateFence (render fence) failed res=%d", res);
-        goto err_img;
+        goto err_fd;
     }
 
+    out->width = extent.width;
+    out->height = extent.height;
+    out->drm_format = vk_format_to_drm(format);
     out->in_use = false;
-    LOGI("created AHB image %dx%d stride=%u drm=0x%08x",
-         out->width, out->height, out->stride, out->drm_format);
+    LOGI("created opaque-fd image %dx%d drm=0x%08x dmabuf_fd=%d size=%llu",
+         out->width, out->height, out->drm_format, out->dmabuf_fd,
+         (unsigned long long)out->allocation_size);
     return VK_SUCCESS;
 
-err_img:
-    dev_data->vtable.destroy_image(dev_data->device, out->image, NULL);
-    out->image = VK_NULL_HANDLE;
+err_fd:
+    close(out->dmabuf_fd);
+    out->dmabuf_fd = -1;
 err_mem:
     dev_data->vtable.free_memory(dev_data->device, out->memory, NULL);
     out->memory = VK_NULL_HANDLE;
-err_ahb:
-    AHardwareBuffer_release(out->ahb);
-    out->ahb = NULL;
+err_img:
+    dev_data->vtable.destroy_image(dev_data->device, out->image, NULL);
+    out->image = VK_NULL_HANDLE;
     return res != VK_SUCCESS ? res : VK_ERROR_OUT_OF_DEVICE_MEMORY;
 }
 
-static void destroy_ahb_backed_image(device_data *dev_data, swapchain_image *img) {
+static void destroy_opaque_fd_image(device_data *dev_data, swapchain_image *img) {
     if (img->render_fence != VK_NULL_HANDLE) {
         dev_data->vtable.destroy_fence(dev_data->device, img->render_fence, NULL);
         img->render_fence = VK_NULL_HANDLE;
+    }
+    if (img->dmabuf_fd >= 0) {
+        close(img->dmabuf_fd);
+        img->dmabuf_fd = -1;
     }
     if (img->image != VK_NULL_HANDLE) {
         dev_data->vtable.destroy_image(dev_data->device, img->image, NULL);
@@ -590,10 +589,6 @@ static void destroy_ahb_backed_image(device_data *dev_data, swapchain_image *img
     if (img->memory != VK_NULL_HANDLE) {
         dev_data->vtable.free_memory(dev_data->device, img->memory, NULL);
         img->memory = VK_NULL_HANDLE;
-    }
-    if (img->ahb) {
-        AHardwareBuffer_release(img->ahb);
-        img->ahb = NULL;
     }
 }
 
@@ -645,12 +640,12 @@ static VkResult layer_create_swapchain(VkDevice device,
 
     /* Create AHB-backed images. */
     for (uint32_t i = 0; i < image_count; i++) {
-        VkResult res = create_ahb_backed_image(dev_data, sw->format, sw->extent,
+        VkResult res = create_opaque_fd_image(dev_data, sw->format, sw->extent,
                                                 pCreateInfo->imageUsage, &sw->images[i]);
         if (res != VK_SUCCESS) {
-            LOGE("create_ahb_backed_image failed for image %u", i);
+            LOGE("create_opaque_fd_image failed for image %u", i);
             for (uint32_t j = 0; j < i; j++) {
-                destroy_ahb_backed_image(dev_data, &sw->images[j]);
+                destroy_opaque_fd_image(dev_data, &sw->images[j]);
             }
             free(sw);
             return res;
@@ -667,7 +662,7 @@ static VkResult layer_create_swapchain(VkDevice device,
     if (res != VK_SUCCESS) {
         LOGE("vkCreateCommandPool failed res=%d", res);
         for (uint32_t i = 0; i < image_count; i++) {
-            destroy_ahb_backed_image(dev_data, &sw->images[i]);
+            destroy_opaque_fd_image(dev_data, &sw->images[i]);
         }
         free(sw);
         return res;
@@ -684,7 +679,7 @@ static VkResult layer_create_swapchain(VkDevice device,
         LOGE("vkAllocateCommandBuffers failed res=%d", res);
         dev_data->vtable.destroy_command_pool(device, sw->command_pool, NULL);
         for (uint32_t i = 0; i < image_count; i++) {
-            destroy_ahb_backed_image(dev_data, &sw->images[i]);
+            destroy_opaque_fd_image(dev_data, &sw->images[i]);
         }
         free(sw);
         return res;
@@ -699,7 +694,7 @@ static VkResult layer_create_swapchain(VkDevice device,
         dev_data->vtable.free_command_buffers(device, sw->command_pool, 1, &sw->scratch_cmd);
         dev_data->vtable.destroy_command_pool(device, sw->command_pool, NULL);
         for (uint32_t i = 0; i < image_count; i++) {
-            destroy_ahb_backed_image(dev_data, &sw->images[i]);
+            destroy_opaque_fd_image(dev_data, &sw->images[i]);
         }
         free(sw);
         return res;
@@ -761,7 +756,7 @@ static void layer_destroy_swapchain(VkDevice device, VkSwapchainKHR swapchain,
         sw->dev_data->vtable.destroy_command_pool(device, sw->command_pool, NULL);
     }
     for (uint32_t i = 0; i < sw->image_count; i++) {
-        destroy_ahb_backed_image(sw->dev_data, &sw->images[i]);
+        destroy_opaque_fd_image(sw->dev_data, &sw->images[i]);
     }
     if (sw->bridge_sock >= 0) {
         close(sw->bridge_sock);
@@ -937,17 +932,23 @@ static VkResult layer_queue_present(VkQueue queue, const VkPresentInfoKHR *pPres
             }
         }
 
-        /* Export dmabuf fd from the AHB. */
-        int dmabuf_fd = ahb_get_dmabuf_fd(img->ahb);
+        /* Use the dmabuf fd we exported at image creation time. dup() it
+         * because bridge_send_dmabuf + the bridge server will close it. */
+        if (img->dmabuf_fd < 0) {
+            LOGE("dmabuf_fd not available for image %u", img_idx);
+            final_result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
+            continue;
+        }
+        int dmabuf_fd = dup(img->dmabuf_fd);
         if (dmabuf_fd < 0) {
-            LOGE("ahb_get_dmabuf_fd failed for image %u", img_idx);
+            LOGE("dup(dmabuf_fd) failed errno=%d", errno);
             final_result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
             continue;
         }
 
-        /* Compute dmabuf size. */
-        uint64_t dmabuf_size = (uint64_t)img->stride * (uint64_t)img->height * 4ULL;
-        (void)dmabuf_size;
+        /* Stride = width * 4 bytes per pixel (BGRA8/RGBA8). */
+        uint32_t stride = img->width * 4;
+        uint64_t dmabuf_size = (uint64_t)stride * (uint64_t)img->height;
 
         /* Connect to bridge if needed. */
         if (sw->bridge_sock < 0) {
@@ -962,8 +963,7 @@ static VkResult layer_queue_present(VkQueue queue, const VkPresentInfoKHR *pPres
             int send_rc = bridge_send_dmabuf(sw->bridge_sock, dmabuf_fd,
                                              img->width, img->height,
                                              img->drm_format, 0ULL,
-                                             img->stride,
-                                             (uint64_t)img->stride * img->height * 4ULL);
+                                             stride, dmabuf_size);
             if (send_rc != 0) {
                 LOGW("bridge_send_dmabuf failed — reconnecting");
                 close(sw->bridge_sock);
@@ -972,8 +972,7 @@ static VkResult layer_queue_present(VkQueue queue, const VkPresentInfoKHR *pPres
                     bridge_send_dmabuf(sw->bridge_sock, dmabuf_fd,
                                        img->width, img->height,
                                        img->drm_format, 0ULL,
-                                       img->stride,
-                                       (uint64_t)img->stride * img->height * 4ULL);
+                                       stride, dmabuf_size);
                 }
             }
         } else {
@@ -988,7 +987,7 @@ static VkResult layer_queue_present(VkQueue queue, const VkPresentInfoKHR *pPres
         if (sw->present_count <= 3 || (sw->present_count % 60) == 0) {
             LOGI("present #%llu: %ux%u stride=%u drm=0x%08x fd=%d",
                  (unsigned long long)sw->present_count,
-                 img->width, img->height, img->stride, img->drm_format, dmabuf_fd);
+                 img->width, img->height, img->width * 4, img->drm_format, dmabuf_fd);
         }
     }
 
@@ -1437,8 +1436,66 @@ static VkResult layer_create_device(VkPhysicalDevice physicalDevice,
         return VK_ERROR_INITIALIZATION_FAILED;
     }
 
+    /* Force-inject VK_KHR_external_memory_fd + VK_KHR_external_memory into
+     * the device extension list. DXVK doesn't request these (it uses
+     * VK_KHR_external_memory_win32 which Wine maps), but we need them to
+     * export dmabuf fds via vkGetMemoryFdKHR.
+     *
+     * We build a modified VkDeviceCreateInfo with the extra extensions
+     * appended. The original pCreateInfo is const, so we allocate a copy. */
+    const char *extra_exts[] = {
+        "VK_KHR_external_memory_fd",
+        "VK_KHR_external_memory",
+        "VK_EXT_external_memory_dma_buf",
+    };
+    int extra_count = 0;
+    /* Check which extensions are already requested by DXVK. */
+    for (int e = 0; e < 3; e++) {
+        bool already = false;
+        for (uint32_t i = 0; i < pCreateInfo->enabledExtensionCount; i++) {
+            if (pCreateInfo->ppEnabledExtensionNames[i] &&
+                strcmp(pCreateInfo->ppEnabledExtensionNames[i], extra_exts[e]) == 0) {
+                already = true;
+                break;
+            }
+        }
+        if (!already) extra_count++;
+    }
+
+    VkDeviceCreateInfo modified_create_info;
+    const char **modified_exts = NULL;
+    if (extra_count > 0 && atomic_load(&g_enabled)) {
+        modified_create_info = *pCreateInfo;
+        modified_exts = (const char **)malloc(
+            (pCreateInfo->enabledExtensionCount + extra_count) * sizeof(char *));
+        if (modified_exts) {
+            uint32_t idx = 0;
+            for (uint32_t i = 0; i < pCreateInfo->enabledExtensionCount; i++) {
+                modified_exts[idx++] = pCreateInfo->ppEnabledExtensionNames[i];
+            }
+            for (int e = 0; e < 3; e++) {
+                bool already = false;
+                for (uint32_t i = 0; i < pCreateInfo->enabledExtensionCount; i++) {
+                    if (pCreateInfo->ppEnabledExtensionNames[i] &&
+                        strcmp(pCreateInfo->ppEnabledExtensionNames[i], extra_exts[e]) == 0) {
+                        already = true;
+                        break;
+                    }
+                }
+                if (!already) {
+                    modified_exts[idx++] = extra_exts[e];
+                    LOGI("layer_create_device: injecting extension %s", extra_exts[e]);
+                }
+            }
+            modified_create_info.enabledExtensionCount = idx;
+            modified_create_info.ppEnabledExtensionNames = modified_exts;
+            pCreateInfo = &modified_create_info;
+        }
+    }
+
     /* Call the next layer's vkCreateDevice. */
     VkResult res = fp_create_device(physicalDevice, pCreateInfo, pAllocator, pDevice);
+    if (modified_exts) free(modified_exts);
     if (res != VK_SUCCESS) return res;
 
     /* Allocate device data. */
@@ -1600,6 +1657,8 @@ static void ensure_device_vtable(device_data *data) {
             fp_gdpa(data->device, "vkBindImageMemory");
         data->vtable.get_image_memory_requirements2 = (PFN_vkGetImageMemoryRequirements2)
             fp_gdpa(data->device, "vkGetImageMemoryRequirements2");
+        data->vtable.get_memory_fd = (PFN_vkGetMemoryFdKHR)
+            fp_gdpa(data->device, "vkGetMemoryFdKHR");
     }
 
     /* Get the graphics queue. */

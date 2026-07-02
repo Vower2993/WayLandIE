@@ -24,11 +24,11 @@
                 "spec_version": "70"
             },
             {
-                "name": "VK_ANDROID_external_memory_android_hardware_buffer",
-                "spec_version": "5"
+                "name": "VK_KHR_external_memory_fd",
+                "spec_version": "1"
             },
             {
-                "name": "VK_KHR_external_memory_fd",
+                "name": "VK_EXT_external_memory_dma_buf",
                 "spec_version": "1"
             }
         ]
