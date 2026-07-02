@@ -399,6 +399,7 @@ public final class WaylandDriverInstaller {
         copyIfExists(prefix, "lib/wine/aarch64-windows/winewayland.drv", system32);
         copyIfExists(prefix, "lib/wine/aarch64-windows/libarm64ecfex.dll", system32);
         copyIfExists(prefix, "lib/wine/aarch64-windows/ntdll.dll", system32);
+        copyIfExists(prefix, "lib/wine/aarch64-windows/winevulkan.dll", system32);
     }
 
     /**
