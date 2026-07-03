@@ -35,6 +35,8 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
+#include <sys/mman.h>
+#include <linux/memfd.h>
 
 /* Fallback defines for older NDK / Vulkan header versions. */
 #ifndef VK_LAYER_EXPORT
@@ -101,7 +103,8 @@ typedef struct {
     PFN_vkFreeMemory         free_memory;
     PFN_vkBindImageMemory    bind_image_memory;
     PFN_vkGetImageMemoryRequirements2 get_image_memory_requirements2;  /* returns void */
-    PFN_vkGetMemoryFdKHR     get_memory_fd;
+    PFN_vkMapMemory          map_memory;
+    PFN_vkUnmapMemory        unmap_memory;
     /* Swapchain functions (real driver). We don't create a real swapchain,
      * but we keep the pointers for completeness. */
     PFN_vkCreateSwapchainKHR  real_create_swapchain;
@@ -139,7 +142,10 @@ typedef struct {
     VkImage image;
     VkDeviceMemory memory;
     VkDeviceSize allocation_size;
-    int dmabuf_fd;  /* exported via vkGetMemoryFdKHR, -1 if not yet exported */
+    int dmabuf_fd;  /* -1 for CPU copy path (memfd on present) */
+    uint32_t stride;
+    uint64_t offset;
+    uint64_t size;
     uint32_t width, height;
     uint32_t drm_format;
     bool in_use;
@@ -407,21 +413,15 @@ static VkResult create_opaque_fd_image(device_data *dev_data,
     memset(out, 0, sizeof(*out));
     out->dmabuf_fd = -1;
 
-    /* 1. Create image with VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT_KHR.
-     * This allows us to export the image's memory as a dmabuf fd via
-     * vkGetMemoryFdKHR later. The driver supports VK_KHR_external_memory_fd
-     * (confirmed in the wine log's physical device extensions list). */
-    VkExternalMemoryImageCreateInfo ext_mem_info;
-    memset(&ext_mem_info, 0, sizeof(ext_mem_info));
-    ext_mem_info.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO;
-    ext_mem_info.pNext = NULL;
-    ext_mem_info.handleTypes =
-        VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
-
+    /* Create a LINEAR-tiled image that we can vkMapMemory and copy to memfd.
+     * winevulkan filters vkGetMemoryFdKHR (UNEXPOSED_EXTENSIONS), so we
+     * cannot export dmabuf fds directly. Instead we use a CPU copy path:
+     * vkMapMemory → memcpy → memfd_create → bridge → SurfaceControl.
+     * This is one memcpy per frame but works without winevulkan mods. */
     VkImageCreateInfo img_info;
     memset(&img_info, 0, sizeof(img_info));
     img_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-    img_info.pNext = &ext_mem_info;
+    img_info.pNext = NULL;
     img_info.imageType = VK_IMAGE_TYPE_2D;
     img_info.format = format;
     img_info.extent.width = extent.width;
@@ -430,7 +430,7 @@ static VkResult create_opaque_fd_image(device_data *dev_data,
     img_info.mipLevels = 1;
     img_info.arrayLayers = 1;
     img_info.samples = VK_SAMPLE_COUNT_1_BIT;
-    img_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+    img_info.tiling = VK_IMAGE_TILING_LINEAR;
     img_info.usage = usage
                    | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT
                    | VK_IMAGE_USAGE_TRANSFER_SRC_BIT
@@ -518,24 +518,28 @@ static VkResult create_opaque_fd_image(device_data *dev_data,
         goto err_mem;
     }
 
-    /* 6. Export dmabuf fd via vkGetMemoryFdKHR. */
-    if (!dev_data->vtable.get_memory_fd) {
-        LOGE("vkGetMemoryFdKHR not available — VK_KHR_external_memory_fd missing");
-        goto err_mem;
+    /* 6. Query stride via vkGetImageSubresourceLayout (LINEAR only). */
+    VkImageSubresource subres;
+    memset(&subres, 0, sizeof(subres));
+    subres.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    VkSubresourceLayout layout;
+    memset(&layout, 0, sizeof(layout));
+    /* vkGetImageSubresourceLayout is a core function — use fp_gdpa to get it. */
+    PFN_vkGetImageSubresourceLayout p_get_layout = (PFN_vkGetImageSubresourceLayout)
+        dev_data->vtable.get_device_proc_addr(dev_data->device, "vkGetImageSubresourceLayout");
+    if (p_get_layout) {
+        p_get_layout(dev_data->device, out->image, &subres, &layout);
+        out->dmabuf_fd = -1; /* No pre-exported fd — we'll memfd on present */
+        out->stride = (uint32_t)layout.rowPitch;
+        out->offset = 0;
+        out->size = layout.size;
+    } else {
+        LOGW("vkGetImageSubresourceLayout not available — using width*4 stride");
+        out->dmabuf_fd = -1;
+        out->stride = extent.width * 4;
+        out->offset = 0;
+        out->size = (uint64_t)extent.width * 4 * extent.height;
     }
-    VkMemoryGetFdInfoKHR fd_info;
-    memset(&fd_info, 0, sizeof(fd_info));
-    fd_info.sType = VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR;
-    fd_info.pNext = NULL;
-    fd_info.memory = out->memory;
-    fd_info.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
-    int fd = -1;
-    res = dev_data->vtable.get_memory_fd(dev_data->device, &fd_info, &fd);
-    if (res != VK_SUCCESS || fd < 0) {
-        LOGE("vkGetMemoryFdKHR failed res=%d fd=%d", res, fd);
-        goto err_mem;
-    }
-    out->dmabuf_fd = fd;
 
     /* 7. Create a fence for render completion signaling. */
     VkFenceCreateInfo fence_info;
@@ -551,7 +555,7 @@ static VkResult create_opaque_fd_image(device_data *dev_data,
     out->height = extent.height;
     out->drm_format = vk_format_to_drm(format);
     out->in_use = false;
-    LOGI("created opaque-fd image %dx%d drm=0x%08x dmabuf_fd=%d size=%llu",
+    LOGI("created linear image %dx%d drm=0x%08x stride=%u size=%llu",
          out->width, out->height, out->drm_format, out->dmabuf_fd,
          (unsigned long long)out->allocation_size);
     return VK_SUCCESS;
@@ -1450,8 +1454,10 @@ static void ensure_device_vtable(device_data *data) {
             fp_gdpa(data->device, "vkBindImageMemory");
         data->vtable.get_image_memory_requirements2 = (PFN_vkGetImageMemoryRequirements2)
             fp_gdpa(data->device, "vkGetImageMemoryRequirements2");
-        data->vtable.get_memory_fd = (PFN_vkGetMemoryFdKHR)
-            fp_gdpa(data->device, "vkGetMemoryFdKHR");
+        data->vtable.map_memory = (PFN_vkMapMemory)
+            fp_gdpa(data->device, "vkMapMemory");
+        data->vtable.unmap_memory = (PFN_vkUnmapMemory)
+            fp_gdpa(data->device, "vkUnmapMemory");
         /* Also resolve swapchain functions for pass-through fallback. */
         data->vtable.real_create_swapchain = (PFN_vkCreateSwapchainKHR)
             fp_gdpa(data->device, "vkCreateSwapchainKHR");
