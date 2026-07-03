@@ -1051,7 +1051,24 @@ static VkResult layer_create_instance(const VkInstanceCreateInfo *ci,
         }
     }
 
-    VkResult res = fp_create(ci, alloc, inst);
+    /* STRIP the VkLayerInstanceCreateInfo from the pNext chain before
+     * calling fp_create. The HOST driver does NOT understand
+     * VK_STRUCTURE_TYPE_LOADER_INSTANCE_CREATE_INFO (sType=24) — it's a
+     * loader-internal type. If we pass it through, the driver rejects
+     * vkCreateInstance with VK_ERROR_INITIALIZATION_FAILED.
+     *
+     * In a normal Khronos layer chain, the loader's terminator strips
+     * this. But we call the HOST driver directly (via fp_create obtained
+     * from the chain's pfnNextGetInstanceProcAddr), so we must strip it. */
+    VkInstanceCreateInfo stripped_ci;
+    if (li) {
+        stripped_ci = *ci;
+        stripped_ci.pNext = li->pNext;  /* Skip the layer_info, restore original pNext */
+    } else {
+        stripped_ci = *ci;  /* PATH 2: no layer_info in chain, pass as-is */
+    }
+
+    VkResult res = fp_create(&stripped_ci, alloc, inst);
     LOGI("layer_create_instance: vkCreateInstance returned res=%d instance=%p",
          res, (void *)(inst ? *inst : VK_NULL_HANDLE));
     if (res != VK_SUCCESS) return res;
