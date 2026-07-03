@@ -796,8 +796,8 @@ VkResult layer_queue_present(VkQueue queue, const VkPresentInfoKHR *info) {
         copy.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT; copy.srcSubresource.layerCount = 1;
         copy.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT; copy.dstSubresource.layerCount = 1;
         copy.extent.width = img->width; copy.extent.height = img->height; copy.extent.depth = 1;
-        dd->vtable.cmd_copy_image(s->blit_cmd, img->render_img, img->staging_img,
-                                  VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        dd->vtable.cmd_copy_image(s->blit_cmd, img->render_img,
+                                  VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, img->staging_img,
                                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
 
         /* Transition staging: TRANSFER_DST → GENERAL for mapping. */
@@ -834,7 +834,7 @@ VkResult layer_queue_present(VkQueue queue, const VkPresentInfoKHR *info) {
             continue;
         }
 
-        int fd = syscall(__NR_memfd_create, "waylandie", MFD_CLOEXEC);
+        int fd = syscall(279, "waylandie", 1);
         if (fd < 0) {
             LOGE("memfd_create failed errno=%d", errno);
             dd->vtable.unmap_mem(dd->device, img->staging_mem);
