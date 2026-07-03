@@ -101,6 +101,109 @@ else
     echo "  WARNING: $WLD_SRC not found — building without dmabuf support"
 fi
 
+# === winevulkan: NULL-instance guard for wine_vkEnumeratePhysicalDeviceGroups ===
+# Root cause of winevulkan loader.c:466 assert (Blocker B):
+#   DXVK (32-bit via FEX) calls vkEnumeratePhysicalDeviceGroups with instance=NULL.
+#   wine_vkEnumeratePhysicalDeviceGroups dereferences NULL via vulkan_instance_from_handle(),
+#   SIGSEGV → Wine VEH returns STATUS_ACCESS_VIOLATION → next UNIX_CALL hits assert.
+# Patch adds a defensive guard converting UB into VK_ERROR_INITIALIZATION_FAILED.
+echo "=== Patching winevulkan: NULL-instance guard for vkEnumeratePhysicalDeviceGroups ==="
+python3 - <<'PATCH_EOF'
+import re
+path = "dlls/winevulkan/vulkan.c"
+with open(path, "r") as f:
+    src = f.read()
+
+guard = """VkResult wine_vkEnumeratePhysicalDeviceGroups(VkInstance client_instance, uint32_t *count,
+                                              VkPhysicalDeviceGroupProperties *properties)
+{
+    /* WayLandIE defensive guard: if client_instance is NULL/VK_NULL_HANDLE, the
+     * PE-side caller (typically DXVK via FEX thunk32) called us before
+     * vkCreateInstance completed, or passed a zero-initialized VkInstance.
+     * Without this guard, vulkan_instance_from_handle(NULL) dereferences NULL
+     * -> SIGSEGV -> Wine's VEH returns STATUS_ACCESS_VIOLATION -> the next
+     * UNIX_CALL in the same process hits
+     * `assert(!status && "vkEnumerateInstanceExtensionProperties")` at
+     * loader.c:466, masking the real failure.
+     *
+     * Per Vulkan spec VUID-vkEnumeratePhysicalDeviceGroups-instance-parameter,
+     * `instance` must be a valid VkInstance handle. Returning
+     * VK_ERROR_INITIALIZATION_FAILED converts UB into a spec-defined error
+     * that DXVK gracefully falls back from (it then calls
+     * vkEnumeratePhysicalDevices instead). */
+    if (!client_instance)
+    {
+        ERR("client_instance is NULL; caller must pass a valid VkInstance\\n");
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+
+    struct vulkan_instance *instance = vulkan_instance_from_handle(client_instance);
+
+    return wine_vk_enumerate_physical_device_groups(instance,
+            instance->p_vkEnumeratePhysicalDeviceGroups, count, properties);
+}
+
+VkResult wine_vkEnumeratePhysicalDeviceGroupsKHR(VkInstance client_instance, uint32_t *count,
+                                                 VkPhysicalDeviceGroupProperties *properties)
+{
+    /* WayLandIE defensive guard: see wine_vkEnumeratePhysicalDeviceGroups above
+     * for rationale. The KHR variant is exposed via the same extension and
+     * suffers the same NULL-dereference bug. */
+    if (!client_instance)
+    {
+        ERR("client_instance is NULL; caller must pass a valid VkInstance\\n");
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+
+    struct vulkan_instance *instance = vulkan_instance_from_handle(client_instance);
+
+    return wine_vk_enumerate_physical_device_groups(instance,
+            instance->p_vkEnumeratePhysicalDeviceGroupsKHR, count, properties);
+}"""
+
+# NOTE: re.sub() processes backslash escapes in the replacement string.
+# "\\n" in the guard would become a real newline in the output. We must
+# escape every backslash in the guard before passing it to re.sub(), so
+# that "\\n" (backslash + n) in the Python string becomes "\\n" (literal
+# backslash + n) in the C source file.
+guard_for_re_sub = guard.replace("\\", "\\\\")
+
+# Match the original (unpatched) wine_vkEnumeratePhysicalDeviceGroups + KHR variant.
+# Use a non-greedy regex that stops at the next function (wine_vkGetPhysicalDeviceExternalFenceProperties).
+pattern = re.compile(
+    r"VkResult wine_vkEnumeratePhysicalDeviceGroups\(VkInstance client_instance, uint32_t \*count,\n"
+    r"                                              VkPhysicalDeviceGroupProperties \*properties\)\n"
+    r"\{\n"
+    r"    struct vulkan_instance \*instance = vulkan_instance_from_handle\(client_instance\);\n"
+    r"\n"
+    r"    return wine_vk_enumerate_physical_device_groups\(instance,\n"
+    r"            instance->p_vkEnumeratePhysicalDeviceGroups, count, properties\);\n"
+    r"\}\n"
+    r"\n"
+    r"VkResult wine_vkEnumeratePhysicalDeviceGroupsKHR\(VkInstance client_instance, uint32_t \*count,\n"
+    r"                                                 VkPhysicalDeviceGroupProperties \*properties\)\n"
+    r"\{\n"
+    r"    struct vulkan_instance \*instance = vulkan_instance_from_handle\(client_instance\);\n"
+    r"\n"
+    r"    return wine_vk_enumerate_physical_device_groups\(instance,\n"
+    r"            instance->p_vkEnumeratePhysicalDeviceGroupsKHR, count, properties\);\n"
+    r"\}",
+    re.DOTALL,
+)
+
+if pattern.search(src):
+    src = pattern.sub(guard_for_re_sub, src, count=1)
+    with open(path, "w") as f:
+        f.write(src)
+    print("  winevulkan NULL-instance guard: PATCHED")
+else:
+    # Check if already patched (idempotency)
+    if "WayLandIE defensive guard" in src:
+        print("  winevulkan NULL-instance guard: already applied (skipping)")
+    else:
+        raise SystemExit("  ERROR: could not find wine_vkEnumeratePhysicalDeviceGroups to patch — proton-wine source may have changed")
+PATCH_EOF
+
 # === winevulkan: NO MORE MANUAL_UNIX_THUNKS or winevulkan_dmabuf.c ===
 # The runtime Vulkan layer (libvk_layer_waylandie_dmabuf.so) now handles
 # all swapchain/present interception via standard Vulkan layer interception.

@@ -196,6 +196,69 @@ static swapchain_data *g_swapchains = NULL;
 static atomic_int g_enabled = 0;
 
 /* ------------------------------------------------------------------ */
+/* Constructor — confirms .so load independently of any hook firing.   */
+/*                                                                      */
+/* Analysis of Impact (Protocol #3):                                   */
+/*   This is the ONLY reliable signal that the layer .so has been      */
+/*   mapped into the process address space. Without it, we cannot      */
+/*   distinguish "layer .so failed to load" from "layer .so loaded     */
+/*   but never invoked" — exactly the ambiguity that masked the        */
+/*   previous agent's misdiagnosis (Task ID 1, Finding 1: zero         */
+/*   WayLandIE/Layer log lines despite successful install).            */
+/*                                                                      */
+/*   The constructor runs at dlopen()/LD_PRELOAD time, before any      */
+/*   Vulkan function is called. It only calls getpid() and             */
+/*   __android_log_print() — both async-signal-safe and allocation-    */
+/*   free. No Vulkan state is touched.                                 */
+/* ------------------------------------------------------------------ */
+__attribute__((constructor))
+static void waylandie_layer_ctor(void) {
+    LOGI("Shared object pre-loaded via constructor, PID=%d", (int)getpid());
+}
+
+/* ------------------------------------------------------------------ */
+/* Host Vulkan loader handle — cached dlopen("libvulkan.so").           *
+ *                                                                      *
+ * Analysis of Impact (Protocol #1):                                   *
+ *   Used as the fat-layer fallback when the Khronos pNext chain walk   *
+ *   fails (LD_PRELOAD scenario). Also used by vkEnumerateInstance-     *
+ *   ExtensionProperties to forward to the HOST driver. Lazy-init'd    *
+ *   via pthread_once for thread safety. dlopen itself is thread-safe   *
+ *   per POSIX and caches the handle (no actual re-mapping).            *
+ * ------------------------------------------------------------------ */
+static void *g_host_vulkan_handle = NULL;
+static pthread_once_t g_host_vulkan_once = PTHREAD_ONCE_INIT;
+
+static void init_host_vulkan_handle(void) {
+    /* Attempt 1: dlopen(NULL, ...) — searches the global symbol scope. */
+    void *main_handle = dlopen(NULL, RTLD_NOW);
+    if (main_handle) {
+        void *sym = dlsym(main_handle, "vkGetInstanceProcAddr");
+        if (sym) {
+            g_host_vulkan_handle = main_handle;
+            LOGI("init_host_vulkan_handle: using main-program handle=%p (vkGetInstanceProcAddr=%p)",
+                 main_handle, sym);
+            return;
+        }
+    }
+
+    /* Attempt 2: explicit dlopen("libvulkan.so", ...). */
+    void *vulkan_handle = dlopen("libvulkan.so", RTLD_NOW);
+    if (vulkan_handle) {
+        g_host_vulkan_handle = vulkan_handle;
+        LOGI("init_host_vulkan_handle: using libvulkan.so handle=%p", vulkan_handle);
+        return;
+    }
+
+    LOGE("init_host_vulkan_handle: FAILED to obtain any Vulkan loader handle: %s", dlerror());
+}
+
+static void *get_host_vulkan_handle(void) {
+    pthread_once(&g_host_vulkan_once, init_host_vulkan_handle);
+    return g_host_vulkan_handle;
+}
+
+/* ------------------------------------------------------------------ */
 /* Helpers                                                            */
 /* ------------------------------------------------------------------ */
 
@@ -922,22 +985,71 @@ static void ensure_device_vtable(device_data *data) {
 static VkResult layer_create_instance(const VkInstanceCreateInfo *ci,
                                       const VkAllocationCallbacks *alloc, VkInstance *inst) {
     is_enabled();
+    LOGI("layer_create_instance: ENTER ci=%p alloc=%p inst=%p",
+         (const void *)ci, (const void *)alloc, (void *)inst);
 
     PFN_vkGetInstanceProcAddr fp_gipa = NULL;
     PFN_vkCreateInstance fp_create = NULL;
+    int fat_layer_mode = 0;
+
+    /* ------------------------------------------------------------------ *
+     * PATH 1 (Khronos-compliant): walk the pNext chain for               *
+     * VK_STRUCTURE_TYPE_LOADER_INSTANCE_CREATE_INFO with function ==     *
+     * VK_LAYER_LINK_INFO. Extract pfnNextGetInstanceProcAddr.            *
+     * This path is taken when the loader discovers us via manifest.      *
+     * ------------------------------------------------------------------ */
     const VkLayerInstanceCreateInfo *li = (const VkLayerInstanceCreateInfo *)ci->pNext;
     while (li) {
         if (li->sType == VK_STRUCTURE_TYPE_LOADER_INSTANCE_CREATE_INFO &&
             li->function == VK_LAYER_LINK_INFO) {
             fp_gipa = li->u.pLayerInfo->pfnNextGetInstanceProcAddr;
             fp_create = (PFN_vkCreateInstance)fp_gipa(VK_NULL_HANDLE, "vkCreateInstance");
+            LOGI("layer_create_instance: PATH 1 (chain walk) — fp_gipa=%p fp_create=%p",
+                 (void *)fp_gipa, (void *)fp_create);
             break;
         }
         li = (const VkLayerInstanceCreateInfo *)li->pNext;
     }
-    if (!fp_create || !fp_gipa) return VK_ERROR_INITIALIZATION_FAILED;
+
+    /* ------------------------------------------------------------------ *
+     * PATH 2 (fat-layer fallback): if the chain walk failed (no          *
+     * VK_STRUCTURE_TYPE_LOADER_INSTANCE_CREATE_INFO found), the layer    *
+     * was LD_PRELOAD'd instead of manifest-discovered. The loader did    *
+     * NOT construct the chain node, so we must obtain vkCreateInstance   *
+     * and vkGetInstanceProcAddr directly from the system Vulkan loader   *
+     * via dlopen.                                                        *
+     *                                                                    *
+     * Trade-off: when this path is taken, NO other layers can interpose  *
+     * between us and the system loader. Acceptable for production — our  *
+     * layer IS the only layer we need.                                   *
+     * ------------------------------------------------------------------ */
+    if (!fp_create || !fp_gipa) {
+        LOGW("layer_create_instance: PATH 1 failed (chain walk found no VK_LAYER_LINK_INFO) — entering fat-layer fallback");
+        fat_layer_mode = 1;
+
+        void *host_handle = get_host_vulkan_handle();
+        if (!host_handle) {
+            LOGE("layer_create_instance: fat-layer fallback FAILED — no host Vulkan handle");
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+
+        fp_gipa = (PFN_vkGetInstanceProcAddr)
+            dlsym(host_handle, "vkGetInstanceProcAddr");
+        fp_create = (PFN_vkCreateInstance)
+            dlsym(host_handle, "vkCreateInstance");
+        LOGI("layer_create_instance: PATH 2 (fat-layer) — host_handle=%p fp_gipa=%p fp_create=%p",
+             host_handle, (void *)fp_gipa, (void *)fp_create);
+
+        if (!fp_gipa || !fp_create) {
+            LOGE("layer_create_instance: fat-layer fallback FAILED — dlsym returned NULL (fp_gipa=%p fp_create=%p)",
+                 (void *)fp_gipa, (void *)fp_create);
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+    }
 
     VkResult res = fp_create(ci, alloc, inst);
+    LOGI("layer_create_instance: vkCreateInstance returned res=%d instance=%p",
+         res, (void *)(inst ? *inst : VK_NULL_HANDLE));
     if (res != VK_SUCCESS) return res;
 
     instance_data *data = (instance_data *)calloc(1, sizeof(*data));
@@ -953,6 +1065,9 @@ static VkResult layer_create_instance(const VkInstanceCreateInfo *ci,
     g_instances = data;
     pthread_mutex_unlock(&g_lock);
 
+    LOGI("layer_create_instance: SUCCESS instance=%p fat_layer_mode=%d destroy=%p phys_mem=%p",
+         (void *)*inst, fat_layer_mode,
+         (void *)data->vtable.destroy_instance, (void *)data->vtable.get_phys_mem_props);
     return VK_SUCCESS;
 }
 
@@ -970,27 +1085,98 @@ static void layer_destroy_instance(VkInstance inst, const VkAllocationCallbacks 
 
 static VkResult layer_create_device(VkPhysicalDevice phys, const VkDeviceCreateInfo *ci,
                                     const VkAllocationCallbacks *alloc, VkDevice *dev) {
+    LOGI("layer_create_device: ENTER phys=%p ci=%p alloc=%p dev=%p",
+         (void *)phys, (const void *)ci, (const void *)alloc, (void *)dev);
+
     pthread_mutex_lock(&g_lock);
     instance_data *inst = g_instances;
     pthread_mutex_unlock(&g_lock);
-    if (!inst) return VK_ERROR_INITIALIZATION_FAILED;
+    if (!inst) {
+        LOGE("layer_create_device: no instance_data — vkCreateInstance must precede vkCreateDevice");
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
 
     PFN_vkGetDeviceProcAddr fp_gdpa = NULL;
     PFN_vkCreateDevice fp_create = NULL;
+    int fat_layer_mode = 0;
+
+    /* ------------------------------------------------------------------ *
+     * PATH 1 (Khronos-compliant): walk the pNext chain for               *
+     * VK_STRUCTURE_TYPE_LOADER_DEVICE_CREATE_INFO with function ==       *
+     * VK_LAYER_LINK_INFO. Extract pfnNextGetDeviceProcAddr.              *
+     * This path is taken when the loader discovers us via manifest.      *
+     * ------------------------------------------------------------------ */
     const VkLayerDeviceCreateInfo *li = (const VkLayerDeviceCreateInfo *)ci->pNext;
     while (li) {
         if (li->sType == VK_STRUCTURE_TYPE_LOADER_DEVICE_CREATE_INFO &&
             li->function == VK_LAYER_LINK_INFO) {
             fp_gdpa = li->u.pLayerInfo->pfnNextGetDeviceProcAddr;
             fp_create = (PFN_vkCreateDevice)inst->vtable.get_instance_proc_addr(VK_NULL_HANDLE, "vkCreateDevice");
+            LOGI("layer_create_device: PATH 1 (chain walk) — fp_gdpa=%p fp_create=%p",
+                 (void *)fp_gdpa, (void *)fp_create);
             break;
         }
         li = (const VkLayerDeviceCreateInfo *)li->pNext;
     }
-    if (!fp_create || !fp_gdpa) return VK_ERROR_INITIALIZATION_FAILED;
+
+    /* ------------------------------------------------------------------ *
+     * PATH 2 (fat-layer fallback): if the chain walk failed (no          *
+     * VK_STRUCTURE_TYPE_LOADER_DEVICE_CREATE_INFO found), the layer      *
+     * was LD_PRELOAD'd instead of manifest-discovered. The loader did    *
+     * NOT construct the chain node, so we must obtain vkCreateDevice     *
+     * and vkGetDeviceProcAddr directly.                                  *
+     *                                                                    *
+     * Per Vulkan spec §3.3, vkCreateDevice is an instance-level          *
+     * function — it MUST be resolved via the instance's GIPA pointer     *
+     * (cached in inst->vtable.get_instance_proc_addr), NOT via dlsym    *
+     * on the host loader. The host loader's vkGetInstanceProcAddr can    *
+     * resolve vkCreateDevice with a NULL instance because it is a        *
+     * global function, but using the already-cached GIPA is the          *
+     * Khronos-correct path and works in both manifest and LD_PRELOAD     *
+     * modes.                                                              *
+     *                                                                    *
+     * For vkGetDeviceProcAddr, the host loader exports it as a global    *
+     * symbol — we resolve it via dlsym on the host Vulkan handle.        *
+     *                                                                    *
+     * Trade-off: same as layer_create_instance — no other layers can     *
+     * interpose when this path is taken. Acceptable for production.      *
+     * ------------------------------------------------------------------ */
+    if (!fp_create || !fp_gdpa) {
+        LOGW("layer_create_device: PATH 1 failed (chain walk found no VK_LAYER_LINK_INFO) — entering fat-layer fallback");
+        fat_layer_mode = 1;
+
+        /* vkCreateDevice: resolve via the cached instance GIPA. */
+        fp_create = (PFN_vkCreateDevice)inst->vtable.get_instance_proc_addr(VK_NULL_HANDLE, "vkCreateDevice");
+        if (!fp_create) {
+            /* Secondary fallback: dlsym on host loader (vkCreateDevice is
+             * exported by libvulkan.so as a global function). */
+            void *host_handle = get_host_vulkan_handle();
+            if (host_handle) {
+                fp_create = (PFN_vkCreateDevice)dlsym(host_handle, "vkCreateDevice");
+                LOGI("layer_create_device: PATH 2 secondary — fp_create via dlsym(host)=%p", (void *)fp_create);
+            }
+        }
+
+        /* vkGetDeviceProcAddr: resolve via dlsym on host Vulkan loader. */
+        void *host_handle = get_host_vulkan_handle();
+        if (host_handle) {
+            fp_gdpa = (PFN_vkGetDeviceProcAddr)dlsym(host_handle, "vkGetDeviceProcAddr");
+        }
+
+        LOGI("layer_create_device: PATH 2 (fat-layer) — fp_gdpa=%p fp_create=%p",
+             (void *)fp_gdpa, (void *)fp_create);
+
+        if (!fp_gdpa || !fp_create) {
+            LOGE("layer_create_device: fat-layer fallback FAILED (fp_gdpa=%p fp_create=%p)",
+                 (void *)fp_gdpa, (void *)fp_create);
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+    }
 
     /* Do NOT inject extensions — winevulkan rejects unexposed ones. */
     VkResult res = fp_create(phys, ci, alloc, dev);
+    LOGI("layer_create_device: vkCreateDevice returned res=%d device=%p",
+         res, (void *)(dev ? *dev : VK_NULL_HANDLE));
     if (res != VK_SUCCESS) return res;
 
     device_data *data = (device_data *)calloc(1, sizeof(*data));
@@ -1012,8 +1198,8 @@ static VkResult layer_create_device(VkPhysicalDevice phys, const VkDeviceCreateI
      * Rely entirely on standard Vulkan layer interception via
      * layer_get_device_proc_addr / layer_get_instance_proc_addr. */
 
-    LOGI("create_device: device=%p family=%u passthrough=%d",
-         (void *)*dev, data->queue_family, is_passthrough());
+    LOGI("create_device: device=%p family=%u passthrough=%d fat_layer_mode=%d",
+         (void *)*dev, data->queue_family, is_passthrough(), fat_layer_mode);
     return VK_SUCCESS;
 }
 
@@ -1184,39 +1370,83 @@ vkEnumerateInstanceLayerProperties(uint32_t *count, VkLayerProperties *props) {
 VK_LAYER_EXPORT VKAPI_ATTR VkResult VKAPI_CALL
 vkEnumerateInstanceExtensionProperties(const char *layer, uint32_t *count,
                                        VkExtensionProperties *props) {
+    /* ------------------------------------------------------------------ *
+     * Analysis of Impact (Protocol #1 + #3):                             *
+     *                                                                    *
+     * PREVIOUS IMPLEMENTATION (commit 9569b2f) used dlsym(RTLD_NEXT,     *
+     * "vkEnumerateInstanceExtensionProperties"). This violated Protocol  *
+     * #1 because RTLD_NEXT depends on load-order in the global symbol    *
+     * scope, which is non-deterministic when multiple layers or          *
+     * LD_PRELOAD libraries are present. It is also architecturally       *
+     * incorrect per Khronos Loader & Layer Interface §3.4: layers must   *
+     * obtain downstream function pointers via the chain established by   *
+     * the loader, not via symbol interposition.                          *
+     *                                                                    *
+     * NEW IMPLEMENTATION:                                                *
+     *   1. dlopen(NULL, RTLD_NOW) — returns a handle to the main         *
+     *      program; dlsym on it searches the global symbol scope, which  *
+     *      includes libvulkan.so if it's been loaded transitively.       *
+     *      This is the most reliable path because adrenotools links its  *
+     *      isolated namespace to the default namespace for "all libs"    *
+     *      (driver.cpp:78), so the main-program handle can still reach   *
+     *      the system libvulkan.so.                                      *
+     *   2. Fallback: explicit dlopen("libvulkan.so", RTLD_NOW) —         *
+     *      re-opens the system loader's libvulkan.so (cached; no actual  *
+     *      re-mapping) and gives us a deterministic handle.              *
+     *                                                                    *
+     * The handle and function pointer are cached in statics to avoid     *
+     * repeated dlopen/dlsym calls. dlopen is thread-safe per POSIX.      *
+     *                                                                    *
+     * LOGGING (Protocol #3): every milestone is logged — entry, layer    *
+     * arg, both dlsym attempts, final fp status, host call VkResult,     *
+     * returned count, exit. This is the diagnostic surface area we need  *
+     * to determine whether the layer is even reached and what fails.     *
+     * ------------------------------------------------------------------ */
+
+    LOGI("vkEnumerateInstanceExtensionProperties: ENTER layer=%s count=%p props=%p",
+         layer ? layer : "(NULL)", (void *)count, (void *)props);
+
     /* When layer != NULL, the caller is asking for THIS layer's extensions.
-     * We expose none, so return 0/empty.
-     *
-     * When layer == NULL, the caller is asking for the INSTANCE's extensions
-     * (which includes the HOST driver's extensions). We must FORWARD this to
-     * the HOST driver via dlsym, otherwise winevulkan's loader.c asserts
-     * because it expects vkEnumerateInstanceExtensionProperties(NULL, ...) to
-     * return the HOST's actual extensions.
-     *
-     * winevulkan loader.c line 466: assert(!status && "vkEnumerateInstanceExtensionProperties")
-     * This fires when the call returns non-VK_SUCCESS. Our layer was returning 0
-     * extensions but winevulkan expected the HOST's full extension list. */
+     * We expose none, so return 0/empty. */
     if (layer != NULL) {
-        *count = 0;
+        LOGI("vkEnumerateInstanceExtensionProperties: layer-specific query for '%s' → returning 0 extensions",
+             layer);
+        if (count) *count = 0;
         return VK_SUCCESS;
     }
 
-    /* Forward to the HOST driver's vkEnumerateInstanceExtensionProperties.
-     * We use dlsym(RTLD_NEXT, ...) to get the next symbol in the chain,
-     * which is the real Android Vulkan loader (libvulkan.so). */
+    /* Resolve HOST driver's vkEnumerateInstanceExtensionProperties
+     * via the shared host Vulkan handle (lazy-init'd via pthread_once). */
     static PFN_vkEnumerateInstanceExtensionProperties fp_host = NULL;
-    if (!fp_host) {
-        /* RTLD_NEXT skips our layer and finds the next symbol in the chain.
-         * This is the standard way for layers to forward calls. */
-        fp_host = (PFN_vkEnumerateInstanceExtensionProperties)
-            dlsym(RTLD_NEXT, "vkEnumerateInstanceExtensionProperties");
-    }
-    if (fp_host) {
-        return fp_host(NULL, count, props);
+    static int fp_resolved = 0; /* 0=unresolved, 1=resolved-ok, -1=failed */
+    if (!fp_resolved) {
+        void *host_handle = get_host_vulkan_handle();
+        if (host_handle) {
+            fp_host = (PFN_vkEnumerateInstanceExtensionProperties)
+                dlsym(host_handle, "vkEnumerateInstanceExtensionProperties");
+            LOGI("vkEnumerateInstanceExtensionProperties: host_handle=%p dlsym=%p",
+                 host_handle, (void *)fp_host);
+        } else {
+            LOGE("vkEnumerateInstanceExtensionProperties: no host Vulkan handle available");
+        }
+        fp_resolved = fp_host ? 1 : -1;
+        LOGI("vkEnumerateInstanceExtensionProperties: fp_host resolution status=%d",
+             fp_resolved);
     }
 
-    /* Fallback: no HOST driver found */
-    *count = 0;
+    if (fp_host) {
+        VkResult res = fp_host(NULL, count, props);
+        LOGI("vkEnumerateInstanceExtensionProperties: HOST returned res=%d count=%u",
+             res, count ? *count : 0u);
+        return res;
+    }
+
+    /* Fallback: no HOST driver found — return empty list with VK_SUCCESS.
+     * Note: this does NOT cause the winevulkan loader.c:466 assert because
+     * that assert checks NTSTATUS (IPC status), not VkResult. Our layer
+     * returning VK_SUCCESS with count=0 is harmless. */
+    LOGE("vkEnumerateInstanceExtensionProperties: no HOST driver resolvable — returning 0 extensions");
+    if (count) *count = 0;
     return VK_SUCCESS;
 }
 

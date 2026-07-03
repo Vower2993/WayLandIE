@@ -1082,6 +1082,35 @@ public class GuestProgramLauncherComponent extends EnvironmentComponent {
     envVars.put("SDL_GAMECONTROLLER_ALLOW_STEAM_VIRTUAL_GAMEPAD", "1");
     envVars.put("SDL_JOYSTICK_HIDAPI", "0");
 
+    // Prepend WayLandIE dmabuf Vulkan layer to LD_PRELOAD.
+    //
+    // The layer .so is installed by WaylandDriverInstaller to
+    // rootDir/usr/lib/libvk_layer_waylandie_dmabuf.so. LD_PRELOAD
+    // force-loads it into the Wine process address space before any
+    // other library, bypassing Android's Vulkan loader layer discovery
+    // (which cannot search app-writable paths on non-rooted devices).
+    //
+    // The layer's exported vkGetInstanceProcAddr / vkGetDeviceProcAddr
+    // interpose the system loader's versions. The fat-layer bootstrap
+    // in layer_create_instance / layer_create_device handles the case
+    // where the loader did NOT construct the VkLayerInstanceCreateInfo
+    // chain (which is always true under LD_PRELOAD).
+    //
+    // Only preload when WAYLANDIE_DMABUF_LAYER_ENABLE=1 is set upstream
+    // (Wayland display mode) to avoid interposing Vulkan in X11 mode.
+    String waylandieLayerEnable = this.envVars.get("WAYLANDIE_DMABUF_LAYER_ENABLE");
+    File waylandieLayerSo = new File(rootDir.getPath() + "/usr/lib", "libvk_layer_waylandie_dmabuf.so");
+    if ("1".equals(waylandieLayerEnable) && waylandieLayerSo.exists()) {
+        StringBuilder sb = new StringBuilder(waylandieLayerSo.getAbsolutePath());
+        if (!ld_preload.isEmpty()) {
+            sb.append(":").append(ld_preload);
+        }
+        ld_preload = sb.toString();
+        Log.i("GuestLauncher", "WayLandIE layer preloaded via LD_PRELOAD: " + waylandieLayerSo.getAbsolutePath());
+    } else {
+        Log.d("GuestLauncher", "WayLandIE layer NOT preloaded (enable=" + waylandieLayerEnable + " exists=" + waylandieLayerSo.exists() + ")");
+    }
+
     Log.d("GuestLauncher", "Final LD_PRELOAD: " + ld_preload);
     envVars.put("LD_PRELOAD", ld_preload);
 
