@@ -95,11 +95,15 @@ jobs:
         if [ ! -d /tmp/vulkan-headers ]; then
           git clone --depth=1 https://github.com/KhronosGroup/Vulkan-Headers.git /tmp/vulkan-headers
         fi
-        # Copy into a stable include path that the layer build script uses
+        # Copy the FULL include directory (vulkan/ + vk_video/) so all
+        # transitive includes resolve correctly.
         mkdir -p /tmp/vulkan-headers-install
         cp -r /tmp/vulkan-headers/include/vulkan /tmp/vulkan-headers-install/
+        cp -r /tmp/vulkan-headers/include/vk_video /tmp/vulkan-headers-install/
         echo "VULKAN_HEADERS_PATH=/tmp/vulkan-headers-install" >> $GITHUB_ENV
+        echo "Installed headers:"
         ls /tmp/vulkan-headers-install/vulkan/ | head -10
+        ls /tmp/vulkan-headers-install/vk_video/ | head -5
 
     - name: Ensure NDK is installed
       run: |
