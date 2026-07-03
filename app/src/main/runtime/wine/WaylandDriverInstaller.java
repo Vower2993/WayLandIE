@@ -131,6 +131,26 @@ public final class WaylandDriverInstaller {
             File winevulkanArm64ec = new File(winePath, "lib/wine/arm64ec-windows/winevulkan.dll");
             File winevulkanPrefix = new File(prefix, "drive_c/windows/system32/winevulkan.dll");
             File winevulkanSyswow64 = new File(prefix, "drive_c/windows/syswow64/winevulkan.dll");
+
+            // CRITICAL: Replace syswow64/winevulkan.dll with our source-built version.
+            //
+            // The syswow64/winevulkan.dll is loaded by 32-bit games (e.g. LIMBO).
+            // The Proton archive ships a Proton 9.0 version with a DIFFERENT vk.xml
+            // enum order than our proton_11.0 source-built winevulkan.so. This causes
+            // a PE/Unix dispatch table mismatch: the PE side calls
+            // WINE_UNIX_CALL(unix_vkCreateInstance) but the Unix side dispatches to
+            // thunk32_vkCreateOpticalFlowSessionNV (wrong function) → assert at
+            // loader.c:424.
+            //
+            // Fix: copy our source-built winevulkan.dll to syswow64, replacing the
+            // Proton 9.0 archive version. Both PE and Unix sides are now from the
+            // same proton_11.0 source with matching enums.
+            if (winevulkanAarch64.exists() && winevulkanAarch64.length() > 1000) {
+                copyFile(winevulkanAarch64, winevulkanSyswow64);
+                Log.i(TAG, "ensureDriverInstalled: replaced syswow64/winevulkan.dll with source-built version ("
+                        + winevulkanSyswow64.length() + " bytes) — fixes 32-bit PE/Unix enum mismatch");
+            }
+
             patchSurfaceExtension(winevulkanAarch64);
             patchSurfaceExtension(winevulkanArm64ec);
             patchSurfaceExtension(winevulkanPrefix);
