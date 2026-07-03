@@ -148,6 +148,15 @@ typedef struct swapchain_data {
     struct swapchain_data *next;
 } swapchain_data;
 
+/* Forward declarations for dispatch table patching. */
+static VkResult layer_create_swapchain(VkDevice, const VkSwapchainCreateInfoKHR *,
+                                       const VkAllocationCallbacks *, VkSwapchainKHR *);
+static void layer_destroy_swapchain(VkDevice, VkSwapchainKHR, const VkAllocationCallbacks *);
+static VkResult layer_get_swapchain_images(VkDevice, VkSwapchainKHR, uint32_t *, VkImage *);
+static VkResult layer_acquire_next_image(VkDevice, VkSwapchainKHR, uint64_t,
+                                         VkSemaphore, VkFence, uint32_t *);
+static VkResult layer_queue_present(VkQueue, const VkPresentInfoKHR *);
+
 /* ------------------------------------------------------------------ */
 /* Globals                                                            */
 /* ------------------------------------------------------------------ */
@@ -402,7 +411,7 @@ static VkResult create_blit_images(device_data *dd, VkFormat fmt,
     a_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     a_info.imageType = VK_IMAGE_TYPE_2D;
     a_info.format = fmt;
-    a_info.extent = {extent.width, extent.height, 1};
+    a_info.extent.width = extent.width; a_info.extent.height = extent.height; a_info.extent.depth = 1;
     a_info.mipLevels = 1;
     a_info.arrayLayers = 1;
     a_info.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -422,7 +431,7 @@ static VkResult create_blit_images(device_data *dd, VkFormat fmt,
     b_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     b_info.imageType = VK_IMAGE_TYPE_2D;
     b_info.format = fmt;
-    b_info.extent = {extent.width, extent.height, 1};
+    b_info.extent.width = extent.width; b_info.extent.height = extent.height; b_info.extent.depth = 1;
     b_info.mipLevels = 1;
     b_info.arrayLayers = 1;
     b_info.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -693,7 +702,7 @@ VkResult layer_acquire_next_image(VkDevice device, VkSwapchainKHR sw,
             bar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
             bar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
             bar.image = s->images[i].render_img;
-            bar.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+            bar.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT; bar.subresourceRange.levelCount = 1; bar.subresourceRange.layerCount = 1;
             VkPipelineStageFlags src = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
             VkPipelineStageFlags dst = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
             dd->vtable.cmd_pipeline_barrier(s->blit_cmd, src, dst, 0, 0, NULL, 0, NULL, 1, &bar);
@@ -762,7 +771,7 @@ VkResult layer_queue_present(VkQueue queue, const VkPresentInfoKHR *info) {
         bar_a.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         bar_a.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         bar_a.image = img->render_img;
-        bar_a.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        bar_a.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT; bar_a.subresourceRange.levelCount = 1; bar_a.subresourceRange.layerCount = 1;
 
         /* Transition staging image: UNDEFINED → TRANSFER_DST_OPTIMAL. */
         VkImageMemoryBarrier bar_b = {};
@@ -774,7 +783,7 @@ VkResult layer_queue_present(VkQueue queue, const VkPresentInfoKHR *info) {
         bar_b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         bar_b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         bar_b.image = img->staging_img;
-        bar_b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        bar_b.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT; bar_b.subresourceRange.levelCount = 1; bar_b.subresourceRange.layerCount = 1;
 
         VkImageMemoryBarrier bars[] = {bar_a, bar_b};
         VkPipelineStageFlags src_stages = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
@@ -784,9 +793,9 @@ VkResult layer_queue_present(VkQueue queue, const VkPresentInfoKHR *info) {
 
         /* Copy Image A → Image B. */
         VkImageCopy copy = {};
-        copy.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-        copy.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-        copy.extent = {img->width, img->height, 1};
+        copy.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT; copy.srcSubresource.layerCount = 1;
+        copy.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT; copy.dstSubresource.layerCount = 1;
+        copy.extent.width = img->width; copy.extent.height = img->height; copy.extent.depth = 1;
         dd->vtable.cmd_copy_image(s->blit_cmd, img->render_img, img->staging_img,
                                   VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
@@ -801,7 +810,7 @@ VkResult layer_queue_present(VkQueue queue, const VkPresentInfoKHR *info) {
         bar_c.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         bar_c.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         bar_c.image = img->staging_img;
-        bar_c.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        bar_c.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT; bar_c.subresourceRange.levelCount = 1; bar_c.subresourceRange.layerCount = 1;
         dd->vtable.cmd_pipeline_barrier(s->blit_cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
                                         VK_PIPELINE_STAGE_HOST_BIT, 0, 0, NULL, 0, NULL, 1, &bar_c);
 
