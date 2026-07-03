@@ -318,6 +318,21 @@ public final class WaylandDriverInstaller {
                 Log.e(TAG, "installDmabufLayer: failed to write manifest", e);
             }
 
+            // CRITICAL: Copy the .so into the SAME directory as the manifest.
+            //
+            // The manifest's library_path is "libvk_layer_waylandie_dmabuf.so"
+            // (relative). The Vulkan loader resolves relative library_path
+            // against the manifest's directory (implicit_layer.d/), NOT against
+            // LD_LIBRARY_PATH. Without this copy, the loader cannot find the
+            // .so and layer discovery fails silently.
+            //
+            // We keep the usr/lib/ copy too (for LD_LIBRARY_PATH compatibility
+            // and potential future dlopen-based approaches).
+            File manifestDirSo = new File(layerDir, "libvk_layer_waylandie_dmabuf.so");
+            copyFile(layerSo, manifestDirSo);
+            Log.i(TAG, "installDmabufLayer: copied .so next to manifest: " + manifestDirSo
+                    + " (" + manifestDirSo.length() + " bytes)");
+
             Log.i(TAG, "installDmabufLayer: layer installed — will be enabled by "
                     + "WAYLANDIE_DMABUF_LAYER_ENABLE=1 env var at runtime");
         } catch (Exception e) {
