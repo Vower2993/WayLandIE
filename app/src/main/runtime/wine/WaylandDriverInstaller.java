@@ -436,8 +436,14 @@ public final class WaylandDriverInstaller {
         copyIfExists(prefix, "lib/wine/aarch64-windows/winewayland.drv", system32);
         copyIfExists(prefix, "lib/wine/aarch64-windows/libarm64ecfex.dll", system32);
         copyIfExists(prefix, "lib/wine/aarch64-windows/ntdll.dll", system32);
-        // Do NOT copy winevulkan.dll — keep Proton's original PE side
-        // to avoid enum/dispatch table mismatch with the wine64 binary.
+        // CRITICAL: Copy source-built winevulkan.dll to system32.
+        // The system32/winevulkan.dll is loaded by 64-bit games (e.g. ROTTR).
+        // If it's Proton 9.0's original (from the archive), its dispatch table
+        // enum doesn't match our proton_11.0 source-built winevulkan.so →
+        // vkCreateInstance dispatches to the wrong Unix function → failure.
+        // Both PE (system32) and Unix (winevulkan.so) sides MUST be from the
+        // same proton_11.0 source.
+        copyIfExists(prefix, "lib/wine/aarch64-windows/winevulkan.dll", system32);
     }
 
     /**
