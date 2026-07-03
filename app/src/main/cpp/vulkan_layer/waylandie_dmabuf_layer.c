@@ -1184,6 +1184,38 @@ vkEnumerateInstanceLayerProperties(uint32_t *count, VkLayerProperties *props) {
 VK_LAYER_EXPORT VKAPI_ATTR VkResult VKAPI_CALL
 vkEnumerateInstanceExtensionProperties(const char *layer, uint32_t *count,
                                        VkExtensionProperties *props) {
+    /* When layer != NULL, the caller is asking for THIS layer's extensions.
+     * We expose none, so return 0/empty.
+     *
+     * When layer == NULL, the caller is asking for the INSTANCE's extensions
+     * (which includes the HOST driver's extensions). We must FORWARD this to
+     * the HOST driver via dlsym, otherwise winevulkan's loader.c asserts
+     * because it expects vkEnumerateInstanceExtensionProperties(NULL, ...) to
+     * return the HOST's actual extensions.
+     *
+     * winevulkan loader.c line 466: assert(!status && "vkEnumerateInstanceExtensionProperties")
+     * This fires when the call returns non-VK_SUCCESS. Our layer was returning 0
+     * extensions but winevulkan expected the HOST's full extension list. */
+    if (layer != NULL) {
+        *count = 0;
+        return VK_SUCCESS;
+    }
+
+    /* Forward to the HOST driver's vkEnumerateInstanceExtensionProperties.
+     * We use dlsym(RTLD_NEXT, ...) to get the next symbol in the chain,
+     * which is the real Android Vulkan loader (libvulkan.so). */
+    static PFN_vkEnumerateInstanceExtensionProperties fp_host = NULL;
+    if (!fp_host) {
+        /* RTLD_NEXT skips our layer and finds the next symbol in the chain.
+         * This is the standard way for layers to forward calls. */
+        fp_host = (PFN_vkEnumerateInstanceExtensionProperties)
+            dlsym(RTLD_NEXT, "vkEnumerateInstanceExtensionProperties");
+    }
+    if (fp_host) {
+        return fp_host(NULL, count, props);
+    }
+
+    /* Fallback: no HOST driver found */
     *count = 0;
     return VK_SUCCESS;
 }
