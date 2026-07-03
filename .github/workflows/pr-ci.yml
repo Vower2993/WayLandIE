@@ -27,12 +27,12 @@ jobs:
       fail-fast: false
       matrix:
         flavor:
-          # Single-target: Pubg only for faster iteration (~5 min vs 13 min)
-          # Re-enable other variants once the display pipeline is working.
-          - name: Pubg
-            artifactName: apk-pubg
-            gradleTask: assemblePubgDebug
-            apkPath: app/build/outputs/apk/pubg/debug/pubg.apk
+          # Single-target: Ludashi only — the user can only install/use this variant.
+          # Building pubg/standard wastes CI time and produces APKs nobody can run.
+          - name: Ludashi
+            artifactName: apk-ludashi
+            gradleTask: assembleLudashiDebug
+            apkPath: app/build/outputs/apk/ludashi/debug/ludashi.apk
 
     steps:
     - name: Clone repository
