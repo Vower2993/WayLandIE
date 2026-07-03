@@ -54,6 +54,37 @@
 #define AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM 5
 #endif
 
+/* VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR = 1000009000 */
+#define WAYLANDIE_VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR 1000009000
+/* VK_STRUCTURE_TYPE_XLIB_SURFACE_CREATE_INFO_KHR = 1000004000 */
+#define WAYLANDIE_VK_STRUCTURE_TYPE_XLIB_SURFACE_CREATE_INFO_KHR 1000004000
+
+/* VkWin32SurfaceCreateInfoKHR — defined manually because VK_USE_PLATFORM_WIN32_KHR
+ * requires <windows.h> which isn't available on Android. The layout matches
+ * the Vulkan spec: two void* fields (HINSTANCE, HWND) after the standard header. */
+typedef struct {
+    VkStructureType sType;
+    const void *pNext;
+    VkFlags flags;
+    void *hinstance;
+    void *hwnd;
+} waylandie_VkWin32SurfaceCreateInfoKHR;
+
+/* VkXlibSurfaceCreateInfoKHR — defined manually because VK_USE_PLATFORM_XLIB_KHR
+ * requires <X11/Xlib.h> which isn't available on Android. The adrenotools wrapper
+ * accepts opaque pointers, so we use void* for Display* and uint64_t for Window. */
+typedef struct {
+    VkStructureType sType;
+    const void *pNext;
+    VkFlags flags;
+    void *dpy;       /* Display* — opaque, adrenotools ignores it */
+    uint64_t window; /* Window (unsigned long on 64-bit) — ANativeWindow* */
+} waylandie_VkXlibSurfaceCreateInfoKHR;
+
+typedef VkResult (*waylandie_PFN_vkCreateXlibSurfaceKHR)(
+    VkInstance, const waylandie_VkXlibSurfaceCreateInfoKHR *,
+    const VkAllocationCallbacks *, VkSurfaceKHR *);
+
 #define LOG_TAG "WayLandIE/Layer"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
 #define LOGW(...) __android_log_print(ANDROID_LOG_WARN,  LOG_TAG, __VA_ARGS__)
@@ -1022,6 +1053,83 @@ static void layer_destroy_device(VkDevice dev, const VkAllocationCallbacks *allo
 static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
 layer_get_device_proc_addr(VkDevice dev, const char *name);
 
+/* ------------------------------------------------------------------ */
+/* RUNTIME SURFACE OVERRIDE                                           */
+/*                                                                    */
+/* winevulkan's Unix side doesn't have vkCreateWin32SurfaceKHR in its */
+/* dispatch table (VK_USE_PLATFORM_WIN32_KHR not defined at build     */
+/* time). When winevulkan can't find it, it falls through to the HOST */
+/* driver's vkGetInstanceProcAddr — which goes through OUR layer.     */
+/*                                                                    */
+/* We intercept the query and return a custom implementation that     */
+/* calls vkCreateXlibSurfaceKHR with the ANativeWindow from the env   */
+/* var WAYLANDIE_ANATIVE_WINDOW. The adrenotools wrapper translates   */
+/* xlib_surface → android_surface internally.                         */
+/* ------------------------------------------------------------------ */
+
+static VkResult VKAPI_CALL layer_create_win32_surface(
+    VkInstance instance,
+    const void *pCreateInfo,
+    const VkAllocationCallbacks *pAllocator,
+    VkSurfaceKHR *pSurface)
+{
+    const waylandie_VkWin32SurfaceCreateInfoKHR *info =
+        (const waylandie_VkWin32SurfaceCreateInfoKHR *)pCreateInfo;
+
+    /* Get ANativeWindow from env var (set by Java side) */
+    const char *anw_env = getenv("WAYLANDIE_ANATIVE_WINDOW");
+    if (!anw_env || !anw_env[0]) {
+        LOGE("layer_create_win32_surface: WAYLANDIE_ANATIVE_WINDOW not set — cannot create surface");
+        return VK_ERROR_NATIVE_WINDOW_IN_USE_KHR;
+    }
+    uint64_t anw_val = strtoull(anw_env, NULL, 0);
+    if (!anw_val) {
+        LOGE("layer_create_win32_surface: invalid ANativeWindow value: %s", anw_env);
+        return VK_ERROR_NATIVE_WINDOW_IN_USE_KHR;
+    }
+
+    /* Find instance_data to get the next layer's GIPA */
+    instance_data *id = find_instance(instance);
+    if (!id || !id->vtable.get_instance_proc_addr) {
+        LOGE("layer_create_win32_surface: no instance_data for instance=%p", (void *)instance);
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+
+    /* Resolve vkCreateXlibSurfaceKHR from the HOST driver (next layer) */
+    waylandie_PFN_vkCreateXlibSurfaceKHR fp_create_xlib =
+        (waylandie_PFN_vkCreateXlibSurfaceKHR)id->vtable.get_instance_proc_addr(instance, "vkCreateXlibSurfaceKHR");
+    if (!fp_create_xlib) {
+        LOGE("layer_create_win32_surface: vkCreateXlibSurfaceKHR not available on HOST");
+        return VK_ERROR_EXTENSION_NOT_PRESENT;
+    }
+
+    /* Create Xlib surface using the ANativeWindow as the Xlib Window.
+     * The adrenotools wrapper ignores dpy and uses the window directly. */
+    waylandie_VkXlibSurfaceCreateInfoKHR xlib_info;
+    xlib_info.sType = (VkStructureType)WAYLANDIE_VK_STRUCTURE_TYPE_XLIB_SURFACE_CREATE_INFO_KHR;
+    xlib_info.pNext = NULL;
+    xlib_info.flags = 0;
+    xlib_info.dpy = NULL;
+    xlib_info.window = anw_val;
+
+    VkResult res = fp_create_xlib(instance, &xlib_info, pAllocator, pSurface);
+    LOGI("layer_create_win32_surface: hwnd=%p anw=0x%llx → surface=%p res=%d",
+         info ? info->hwnd : NULL, (unsigned long long)anw_val,
+         pSurface ? (void *)*pSurface : NULL, res);
+    return res;
+}
+
+static VkBool32 VKAPI_CALL layer_get_win32_presentation_support(
+    VkPhysicalDevice physical_device,
+    uint32_t queue_family_index)
+{
+    /* The HOST driver supports presentation on all queue families via
+     * VK_KHR_xlib_surface. Return VK_TRUE so DXVK proceeds with surface creation. */
+    LOGI("layer_get_win32_presentation_support: phys_dev=%p family=%u → TRUE",
+         (void *)physical_device, queue_family_index);
+    return VK_TRUE;
+}
+
 static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
 layer_get_instance_proc_addr(VkInstance inst, const char *name) {
     if (!name) return NULL;
@@ -1031,6 +1139,12 @@ layer_get_instance_proc_addr(VkInstance inst, const char *name) {
     if (!strcmp(name, "vkDestroyInstance")) return (PFN_vkVoidFunction)layer_destroy_instance;
     if (!strcmp(name, "vkCreateDevice")) return (PFN_vkVoidFunction)layer_create_device;
     if (!strcmp(name, "vkDestroyDevice")) return (PFN_vkVoidFunction)layer_destroy_device;
+    /* RUNTIME SURFACE OVERRIDE: inject Win32 surface functions that winevulkan
+     * doesn't have (VK_USE_PLATFORM_WIN32_KHR not defined on Unix side).
+     * When winevulkan falls through to HOST vkGetInstanceProcAddr, our layer
+     * returns these custom implementations. */
+    if (!strcmp(name, "vkCreateWin32SurfaceKHR")) return (PFN_vkVoidFunction)layer_create_win32_surface;
+    if (!strcmp(name, "vkGetPhysicalDeviceWin32PresentationSupportKHR")) return (PFN_vkVoidFunction)layer_get_win32_presentation_support;
     if (!strcmp(name, "vkCreateSwapchainKHR")) return (PFN_vkVoidFunction)layer_create_swapchain;
     if (!strcmp(name, "vkDestroySwapchainKHR")) return (PFN_vkVoidFunction)layer_destroy_swapchain;
     if (!strcmp(name, "vkGetSwapchainImagesKHR")) return (PFN_vkVoidFunction)layer_get_swapchain_images;
