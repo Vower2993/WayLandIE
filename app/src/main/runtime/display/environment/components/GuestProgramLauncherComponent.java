@@ -1082,34 +1082,34 @@ public class GuestProgramLauncherComponent extends EnvironmentComponent {
     envVars.put("SDL_GAMECONTROLLER_ALLOW_STEAM_VIRTUAL_GAMEPAD", "1");
     envVars.put("SDL_JOYSTICK_HIDAPI", "0");
 
-    // Prepend WayLandIE dmabuf Vulkan layer to LD_PRELOAD.
+    // NOTE: LD_PRELOAD-based Vulkan layer injection was REMOVED.
     //
-    // The layer .so is installed by WaylandDriverInstaller to
-    // rootDir/usr/lib/libvk_layer_waylandie_dmabuf.so. LD_PRELOAD
-    // force-loads it into the Wine process address space before any
-    // other library, bypassing Android's Vulkan loader layer discovery
-    // (which cannot search app-writable paths on non-rooted devices).
+    // The previous approach (commit 0862a28) prepended
+    // libvk_layer_waylandie_dmabuf.so to LD_PRELOAD. This caused a
+    // fork-exec-die loop: the wine/FEX process died immediately after
+    // exec because the layer's exported vkGetInstanceProcAddr /
+    // vkGetDeviceProcAddr interposed the system loader's symbols BEFORE
+    // libvulkan.so was loaded, causing the wine preloader to fail.
     //
-    // The layer's exported vkGetInstanceProcAddr / vkGetDeviceProcAddr
-    // interpose the system loader's versions. The fat-layer bootstrap
-    // in layer_create_instance / layer_create_device handles the case
-    // where the loader did NOT construct the VkLayerInstanceCreateInfo
-    // chain (which is always true under LD_PRELOAD).
+    // The original WinNative project (github.com/WinNative-Emu) never
+    // uses LD_PRELOAD for Vulkan layers — it loads libvulkan.so via
+    // dlopen(RTLD_LOCAL) from native code instead. LD_PRELOAD of a
+    // Vulkan layer is architecturally incompatible with this wine/FEX
+    // setup because the wine preloader has its own ELF loading logic
+    // that runs before the Android dynamic linker.
     //
-    // Only preload when WAYLANDIE_DMABUF_LAYER_ENABLE=1 is set upstream
-    // (Wayland display mode) to avoid interposing Vulkan in X11 mode.
-    String waylandieLayerEnable = this.envVars.get("WAYLANDIE_DMABUF_LAYER_ENABLE");
-    File waylandieLayerSo = new File(rootDir.getPath() + "/usr/lib", "libvk_layer_waylandie_dmabuf.so");
-    if ("1".equals(waylandieLayerEnable) && waylandieLayerSo.exists()) {
-        StringBuilder sb = new StringBuilder(waylandieLayerSo.getAbsolutePath());
-        if (!ld_preload.isEmpty()) {
-            sb.append(":").append(ld_preload);
-        }
-        ld_preload = sb.toString();
-        Log.i("GuestLauncher", "WayLandIE layer preloaded via LD_PRELOAD: " + waylandieLayerSo.getAbsolutePath());
-    } else {
-        Log.d("GuestLauncher", "WayLandIE layer NOT preloaded (enable=" + waylandieLayerEnable + " exists=" + waylandieLayerSo.exists() + ")");
-    }
+    // The winevulkan NULL-guard patch (Phase 6, in build-winewayland-
+    // driver.sh) is KEPT — it is a pure safety improvement that
+    // converts a NULL-deref crash into VK_ERROR_INITIALIZATION_FAILED
+    // and does not require any layer to be loaded.
+    //
+    // Alternative layer injection mechanisms to investigate in a future
+    // phase:
+    //   1. Patch winevulkan.so to dlopen() the layer at vkCreateInstance
+    //      time (similar to how adrenotools loads its hook).
+    //   2. Use adrenotools' hook mechanism to inject the layer via the
+    //      isolated linker namespace.
+    //   3. Place the layer .so in /system/lib64/ (requires root).
 
     Log.d("GuestLauncher", "Final LD_PRELOAD: " + ld_preload);
     envVars.put("LD_PRELOAD", ld_preload);
