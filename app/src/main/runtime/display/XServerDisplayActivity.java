@@ -6303,7 +6303,7 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
                 envVars.put("SteamPath", "C:\\Program Files (x86)\\Steam");
                 envVars.put("ValvePlatformMutex", "c:\\Program Files (x86)\\Steam/");
                 String currentWineDebug = envVars.get("WINEDEBUG");
-                if (currentWineDebug == null || currentWineDebug.equals("-all")) {
+                if (currentWineDebug == null || currentWineDebug.isEmpty()) {
                     envVars.put("WINEDEBUG", "-all");  // Performance: disable Wine debug logging
                 }
                 Log.i("XServerDisplayActivity",
@@ -6579,7 +6579,19 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
             // This is the Level 2 zero-copy path — no CPU memcpy, no runtime patching.
             envVars.put("WAYLANDIE_DMABUF_LAYER_ENABLE", "1");
             envVars.put("WAYLANDIE_BRIDGE_SOCKET", "waylandie.display.bridge.v1");
-            Log.i("XServerDisplayActivity", "WaylandIE dmabuf layer enabled");
+
+            // === GLOBAL DIAGNOSTIC TRACING — full stack visibility ===
+            // Force Wine to trace vulkan, winewayland, and x11 subsystems so we
+            // see every surface creation attempt, display connection, and failure.
+            // These channels are cheap (not +relay) and route to stderr/stdout
+            // which is captured in wine_limbo_*.txt logs.
+            envVars.put("WINEDEBUG", "+vulkan,+winewayland,+x11");
+
+            // DXVK telemetry: log extension probing and pipeline compilation stalls
+            envVars.put("DXVK_LOG_LEVEL", "info");
+            envVars.put("DXVK_HUD", "fps,compiler");
+
+            Log.i("XServerDisplayActivity", "WaylandIE dmabuf layer enabled — diagnostic tracing ON");
         }
         environment.addComponent(guestProgramLauncherComponent);
 

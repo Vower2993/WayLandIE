@@ -27,14 +27,8 @@ jobs:
       fail-fast: false
       matrix:
         flavor:
-          - name: Standard
-            artifactName: apk-standard
-            gradleTask: assembleStandardDebug
-            apkPath: app/build/outputs/apk/standard/debug/standard.apk
-          - name: Ludashi
-            artifactName: apk-ludashi
-            gradleTask: assembleLudashiDebug
-            apkPath: app/build/outputs/apk/ludashi/debug/ludashi.apk
+          # Single-target: Pubg only for faster iteration (~5 min vs 13 min)
+          # Re-enable other variants once the display pipeline is working.
           - name: Pubg
             artifactName: apk-pubg
             gradleTask: assemblePubgDebug
@@ -89,9 +83,23 @@ jobs:
 
     - name: Install meson + ninja + wayland-scanner deps
       run: |
-        sudo apt-get install -y -qq ninja-build libwayland-bin wayland-protocols libffi-dev libexpat1-dev pkg-config libxml2-dev libxkbcommon-dev
+        sudo apt-get update && sudo apt-get install -y -qq ninja-build libwayland-bin wayland-protocols libffi-dev libexpat1-dev pkg-config libxml2-dev libxkbcommon-dev libvulkan-dev
         pip3 install --user --break-system-packages meson>=1.4.0 mako
         echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+    - name: Install official Khronos Vulkan headers for layer build
+      run: |
+        # Clone the official Khronos Vulkan headers so the layer can use
+        # standard VkWin32SurfaceCreateInfoKHR, VkXlibSurfaceCreateInfoKHR,
+        # PFN_vkCreateXlibSurfaceKHR, etc. — no more manual struct definitions.
+        if [ ! -d /tmp/vulkan-headers ]; then
+          git clone --depth=1 https://github.com/KhronosGroup/Vulkan-Headers.git /tmp/vulkan-headers
+        fi
+        # Copy into a stable include path that the layer build script uses
+        mkdir -p /tmp/vulkan-headers-install
+        cp -r /tmp/vulkan-headers/include/vulkan /tmp/vulkan-headers-install/
+        echo "VULKAN_HEADERS_PATH=/tmp/vulkan-headers-install" >> $GITHUB_ENV
+        ls /tmp/vulkan-headers-install/vulkan/ | head -10
 
     - name: Ensure NDK is installed
       run: |

@@ -27,6 +27,12 @@
  * Copyright 2024 WayLandIE Project */
 
 #define _GNU_SOURCE
+
+/* Platform type stubs (HINSTANCE, HWND, Display, Window) are provided by
+ * stub_includes/windows.h and stub_includes/X11/Xlib.h, included by the
+ * Khronos vulkan.h when VK_USE_PLATFORM_WIN32_KHR / VK_USE_PLATFORM_XLIB_KHR
+ * are defined. See build-waylandie-dmabuf-layer.sh for -I path. */
+
 #include <vulkan/vk_layer.h>
 #include <vulkan/vulkan.h>
 #include <vulkan/vulkan_android.h>
@@ -54,36 +60,13 @@
 #define AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM 5
 #endif
 
-/* VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR = 1000009000 */
-#define WAYLANDIE_VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR 1000009000
-/* VK_STRUCTURE_TYPE_XLIB_SURFACE_CREATE_INFO_KHR = 1000004000 */
-#define WAYLANDIE_VK_STRUCTURE_TYPE_XLIB_SURFACE_CREATE_INFO_KHR 1000004000
-
-/* VkWin32SurfaceCreateInfoKHR — defined manually because VK_USE_PLATFORM_WIN32_KHR
- * requires <windows.h> which isn't available on Android. The layout matches
- * the Vulkan spec: two void* fields (HINSTANCE, HWND) after the standard header. */
-typedef struct {
-    VkStructureType sType;
-    const void *pNext;
-    VkFlags flags;
-    void *hinstance;
-    void *hwnd;
-} waylandie_VkWin32SurfaceCreateInfoKHR;
-
-/* VkXlibSurfaceCreateInfoKHR — defined manually because VK_USE_PLATFORM_XLIB_KHR
- * requires <X11/Xlib.h> which isn't available on Android. The adrenotools wrapper
- * accepts opaque pointers, so we use void* for Display* and uint64_t for Window. */
-typedef struct {
-    VkStructureType sType;
-    const void *pNext;
-    VkFlags flags;
-    void *dpy;       /* Display* — opaque, adrenotools ignores it */
-    uint64_t window; /* Window (unsigned long on 64-bit) — ANativeWindow* */
-} waylandie_VkXlibSurfaceCreateInfoKHR;
-
-typedef VkResult (*waylandie_PFN_vkCreateXlibSurfaceKHR)(
-    VkInstance, const waylandie_VkXlibSurfaceCreateInfoKHR *,
-    const VkAllocationCallbacks *, VkSurfaceKHR *);
+/* The official Khronos Vulkan headers are used (installed via libvulkan-dev
+ * or cloned from KhronosGroup/Vulkan-Headers in CI). With
+ * -DVK_USE_PLATFORM_WIN32_KHR and -DVK_USE_PLATFORM_XLIB_KHR defined at
+ * compile time, the standard types VkWin32SurfaceCreateInfoKHR,
+ * VkXlibSurfaceCreateInfoKHR, and PFN_vkCreateXlibSurfaceKHR are available
+ * directly from <vulkan/vulkan.h>. The HINSTANCE/HWND/Display/Window
+ * types are stubbed above so the struct definitions compile. */
 
 #define LOG_TAG "WayLandIE/Layer"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
@@ -1069,15 +1052,16 @@ layer_get_device_proc_addr(VkDevice dev, const char *name);
 
 static VkResult VKAPI_CALL layer_create_win32_surface(
     VkInstance instance,
-    const void *pCreateInfo,
+    const VkWin32SurfaceCreateInfoKHR *pCreateInfo,
     const VkAllocationCallbacks *pAllocator,
     VkSurfaceKHR *pSurface)
 {
-    const waylandie_VkWin32SurfaceCreateInfoKHR *info =
-        (const waylandie_VkWin32SurfaceCreateInfoKHR *)pCreateInfo;
-
     /* Get ANativeWindow from env var (set by Java side) */
     const char *anw_env = getenv("WAYLANDIE_ANATIVE_WINDOW");
+    LOGI("layer_create_win32_surface: called — instance=%p hwnd=%p WAYLANDIE_ANATIVE_WINDOW=%s",
+         (void *)instance, pCreateInfo ? (void *)pCreateInfo->hwnd : NULL,
+         anw_env ? anw_env : "(null)");
+
     if (!anw_env || !anw_env[0]) {
         LOGE("layer_create_win32_surface: WAYLANDIE_ANATIVE_WINDOW not set — cannot create surface");
         return VK_ERROR_NATIVE_WINDOW_IN_USE_KHR;
@@ -1087,6 +1071,8 @@ static VkResult VKAPI_CALL layer_create_win32_surface(
         LOGE("layer_create_win32_surface: invalid ANativeWindow value: %s", anw_env);
         return VK_ERROR_NATIVE_WINDOW_IN_USE_KHR;
     }
+    LOGI("layer_create_win32_surface: resolved ANativeWindow pointer=0x%llx",
+         (unsigned long long)anw_val);
 
     /* Find instance_data to get the next layer's GIPA */
     instance_data *id = find_instance(instance);
@@ -1096,26 +1082,26 @@ static VkResult VKAPI_CALL layer_create_win32_surface(
     }
 
     /* Resolve vkCreateXlibSurfaceKHR from the HOST driver (next layer) */
-    waylandie_PFN_vkCreateXlibSurfaceKHR fp_create_xlib =
-        (waylandie_PFN_vkCreateXlibSurfaceKHR)id->vtable.get_instance_proc_addr(instance, "vkCreateXlibSurfaceKHR");
+    PFN_vkCreateXlibSurfaceKHR fp_create_xlib =
+        (PFN_vkCreateXlibSurfaceKHR)id->vtable.get_instance_proc_addr(instance, "vkCreateXlibSurfaceKHR");
     if (!fp_create_xlib) {
         LOGE("layer_create_win32_surface: vkCreateXlibSurfaceKHR not available on HOST");
         return VK_ERROR_EXTENSION_NOT_PRESENT;
     }
+    LOGI("layer_create_win32_surface: resolved vkCreateXlibSurfaceKHR=%p", (void *)fp_create_xlib);
 
     /* Create Xlib surface using the ANativeWindow as the Xlib Window.
      * The adrenotools wrapper ignores dpy and uses the window directly. */
-    waylandie_VkXlibSurfaceCreateInfoKHR xlib_info;
-    xlib_info.sType = (VkStructureType)WAYLANDIE_VK_STRUCTURE_TYPE_XLIB_SURFACE_CREATE_INFO_KHR;
+    VkXlibSurfaceCreateInfoKHR xlib_info;
+    xlib_info.sType = VK_STRUCTURE_TYPE_XLIB_SURFACE_CREATE_INFO_KHR;
     xlib_info.pNext = NULL;
     xlib_info.flags = 0;
     xlib_info.dpy = NULL;
-    xlib_info.window = anw_val;
+    xlib_info.window = (Window)(uintptr_t)anw_val;
 
     VkResult res = fp_create_xlib(instance, &xlib_info, pAllocator, pSurface);
-    LOGI("layer_create_win32_surface: hwnd=%p anw=0x%llx → surface=%p res=%d",
-         info ? info->hwnd : NULL, (unsigned long long)anw_val,
-         pSurface ? (void *)*pSurface : NULL, res);
+    LOGI("layer_create_win32_surface: vkCreateXlibSurfaceKHR returned res=%d surface=%p",
+         res, pSurface ? (void *)*pSurface : NULL);
     return res;
 }
 

@@ -42,6 +42,31 @@ if [ ! -x "$CC" ]; then
 fi
 
 echo "=== Compiling waylandie_dmabuf_layer.c ==="
+
+# Use official Khronos Vulkan headers if available (set by CI workflow).
+# This gives us standard VkWin32SurfaceCreateInfoKHR, VkXlibSurfaceCreateInfoKHR,
+# PFN_vkCreateXlibSurfaceKHR, etc. — no manual struct definitions needed.
+VULKAN_INCLUDE=""
+if [ -n "${VULKAN_HEADERS_PATH:-}" ] && [ -d "$VULKAN_HEADERS_PATH/vulkan" ]; then
+    VULKAN_INCLUDE="-I$VULKAN_HEADERS_PATH"
+    echo "Using Khronos Vulkan headers from: $VULKAN_HEADERS_PATH"
+elif [ -d /usr/include/vulkan ] && [ -f /usr/include/vulkan/vulkan.h ]; then
+    VULKAN_INCLUDE="-I/usr/include"
+    echo "Using system Vulkan headers from: /usr/include"
+else
+    echo "WARNING: No Khronos Vulkan headers found — falling back to NDK sysroot headers"
+fi
+
+# Stub platform headers for cross-compilation on Android.
+# The Khronos vulkan.h #includes <windows.h> and <X11/Xlib.h> when
+# VK_USE_PLATFORM_WIN32_KHR / VK_USE_PLATFORM_XLIB_KHR are defined.
+# These stubs provide minimal type definitions (HINSTANCE, HWND, Display,
+# Window) so the struct layouts compile. We never call these platform APIs.
+STUB_INCLUDES="-I$(dirname "$SRC")/stub_includes"
+
+# Define VK_USE_PLATFORM_WIN32_KHR and VK_USE_PLATFORM_XLIB_KHR so the
+# standard Khronos headers define VkWin32SurfaceCreateInfoKHR and
+# VkXlibSurfaceCreateInfoKHR. The stub headers provide the platform types.
 "$CC" \
     -Wall -Wextra -Wno-unused-parameter \
     -O2 \
@@ -49,7 +74,11 @@ echo "=== Compiling waylandie_dmabuf_layer.c ==="
     -fvisibility=hidden \
     --sysroot="$SYSROOT" \
     -I"$SYSROOT/usr/include" \
+    $VULKAN_INCLUDE \
+    $STUB_INCLUDES \
     -DVK_USE_PLATFORM_ANDROID_KHR \
+    -DVK_USE_PLATFORM_WIN32_KHR \
+    -DVK_USE_PLATFORM_XLIB_KHR \
     -D__ANDROID_API__=$API \
     -c "$SRC" \
     -o /tmp/waylandie_dmabuf_layer.o
