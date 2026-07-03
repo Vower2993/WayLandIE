@@ -1203,22 +1203,14 @@ fi
 # defined, so vkCreateWin32SurfaceKHR is in the dispatch table and
 # resolvable via vkGetInstanceProcAddr.
 echo "=== Collecting winevulkan.dll (PE side) ==="
-# Copy each arch-specific build to its matching destination.
-# The aarch64 and arm64ec PEs are DIFFERENT binaries (different machine type,
-# different code sections) — copying one to both dirs causes Wine's PE loader
-# to load the wrong-arch PE for 32-bit games (LIMBO) running under FEX,
-# which manifests as thunk enum mismatch (e.g. thunk32_vkCreateOpticalFlow
-# dispatched for vkCreateInstance).
-# NOTE: unlike ntdll.dll (which IS a single hybrid PE per the comment above),
-# winevulkan.dll is built as two separate PEs by the make target list above.
-for src_dst in \
-  "/tmp/proton-wine/dlls/winevulkan/aarch64-windows/winevulkan.dll:aarch64-windows" \
-  "/tmp/proton-wine/dlls/winevulkan/arm64ec-windows/winevulkan.dll:arm64ec-windows"; do
-  src="${src_dst%:*}"
-  dst_arch="${src_dst#*:}"
-  if [ -f "$src" ] && [ "$(stat -c%s "$src")" -gt 1000 ]; then
-    echo "Found winevulkan PE: $src ($(stat -c%s "$src") bytes) -> $dst_arch/"
-    cp "$src" "$PROTON_OUT/lib/wine/$dst_arch/winevulkan.dll"
+for f in \
+  "/tmp/proton-wine/dlls/winevulkan/aarch64-windows/winevulkan.dll" \
+  "/tmp/proton-wine/dlls/winevulkan/arm64ec-windows/winevulkan.dll"; do
+  if [ -f "$f" ] && [ "$(stat -c%s "$f")" -gt 1000 ]; then
+    echo "Found winevulkan PE: $f ($(stat -c%s "$f") bytes)"
+    cp "$f" "$PROTON_OUT/lib/wine/aarch64-windows/winevulkan.dll"
+    cp "$f" "$PROTON_OUT/lib/wine/arm64ec-windows/winevulkan.dll"
+    break
   fi
 done
 VULKAN_PE_SIZE=$(stat -c%s "$PROTON_OUT/lib/wine/aarch64-windows/winevulkan.dll" 2>/dev/null || echo 0)
