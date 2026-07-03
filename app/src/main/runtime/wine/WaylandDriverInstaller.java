@@ -146,9 +146,13 @@ public final class WaylandDriverInstaller {
             // Proton 9.0 archive version. Both PE and Unix sides are now from the
             // same proton_11.0 source with matching enums.
             if (winevulkanAarch64.exists() && winevulkanAarch64.length() > 1000) {
-                copyFile(winevulkanAarch64, winevulkanSyswow64);
-                Log.i(TAG, "ensureDriverInstalled: replaced syswow64/winevulkan.dll with source-built version ("
-                        + winevulkanSyswow64.length() + " bytes) — fixes 32-bit PE/Unix enum mismatch");
+                try {
+                    copyFile(winevulkanAarch64, winevulkanSyswow64);
+                    Log.i(TAG, "ensureDriverInstalled: replaced syswow64/winevulkan.dll with source-built version ("
+                            + winevulkanSyswow64.length() + " bytes) — fixes 32-bit PE/Unix enum mismatch");
+                } catch (IOException e) {
+                    Log.e(TAG, "ensureDriverInstalled: failed to replace syswow64/winevulkan.dll", e);
+                }
             }
 
             patchSurfaceExtension(winevulkanAarch64);
