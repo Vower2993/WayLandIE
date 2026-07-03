@@ -1,11 +1,28 @@
 /* WayLandIE dmabuf zero-copy Vulkan layer.
  *
- * Two-stage blit pipeline:
- * Image A (OPTIMAL, COLOR_ATTACHMENT) — DXVK renders here
- * Image B (LINEAR, TRANSFER_DST) — staging for memfd export
- * On present: vkCmdCopyImage A→B, vkMapMemory B, memcpy to memfd, bridge
+ * ARCHITECTURE (definitive):
  *
- * Hooking: dispatch table patched via pointer comparison (no hardcoded indices).
+ * 1. STANDARD LAYER INTERCEPTION — no dispatch table patching.
+ *    layer_get_device_proc_addr / layer_get_instance_proc_addr return our hooks
+ *    for vkCreateSwapchainKHR, vkQueuePresentKHR, etc.
+ *
+ * 2. PASSTHROUGH MODE (WAYLANDIE_DMABUF_LAYER_PASSTHROUGH=1):
+ *    Skip watcher, don't touch dispatch table, all 5 hooks delegate to
+ *    next layer via fp_gdpa. Use this to isolate whether the layer causes
+ *    deadlocks.
+ *
+ * 3. ACTIVE MODE (default when WAYLANDIE_DMABUF_LAYER_ENABLE=1):
+ *    - layer_create_swapchain calls real vkCreateSwapchainKHR to get real swapchain
+ *    - DXVK renders to REAL swapchain images (returned via layer_get_swapchain_images)
+ *    - For each real image, allocate exportable Image B (LINEAR, TRANSFER_DST,
+ *      VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT, fallback OPAQUE_FD_BIT)
+ *    - layer_acquire_next_image calls real acquire
+ *    - layer_queue_present: blit real_image -> Image B, send cached dmabuf fd
+ *      to bridge, THEN call real vkQueuePresentKHR so hardware cycles the frame
+ *
+ * 4. TRUE ZERO-COPY: No memfd_create, no CPU memcpy, no vkMapMemory.
+ *    Raw dmabuf fd obtained via vkGetMemoryFdKHR at image creation time,
+ *    cached for the lifetime of the image, sent to bridge via SCM_RIGHTS.
  *
  * Copyright 2024 WayLandIE Project */
 
@@ -25,7 +42,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
@@ -84,12 +100,13 @@ typedef struct {
     PFN_vkAllocateMemory alloc_mem;
     PFN_vkFreeMemory free_mem;
     PFN_vkBindImageMemory bind_img_mem;
-    PFN_vkMapMemory map_mem;
-    PFN_vkUnmapMemory unmap_mem;
     PFN_vkGetImageMemoryRequirements2 get_img_mem_reqs2;
     PFN_vkGetImageSubresourceLayout get_subres_layout;
     PFN_vkCmdCopyImage cmd_copy_image;
     PFN_vkCmdPipelineBarrier cmd_pipeline_barrier;
+    /* External memory fd export (VK_KHR_external_memory_fd) */
+    PFN_vkGetMemoryFdKHR get_memory_fd;
+    /* Real (down-chain) swapchain functions, resolved lazily via fp_gdpa */
     PFN_vkCreateSwapchainKHR real_create_swapchain;
     PFN_vkDestroySwapchainKHR real_destroy_swapchain;
     PFN_vkGetSwapchainImagesKHR real_get_images;
@@ -114,30 +131,26 @@ typedef struct device_data {
     struct device_data *next;
 } device_data;
 
-/* ------------------------------------------------------------------ */
-/* Two-stage blit swapchain                                           */
-/* Image A: OPTIMAL tiling, COLOR_ATTACHMENT (DXVK renders here)      */
-/* Image B: LINEAR tiling, TRANSFER_DST (staging for memfd export)    */
-/* ------------------------------------------------------------------ */
-
+/* Per-real-swapchain-image staging resource (Image B — exportable).
+ * The REAL swapchain image serves as Image A (DXVK renders to it). */
 typedef struct {
-    VkImage render_img;       /* Image A — OPTIMAL, render target */
-    VkDeviceMemory render_mem;
-    VkImage staging_img;      /* Image B — LINEAR, transfer dst */
+    VkImage staging_img;       /* Image B — LINEAR, TRANSFER_DST, exportable */
     VkDeviceMemory staging_mem;
-    VkDeviceSize staging_size;
     uint32_t stride;
-    uint64_t offset;
+    uint64_t staging_size;
     uint32_t width, height;
     uint32_t drm_format;
+    int dmabuf_fd;             /* Cached fd from vkGetMemoryFdKHR */
+    VkExternalMemoryHandleTypeFlagBits handle_type;
     bool in_use;
 } swapchain_image;
 
 typedef struct swapchain_data {
     device_data *dev_data;
+    VkSwapchainKHR real_swapchain;     /* The actual hardware swapchain */
     uint32_t image_count;
-    swapchain_image images[WAYLANDIE_MAX_IMAGES];
-    uint32_t acquire_index;
+    VkImage real_images[WAYLANDIE_MAX_IMAGES];  /* Real swapchain images (Image A) */
+    swapchain_image images[WAYLANDIE_MAX_IMAGES]; /* Per-image Image B staging */
     VkFormat format;
     VkExtent2D extent;
     VkCommandPool cmd_pool;
@@ -148,7 +161,7 @@ typedef struct swapchain_data {
     struct swapchain_data *next;
 } swapchain_data;
 
-/* Forward declarations for dispatch table patching. */
+/* Forward declarations */
 static VkResult layer_create_swapchain(VkDevice, const VkSwapchainCreateInfoKHR *,
                                        const VkAllocationCallbacks *, VkSwapchainKHR *);
 static void layer_destroy_swapchain(VkDevice, VkSwapchainKHR, const VkAllocationCallbacks *);
@@ -156,6 +169,7 @@ static VkResult layer_get_swapchain_images(VkDevice, VkSwapchainKHR, uint32_t *,
 static VkResult layer_acquire_next_image(VkDevice, VkSwapchainKHR, uint64_t,
                                          VkSemaphore, VkFence, uint32_t *);
 static VkResult layer_queue_present(VkQueue, const VkPresentInfoKHR *);
+static void ensure_device_vtable(device_data *data);
 
 /* ------------------------------------------------------------------ */
 /* Globals                                                            */
@@ -166,14 +180,6 @@ static instance_data *g_instances = NULL;
 static device_data *g_devices = NULL;
 static swapchain_data *g_swapchains = NULL;
 static atomic_int g_enabled = 0;
-static atomic_int g_watcher_started = 0;
-
-/* Saved real function pointers (from dispatch table patching) */
-static PFN_vkCreateSwapchainKHR  g_real_create_swapchain = NULL;
-static PFN_vkDestroySwapchainKHR g_real_destroy_swapchain = NULL;
-static PFN_vkGetSwapchainImagesKHR g_real_get_images = NULL;
-static PFN_vkAcquireNextImageKHR g_real_acquire = NULL;
-static PFN_vkQueuePresentKHR     g_real_present = NULL;
 
 /* ------------------------------------------------------------------ */
 /* Helpers                                                            */
@@ -190,6 +196,11 @@ static int is_enabled(void) {
         }
     }
     return atomic_load(&g_enabled) == 1;
+}
+
+static int is_passthrough(void) {
+    const char *env = getenv("WAYLANDIE_DMABUF_LAYER_PASSTHROUGH");
+    return env && env[0] == '1';
 }
 
 static uint32_t vk_format_to_drm(VkFormat fmt) {
@@ -230,6 +241,30 @@ static swapchain_data *find_swapchain(VkSwapchainKHR sw) {
         }
     pthread_mutex_unlock(&g_lock);
     return NULL;
+}
+
+/* Resolve a real (down-chain) function pointer via the next layer's GDPA. */
+static PFN_vkVoidFunction resolve_real(VkDevice device, device_data *dd, const char *name) {
+    if (!dd || !dd->vtable.get_device_proc_addr || !device) return NULL;
+    return dd->vtable.get_device_proc_addr(device, name);
+}
+
+/* Lazily resolve the real swapchain + external-memory function pointers.
+ * Called from layer_create_swapchain and layer_queue_present. */
+static void ensure_swapchain_vtable(VkDevice device, device_data *dd) {
+    if (!dd) return;
+    if (!dd->vtable.real_create_swapchain)
+        dd->vtable.real_create_swapchain = (PFN_vkCreateSwapchainKHR)resolve_real(device, dd, "vkCreateSwapchainKHR");
+    if (!dd->vtable.real_destroy_swapchain)
+        dd->vtable.real_destroy_swapchain = (PFN_vkDestroySwapchainKHR)resolve_real(device, dd, "vkDestroySwapchainKHR");
+    if (!dd->vtable.real_get_images)
+        dd->vtable.real_get_images = (PFN_vkGetSwapchainImagesKHR)resolve_real(device, dd, "vkGetSwapchainImagesKHR");
+    if (!dd->vtable.real_acquire)
+        dd->vtable.real_acquire = (PFN_vkAcquireNextImageKHR)resolve_real(device, dd, "vkAcquireNextImageKHR");
+    if (!dd->vtable.real_present)
+        dd->vtable.real_present = (PFN_vkQueuePresentKHR)resolve_real(device, dd, "vkQueuePresentKHR");
+    if (!dd->vtable.get_memory_fd)
+        dd->vtable.get_memory_fd = (PFN_vkGetMemoryFdKHR)resolve_real(device, dd, "vkGetMemoryFdKHR");
 }
 
 /* ------------------------------------------------------------------ */
@@ -289,149 +324,31 @@ static int bridge_send_dmabuf(int sock, int fd, uint32_t w, uint32_t h,
 }
 
 /* ------------------------------------------------------------------ */
-/* Dispatch table patching — pointer comparison, no hardcoded indices  */
+/* Exportable Image B creation (LINEAR, TRANSFER_DST, dmabuf-exportable) */
 /* ------------------------------------------------------------------ */
 
-static int count_non_null(void **table, int max) {
-    int c = 0;
-    for (int i = 0; i < max; i++) if (table[i]) c++;
-    return c;
-}
-
-static int patch_dispatch_table(VkDevice device) {
-    void **table = (void **)((char *)device + 8);
-    if (!table) return -1;
-
-    int non_null = count_non_null(table, 256);
-    LOGI("patch: table=%p %d/256 non-null", (void *)table, non_null);
-    if (non_null < 100) {
-        LOGW("patch: table not populated (%d/256)", non_null);
-        return -1;
-    }
-
-    /* Get real function pointers via fp_gdpa (next layer's GDPA). */
-    device_data *dd = find_device(device);
-    if (!dd || !dd->vtable.get_device_proc_addr) {
-        LOGE("patch: no device_data or fp_gdpa");
-        return -1;
-    }
-    PFN_vkGetDeviceProcAddr fp_gdpa = dd->vtable.get_device_proc_addr;
-
-    void *target_create = (void *)fp_gdpa(device, "vkCreateSwapchainKHR");
-    void *target_destroy = (void *)fp_gdpa(device, "vkDestroySwapchainKHR");
-    void *target_images = (void *)fp_gdpa(device, "vkGetSwapchainImagesKHR");
-    void *target_acquire = (void *)fp_gdpa(device, "vkAcquireNextImageKHR");
-    void *target_present = (void *)fp_gdpa(device, "vkQueuePresentKHR");
-
-    LOGI("patch: targets: create=%p destroy=%p images=%p acquire=%p present=%p",
-         target_create, target_destroy, target_images, target_acquire, target_present);
-
-    if (!target_create || !target_present) {
-        LOGW("patch: swapchain functions not available");
-        return -1;
-    }
-
-    /* Scan for matching pointers. */
-    int found = 0;
-    int idx_create = -1, idx_destroy = -1, idx_images = -1;
-    int idx_acquire = -1, idx_present = -1;
-
-    for (int i = 0; i < 2048 && found < 5; i++) {
-        void *entry = table[i];
-        if (entry == target_create && idx_create < 0) {
-            idx_create = i; g_real_create_swapchain = entry;
-            table[i] = (void *)layer_create_swapchain; found++;
-            LOGI("patch: [%d] create_swapchain", i);
-        } else if (entry == target_destroy && idx_destroy < 0) {
-            idx_destroy = i; g_real_destroy_swapchain = entry;
-            table[i] = (void *)layer_destroy_swapchain; found++;
-            LOGI("patch: [%d] destroy_swapchain", i);
-        } else if (entry == target_images && idx_images < 0) {
-            idx_images = i; g_real_get_images = entry;
-            table[i] = (void *)layer_get_swapchain_images; found++;
-            LOGI("patch: [%d] get_images", i);
-        } else if (entry == target_acquire && idx_acquire < 0) {
-            idx_acquire = i; g_real_acquire = entry;
-            table[i] = (void *)layer_acquire_next_image; found++;
-            LOGI("patch: [%d] acquire", i);
-        } else if (entry == target_present && idx_present < 0) {
-            idx_present = i; g_real_present = entry;
-            table[i] = (void *)layer_queue_present; found++;
-            LOGI("patch: [%d] present", i);
-        }
-    }
-
-    /* If create_swapchain not found by pointer, try index 253 (confirmed working). */
-    if (idx_create < 0) {
-        void *orig = table[253];
-        if (orig && orig != (void *)layer_create_swapchain) {
-            table[253] = (void *)layer_create_swapchain;
-            g_real_create_swapchain = orig;
-            idx_create = 253; found++;
-            LOGI("patch: [253] create_swapchain (index fallback)");
-        }
-    }
-
-    LOGI("patch: patched %d/5", found);
-    return found > 0 ? 0 : -1;
-}
-
-/* Watcher thread: waits for dispatch table to be populated. */
-static void *watcher_thread(void *arg) {
-    VkDevice device = (VkDevice)arg;
-    LOGI("watcher: waiting for dispatch table (device=%p)", (void *)device);
-    for (int i = 0; i < 200; i++) {
-        usleep(10000);
-        void **table = (void **)((char *)device + 8);
-        int n = count_non_null(table, 256);
-        if (n >= 150) {
-            LOGI("watcher: table populated (%d/256) after %d attempts", n, i + 1);
-            int rc = patch_dispatch_table(device);
-            if (rc == 0) LOGI("watcher: patched successfully");
-            else LOGE("watcher: patch failed (rc=%d)", rc);
-            return NULL;
-        }
-    }
-    LOGE("watcher: timed out");
-    return NULL;
-}
-
-/* ------------------------------------------------------------------ */
-/* Two-stage blit image creation                                      */
-/* ------------------------------------------------------------------ */
-
-static VkResult create_blit_images(device_data *dd, VkFormat fmt,
-                                   VkExtent2D extent, VkImageUsageFlags usage,
-                                   swapchain_image *out) {
+static VkResult create_exportable_staging(device_data *dd, VkFormat fmt,
+                                          VkExtent2D extent,
+                                          VkExternalMemoryHandleTypeFlagBits handle_type,
+                                          swapchain_image *out) {
     memset(out, 0, sizeof(*out));
+    out->dmabuf_fd = -1;
+    out->handle_type = handle_type;
     VkResult res;
 
-    /* Image A: OPTIMAL tiling, COLOR_ATTACHMENT (DXVK renders here). */
-    VkImageCreateInfo a_info = {};
-    a_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-    a_info.imageType = VK_IMAGE_TYPE_2D;
-    a_info.format = fmt;
-    a_info.extent.width = extent.width; a_info.extent.height = extent.height; a_info.extent.depth = 1;
-    a_info.mipLevels = 1;
-    a_info.arrayLayers = 1;
-    a_info.samples = VK_SAMPLE_COUNT_1_BIT;
-    a_info.tiling = VK_IMAGE_TILING_OPTIMAL;
-    a_info.usage = usage | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT
-                   | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
-    a_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    /* Image B: LINEAR, TRANSFER_DST, with external memory handle type */
+    VkExternalMemoryImageCreateInfo ext_img_info = {};
+    ext_img_info.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO;
+    ext_img_info.handleTypes = handle_type;
 
-    res = dd->vtable.create_image(dd->device, &a_info, NULL, &out->render_img);
-    if (res != VK_SUCCESS) {
-        LOGE("vkCreateImage A failed res=%d", res);
-        return res;
-    }
-
-    /* Image B: LINEAR tiling, TRANSFER_DST (staging for memfd). */
     VkImageCreateInfo b_info = {};
     b_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    b_info.pNext = &ext_img_info;
     b_info.imageType = VK_IMAGE_TYPE_2D;
     b_info.format = fmt;
-    b_info.extent.width = extent.width; b_info.extent.height = extent.height; b_info.extent.depth = 1;
+    b_info.extent.width = extent.width;
+    b_info.extent.height = extent.height;
+    b_info.extent.depth = 1;
     b_info.mipLevels = 1;
     b_info.arrayLayers = 1;
     b_info.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -441,56 +358,38 @@ static VkResult create_blit_images(device_data *dd, VkFormat fmt,
 
     res = dd->vtable.create_image(dd->device, &b_info, NULL, &out->staging_img);
     if (res != VK_SUCCESS) {
-        LOGE("vkCreateImage B failed res=%d", res);
-        goto err_a;
+        LOGE("vkCreateImage B failed res=%d handleType=0x%x", res, handle_type);
+        return res;
     }
 
-    /* Get memory requirements for both images. */
-    VkMemoryRequirements2 a_reqs = {}, b_reqs = {};
-    a_reqs.sType = VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2;
+    /* Get memory requirements */
+    VkMemoryRequirements2 b_reqs = {};
     b_reqs.sType = VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2;
     VkImageMemoryRequirementsInfo2 req_info = {};
     req_info.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_REQUIREMENTS_INFO_2;
-
-    req_info.image = out->render_img;
-    dd->vtable.get_img_mem_reqs2(dd->device, &req_info, &a_reqs);
-
     req_info.image = out->staging_img;
     dd->vtable.get_img_mem_reqs2(dd->device, &req_info, &b_reqs);
 
-    /* Query stride from staging image (LINEAR only). */
+    /* Query stride from staging image (LINEAR only) */
     VkImageSubresource subres = {};
     subres.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     VkSubresourceLayout layout = {};
     dd->vtable.get_subres_layout(dd->device, out->staging_img, &subres, &layout);
     out->stride = (uint32_t)layout.rowPitch;
-    out->offset = 0;
     out->staging_size = layout.size;
-    LOGI("staging layout: stride=%u size=%llu", out->stride,
-         (unsigned long long)layout.size);
+    out->width = extent.width;
+    out->height = extent.height;
+    out->drm_format = vk_format_to_drm(fmt);
 
-    /* Get memory properties. */
+    LOGI("staging layout: stride=%u size=%llu handleType=0x%x",
+         out->stride, (unsigned long long)layout.size, handle_type);
+
+    /* Get memory properties */
     VkPhysicalDeviceMemoryProperties mem_props;
     dd->inst_data->vtable.get_phys_mem_props(dd->physical_device, &mem_props);
 
-    /* Allocate memory for Image A — prefer DEVICE_LOCAL. */
-    uint32_t a_type = 0;
-    for (uint32_t i = 0; i < mem_props.memoryTypeCount; i++) {
-        if ((a_reqs.memoryRequirements.memoryTypeBits & (1u << i)) &&
-            (mem_props.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
-            a_type = i; break;
-        }
-    }
-    VkMemoryAllocateInfo a_alloc = {};
-    a_alloc.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    a_alloc.allocationSize = a_reqs.memoryRequirements.size;
-    a_alloc.memoryTypeIndex = a_type;
-    res = dd->vtable.alloc_mem(dd->device, &a_alloc, NULL, &out->render_mem);
-    if (res != VK_SUCCESS) { LOGE("alloc A failed res=%d", res); goto err_b; }
-    res = dd->vtable.bind_img_mem(dd->device, out->render_img, out->render_mem, 0);
-    if (res != VK_SUCCESS) { LOGE("bind A failed res=%d", res); goto err_am; }
-
-    /* Allocate memory for Image B — MUST be HOST_VISIBLE | HOST_COHERENT. */
+    /* Allocate exportable memory — prefer HOST_VISIBLE | HOST_COHERENT (Turnip
+     * requires this for LINEAR images), fall back to any matching type. */
     uint32_t b_type = 0;
     bool b_found = false;
     for (uint32_t i = 0; i < mem_props.memoryTypeCount; i++) {
@@ -501,68 +400,101 @@ static VkResult create_blit_images(device_data *dd, VkFormat fmt,
         }
     }
     if (!b_found) {
-        LOGE("no HOST_VISIBLE|HOST_COHERENT memory type for staging image");
-        goto err_am;
+        for (uint32_t i = 0; i < mem_props.memoryTypeCount; i++) {
+            if (b_reqs.memoryRequirements.memoryTypeBits & (1u << i)) {
+                b_type = i; b_found = true; break;
+            }
+        }
+    }
+    if (!b_found) {
+        LOGE("no suitable memory type for staging image");
+        res = VK_ERROR_OUT_OF_DEVICE_MEMORY;
+        goto err_img;
     }
     LOGI("staging memory type %u: flags=0x%x", b_type,
          mem_props.memoryTypes[b_type].propertyFlags);
 
+    VkExportMemoryAllocateInfo export_mem_info = {};
+    export_mem_info.sType = VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO;
+    export_mem_info.handleTypes = handle_type;
+
     VkMemoryAllocateInfo b_alloc = {};
     b_alloc.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    b_alloc.pNext = &export_mem_info;
     b_alloc.allocationSize = b_reqs.memoryRequirements.size;
     b_alloc.memoryTypeIndex = b_type;
     res = dd->vtable.alloc_mem(dd->device, &b_alloc, NULL, &out->staging_mem);
-    if (res != VK_SUCCESS) { LOGE("alloc B failed res=%d", res); goto err_am; }
+    if (res != VK_SUCCESS) {
+        LOGE("alloc B failed res=%d handleType=0x%x", res, handle_type);
+        goto err_img;
+    }
     res = dd->vtable.bind_img_mem(dd->device, out->staging_img, out->staging_mem, 0);
-    if (res != VK_SUCCESS) { LOGE("bind B failed res=%d", res); goto err_bm; }
+    if (res != VK_SUCCESS) {
+        LOGE("bind B failed res=%d", res);
+        goto err_mem;
+    }
 
-    out->width = extent.width;
-    out->height = extent.height;
-    out->drm_format = vk_format_to_drm(fmt);
+    /* Export dmabuf fd via vkGetMemoryFdKHR — cached for the lifetime of the
+     * image. The kernel does NOT consume the sender's fd on sendmsg(SCM_RIGHTS),
+     * so we can reuse the same fd for every frame. */
+    if (dd->vtable.get_memory_fd) {
+        VkMemoryGetFdInfoKHR fd_info = {};
+        fd_info.sType = VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR;
+        fd_info.memory = out->staging_mem;
+        fd_info.handleType = handle_type;
+        int fd = -1;
+        res = dd->vtable.get_memory_fd(dd->device, &fd_info, &fd);
+        if (res != VK_SUCCESS || fd < 0) {
+            LOGE("vkGetMemoryFdKHR failed res=%d handleType=0x%x", res, handle_type);
+            out->dmabuf_fd = -1;
+            /* Non-fatal: bridge won't receive frames, but real present still works */
+        } else {
+            out->dmabuf_fd = fd;
+            LOGI("exported dmabuf fd=%d handleType=0x%x", fd, handle_type);
+        }
+    } else {
+        LOGE("vkGetMemoryFdKHR not available — bridge will not receive frames");
+        out->dmabuf_fd = -1;
+    }
+
     out->in_use = false;
-    LOGI("created blit images %ux%u drm=0x%08x stride=%u",
-         extent.width, extent.height, out->drm_format, out->stride);
+    LOGI("created exportable staging %ux%u drm=0x%08x stride=%u fd=%d",
+         extent.width, extent.height, out->drm_format, out->stride, out->dmabuf_fd);
     return VK_SUCCESS;
 
-err_bm:
+err_mem:
     dd->vtable.free_mem(dd->device, out->staging_mem, NULL);
-err_am:
-    dd->vtable.free_mem(dd->device, out->render_mem, NULL);
-err_b:
+    out->staging_mem = VK_NULL_HANDLE;
+err_img:
     dd->vtable.destroy_image(dd->device, out->staging_img, NULL);
-err_a:
-    dd->vtable.destroy_image(dd->device, out->render_img, NULL);
+    out->staging_img = VK_NULL_HANDLE;
     return res;
 }
 
-static void destroy_blit_images(device_data *dd, swapchain_image *img) {
+static void destroy_swapchain_image(device_data *dd, swapchain_image *img) {
+    if (img->dmabuf_fd >= 0) { close(img->dmabuf_fd); img->dmabuf_fd = -1; }
     if (img->staging_mem) dd->vtable.free_mem(dd->device, img->staging_mem, NULL);
-    if (img->render_mem) dd->vtable.free_mem(dd->device, img->render_mem, NULL);
     if (img->staging_img) dd->vtable.destroy_image(dd->device, img->staging_img, NULL);
-    if (img->render_img) dd->vtable.destroy_image(dd->device, img->render_img, NULL);
+    memset(img, 0, sizeof(*img));
+    img->dmabuf_fd = -1;
 }
 
 /* ------------------------------------------------------------------ */
-/* Layer hooks — standard Vulkan signatures                           */
+/* Layer hooks                                                        */
 /* ------------------------------------------------------------------ */
-
-/* Forward declarations. */
-static VkResult layer_create_swapchain(VkDevice, const VkSwapchainCreateInfoKHR *,
-                                       const VkAllocationCallbacks *, VkSwapchainKHR *);
-static void layer_destroy_swapchain(VkDevice, VkSwapchainKHR, const VkAllocationCallbacks *);
-static VkResult layer_get_swapchain_images(VkDevice, VkSwapchainKHR, uint32_t *, VkImage *);
-static VkResult layer_acquire_next_image(VkDevice, VkSwapchainKHR, uint64_t,
-                                         VkSemaphore, VkFence, uint32_t *);
-static VkResult layer_queue_present(VkQueue, const VkPresentInfoKHR *);
-static void ensure_device_vtable(device_data *data);
 
 VkResult layer_create_swapchain(VkDevice device, const VkSwapchainCreateInfoKHR *info,
                                 const VkAllocationCallbacks *alloc, VkSwapchainKHR *ret) {
     device_data *dd = find_device(device);
     if (dd) ensure_device_vtable(dd);
-    if (!dd || !is_enabled()) {
-        if (g_real_create_swapchain)
-            return g_real_create_swapchain(device, info, alloc, ret);
+    if (dd) ensure_swapchain_vtable(device, dd);
+
+    /* Passthrough or disabled: delegate to real create_swapchain.
+     * Return the REAL swapchain handle directly (no wrapping). */
+    if (!dd || !is_enabled() || is_passthrough()) {
+        if (dd && dd->vtable.real_create_swapchain)
+            return dd->vtable.real_create_swapchain(device, info, alloc, ret);
+        LOGE("create_swapchain: no real_create_swapchain (passthrough/degraded)");
         return VK_ERROR_INITIALIZATION_FAILED;
     }
 
@@ -570,34 +502,74 @@ VkResult layer_create_swapchain(VkDevice device, const VkSwapchainCreateInfoKHR 
          info->imageExtent.width, info->imageExtent.height,
          info->imageFormat, info->minImageCount);
 
-    uint32_t count = info->minImageCount;
-    if (count > WAYLANDIE_MAX_IMAGES) count = WAYLANDIE_MAX_IMAGES;
-    if (count < 2) count = 2;
+    /* Step 1: Call real vkCreateSwapchainKHR to create the real hardware swapchain */
+    VkSwapchainKHR real_swapchain = VK_NULL_HANDLE;
+    VkResult res = dd->vtable.real_create_swapchain(device, info, alloc, &real_swapchain);
+    if (res != VK_SUCCESS) {
+        LOGE("real_create_swapchain failed res=%d", res);
+        return res;
+    }
 
+    /* Step 2: Get real swapchain images (DXVK will render to these) */
+    uint32_t count = 0;
+    res = dd->vtable.real_get_images(device, real_swapchain, &count, NULL);
+    if (res != VK_SUCCESS || count == 0) {
+        LOGE("real_get_images (count) failed res=%d count=%u", res, count);
+        dd->vtable.real_destroy_swapchain(device, real_swapchain, alloc);
+        return res != VK_SUCCESS ? res : VK_ERROR_INITIALIZATION_FAILED;
+    }
+    if (count > WAYLANDIE_MAX_IMAGES) count = WAYLANDIE_MAX_IMAGES;
+
+    VkImage real_imgs[WAYLANDIE_MAX_IMAGES];
+    for (uint32_t i = 0; i < WAYLANDIE_MAX_IMAGES; i++) real_imgs[i] = VK_NULL_HANDLE;
+    res = dd->vtable.real_get_images(device, real_swapchain, &count, real_imgs);
+    if (res != VK_SUCCESS) {
+        LOGE("real_get_images failed res=%d", res);
+        dd->vtable.real_destroy_swapchain(device, real_swapchain, alloc);
+        return res;
+    }
+
+    LOGI("real swapchain created: %u images handle=%p", count, (void *)real_swapchain);
+
+    /* Step 3: Allocate swapchain_data */
     swapchain_data *sw = (swapchain_data *)calloc(1, sizeof(*sw));
-    if (!sw) return VK_ERROR_OUT_OF_HOST_MEMORY;
+    if (!sw) {
+        dd->vtable.real_destroy_swapchain(device, real_swapchain, alloc);
+        return VK_ERROR_OUT_OF_HOST_MEMORY;
+    }
     sw->dev_data = dd;
+    sw->real_swapchain = real_swapchain;
     sw->image_count = count;
     sw->format = info->imageFormat;
     sw->extent = info->imageExtent;
     sw->bridge_sock = -1;
+    for (uint32_t i = 0; i < count; i++) sw->real_images[i] = real_imgs[i];
 
+    /* Step 4: Create exportable Image B per real image.
+     * Try VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT first.
+     * If that fails, fall back to VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT. */
     for (uint32_t i = 0; i < count; i++) {
-        VkResult res = create_blit_images(dd, sw->format, sw->extent,
-                                          info->imageUsage, &sw->images[i]);
+        res = create_exportable_staging(dd, sw->format, sw->extent,
+                                         VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
+                                         &sw->images[i]);
         if (res != VK_SUCCESS) {
-            for (uint32_t j = 0; j < i; j++) destroy_blit_images(dd, &sw->images[j]);
-            free(sw);
-            return res;
+            LOGW("DMA_BUF_BIT_EXT failed (image %u, res=%d), trying OPAQUE_FD_BIT", i, res);
+            res = create_exportable_staging(dd, sw->format, sw->extent,
+                                             VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT,
+                                             &sw->images[i]);
+        }
+        if (res != VK_SUCCESS) {
+            LOGE("staging image %u creation failed (both handle types)", i);
+            goto fail;
         }
     }
 
-    /* Create command pool + blit command buffer. */
+    /* Step 5: Create command pool + blit command buffer + fence */
     VkCommandPoolCreateInfo pool_info = {};
     pool_info.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
     pool_info.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
     pool_info.queueFamilyIndex = dd->queue_family;
-    VkResult res = dd->vtable.create_cmd_pool(dd->device, &pool_info, NULL, &sw->cmd_pool);
+    res = dd->vtable.create_cmd_pool(dd->device, &pool_info, NULL, &sw->cmd_pool);
     if (res != VK_SUCCESS) { LOGE("create_cmd_pool res=%d", res); goto fail; }
 
     VkCommandBufferAllocateInfo cmd_info = {};
@@ -613,20 +585,22 @@ VkResult layer_create_swapchain(VkDevice device, const VkSwapchainCreateInfoKHR 
     res = dd->vtable.create_fence(dd->device, &fence_info, NULL, &sw->blit_fence);
     if (res != VK_SUCCESS) { LOGE("create_fence res=%d", res); goto fail; }
 
+    /* Step 6: Register in global list */
     pthread_mutex_lock(&g_lock);
     sw->next = g_swapchains;
     g_swapchains = sw;
     pthread_mutex_unlock(&g_lock);
 
     *ret = (VkSwapchainKHR)(uintptr_t)sw;
-    LOGI("create_swapchain: success %u images", count);
+    LOGI("create_swapchain: success real=%p staging=%u", (void *)real_swapchain, count);
     return VK_SUCCESS;
 
 fail:
-    for (uint32_t i = 0; i < count; i++) destroy_blit_images(dd, &sw->images[i]);
+    for (uint32_t i = 0; i < count; i++) destroy_swapchain_image(dd, &sw->images[i]);
     if (sw->blit_fence) dd->vtable.destroy_fence(dd->device, sw->blit_fence, NULL);
     if (sw->blit_cmd) dd->vtable.free_cmd_bufs(dd->device, sw->cmd_pool, 1, &sw->blit_cmd);
     if (sw->cmd_pool) dd->vtable.destroy_cmd_pool(dd->device, sw->cmd_pool, NULL);
+    dd->vtable.real_destroy_swapchain(device, real_swapchain, alloc);
     free(sw);
     return res;
 }
@@ -635,9 +609,16 @@ void layer_destroy_swapchain(VkDevice device, VkSwapchainKHR sw, const VkAllocat
     if (!sw) return;
     swapchain_data *s = find_swapchain(sw);
     if (!s) {
-        if (g_real_destroy_swapchain) g_real_destroy_swapchain(device, sw, alloc);
+        /* Not our swapchain — delegate to real */
+        device_data *dd = find_device(device);
+        if (dd) {
+            ensure_swapchain_vtable(device, dd);
+            if (dd->vtable.real_destroy_swapchain)
+                dd->vtable.real_destroy_swapchain(device, sw, alloc);
+        }
         return;
     }
+
     device_data *dd = s->dev_data;
     LOGI("destroy_swapchain: presents=%llu", (unsigned long long)s->present_count);
 
@@ -646,11 +627,16 @@ void layer_destroy_swapchain(VkDevice device, VkSwapchainKHR sw, const VkAllocat
     while (*pp) { if (*pp == s) { *pp = s->next; break; } pp = &(*pp)->next; }
     pthread_mutex_unlock(&g_lock);
 
-    for (uint32_t i = 0; i < s->image_count; i++) destroy_blit_images(dd, &s->images[i]);
+    for (uint32_t i = 0; i < s->image_count; i++) destroy_swapchain_image(dd, &s->images[i]);
     if (s->blit_fence) dd->vtable.destroy_fence(dd->device, s->blit_fence, NULL);
     if (s->blit_cmd) dd->vtable.free_cmd_bufs(dd->device, s->cmd_pool, 1, &s->blit_cmd);
     if (s->cmd_pool) dd->vtable.destroy_cmd_pool(dd->device, s->cmd_pool, NULL);
     if (s->bridge_sock >= 0) close(s->bridge_sock);
+
+    /* Destroy real swapchain */
+    if (dd->vtable.real_destroy_swapchain)
+        dd->vtable.real_destroy_swapchain(device, s->real_swapchain, alloc);
+
     free(s);
 }
 
@@ -658,16 +644,22 @@ VkResult layer_get_swapchain_images(VkDevice device, VkSwapchainKHR sw,
                                     uint32_t *count, VkImage *images) {
     swapchain_data *s = find_swapchain(sw);
     if (!s) {
-        if (g_real_get_images) return g_real_get_images(device, sw, count, images);
+        device_data *dd = find_device(device);
+        if (dd) {
+            ensure_swapchain_vtable(device, dd);
+            if (dd->vtable.real_get_images)
+                return dd->vtable.real_get_images(device, sw, count, images);
+        }
         return VK_ERROR_INITIALIZATION_FAILED;
     }
+    /* Return REAL swapchain images — DXVK renders to these (Image A = real image) */
     if (!images || *count < s->image_count) {
         *count = s->image_count;
         return images ? VK_INCOMPLETE : VK_SUCCESS;
     }
     *count = s->image_count;
     for (uint32_t i = 0; i < s->image_count; i++)
-        images[i] = s->images[i].render_img;  /* DXVK renders to Image A */
+        images[i] = s->real_images[i];
     return VK_SUCCESS;
 }
 
@@ -676,74 +668,59 @@ VkResult layer_acquire_next_image(VkDevice device, VkSwapchainKHR sw,
                                   VkFence fence, uint32_t *idx) {
     swapchain_data *s = find_swapchain(sw);
     if (!s) {
-        if (g_real_acquire) return g_real_acquire(device, sw, timeout, sem, fence, idx);
+        device_data *dd = find_device(device);
+        if (dd) {
+            ensure_swapchain_vtable(device, dd);
+            if (dd->vtable.real_acquire)
+                return dd->vtable.real_acquire(device, sw, timeout, sem, fence, idx);
+        }
         return VK_ERROR_INITIALIZATION_FAILED;
     }
-    uint32_t i = s->acquire_index % s->image_count;
-    s->acquire_index++;
-    *idx = i;
-
-    /* Signal semaphore with a dummy command buffer. */
-    if (sem || fence) {
-        device_data *dd = s->dev_data;
-        if (dd->graphics_queue) {
-            VkCommandBufferBeginInfo bi = {};
-            bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-            bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-            dd->vtable.begin_cmd(s->blit_cmd, &bi);
-
-            /* Layout transition: UNDEFINED → GENERAL for render image. */
-            VkImageMemoryBarrier bar = {};
-            bar.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-            bar.srcAccessMask = 0;
-            bar.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
-            bar.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-            bar.newLayout = VK_IMAGE_LAYOUT_GENERAL;
-            bar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            bar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            bar.image = s->images[i].render_img;
-            bar.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT; bar.subresourceRange.levelCount = 1; bar.subresourceRange.layerCount = 1;
-            VkPipelineStageFlags src = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
-            VkPipelineStageFlags dst = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
-            dd->vtable.cmd_pipeline_barrier(s->blit_cmd, src, dst, 0, 0, NULL, 0, NULL, 1, &bar);
-
-            dd->vtable.end_cmd(s->blit_cmd);
-
-            VkSubmitInfo si = {};
-            si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-            si.commandBufferCount = 1;
-            si.pCommandBuffers = &s->blit_cmd;
-            if (sem) { si.signalSemaphoreCount = 1; si.pSignalSemaphores = &sem; }
-            if (fence) dd->vtable.reset_fences(dd->device, 1, &fence);
-            dd->vtable.queue_submit(dd->graphics_queue, 1, &si, fence);
-        }
-    }
-    return VK_SUCCESS;
+    /* Delegate to real acquire — real image index == our index */
+    return s->dev_data->vtable.real_acquire(device, s->real_swapchain, timeout, sem, fence, idx);
 }
 
 VkResult layer_queue_present(VkQueue queue, const VkPresentInfoKHR *info) {
-    if (!is_enabled()) {
-        if (g_real_present) return g_real_present(queue, info);
-        return VK_ERROR_INITIALIZATION_FAILED;
-    }
-
-    /* Find device from queue (search all devices). */
     pthread_mutex_lock(&g_lock);
     device_data *dd = g_devices;
     pthread_mutex_unlock(&g_lock);
-    if (!dd) return VK_ERROR_INITIALIZATION_FAILED;
 
-    VkResult result = VK_SUCCESS;
+    /* Passthrough or disabled: resolve real present and delegate */
+    if (!dd || !is_enabled() || is_passthrough()) {
+        if (dd) {
+            ensure_swapchain_vtable(dd->device, dd);
+            if (dd->vtable.real_present)
+                return dd->vtable.real_present(queue, info);
+        }
+        LOGE("present: no real_present available (passthrough/degraded)");
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+
+    ensure_swapchain_vtable(dd->device, dd);
+    if (!dd->vtable.real_present) {
+        LOGE("present: real_present not resolvable");
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+
+    /* Active mode: for each layer swapchain, do the blit + bridge send.
+     * Then call real present with real swapchain handles. */
+    bool any_layer_swapchain = false;
+    bool semaphores_consumed = false;
+
     for (uint32_t i = 0; i < info->swapchainCount; i++) {
         swapchain_data *s = find_swapchain(info->pSwapchains[i]);
         if (!s) continue;
+        any_layer_swapchain = true;
         uint32_t idx = info->pImageIndices[i];
         if (idx >= s->image_count) continue;
 
         swapchain_image *img = &s->images[idx];
+        VkImage real_img = s->real_images[idx];
 
-        /* Wait for DXVK's rendering semaphores. */
-        if (info->waitSemaphoreCount > 0) {
+        /* Wait for DXVK's rendering semaphores (only once per present call,
+         * since semaphores are global to the present info, not per-swapchain).
+         * We consume them here via a no-op submit that waits on them. */
+        if (info->waitSemaphoreCount > 0 && !semaphores_consumed) {
             VkPipelineStageFlags wait = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
             VkSubmitInfo wsi = {};
             wsi.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -753,27 +730,30 @@ VkResult layer_queue_present(VkQueue queue, const VkPresentInfoKHR *info) {
             dd->vtable.reset_fences(dd->device, 1, &s->blit_fence);
             dd->vtable.queue_submit(queue, 1, &wsi, s->blit_fence);
             dd->vtable.wait_fences(dd->device, 1, &s->blit_fence, VK_TRUE, 5000000000ULL);
+            semaphores_consumed = true;
         }
 
-        /* Blit Image A → Image B (OPTIMAL → LINEAR). */
+        /* Blit real_image (Image A) -> Image B (OPTIMAL -> LINEAR) */
         VkCommandBufferBeginInfo bi = {};
         bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
         bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
         dd->vtable.begin_cmd(s->blit_cmd, &bi);
 
-        /* Transition render image: GENERAL → TRANSFER_SRC_OPTIMAL. */
+        /* Transition real image: PRESENT_SRC -> TRANSFER_SRC_OPTIMAL */
         VkImageMemoryBarrier bar_a = {};
         bar_a.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
         bar_a.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
         bar_a.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-        bar_a.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+        bar_a.oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
         bar_a.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
         bar_a.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         bar_a.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        bar_a.image = img->render_img;
-        bar_a.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT; bar_a.subresourceRange.levelCount = 1; bar_a.subresourceRange.layerCount = 1;
+        bar_a.image = real_img;
+        bar_a.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        bar_a.subresourceRange.levelCount = 1;
+        bar_a.subresourceRange.layerCount = 1;
 
-        /* Transition staging image: UNDEFINED → TRANSFER_DST_OPTIMAL. */
+        /* Transition staging image: UNDEFINED -> TRANSFER_DST_OPTIMAL */
         VkImageMemoryBarrier bar_b = {};
         bar_b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
         bar_b.srcAccessMask = 0;
@@ -783,36 +763,50 @@ VkResult layer_queue_present(VkQueue queue, const VkPresentInfoKHR *info) {
         bar_b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         bar_b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         bar_b.image = img->staging_img;
-        bar_b.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT; bar_b.subresourceRange.levelCount = 1; bar_b.subresourceRange.layerCount = 1;
+        bar_b.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        bar_b.subresourceRange.levelCount = 1;
+        bar_b.subresourceRange.layerCount = 1;
 
-        VkImageMemoryBarrier bars[] = {bar_a, bar_b};
-        VkPipelineStageFlags src_stages = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
-        VkPipelineStageFlags dst_stages = VK_PIPELINE_STAGE_TRANSFER_BIT;
-        dd->vtable.cmd_pipeline_barrier(s->blit_cmd, src_stages, dst_stages, 0,
+        VkImageMemoryBarrier bars[2];
+        bars[0] = bar_a;
+        bars[1] = bar_b;
+        dd->vtable.cmd_pipeline_barrier(s->blit_cmd,
+                                        VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                                        VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
                                         0, NULL, 0, NULL, 2, bars);
 
-        /* Copy Image A → Image B. */
+        /* Copy real_image -> Image B */
         VkImageCopy copy = {};
-        copy.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT; copy.srcSubresource.layerCount = 1;
-        copy.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT; copy.dstSubresource.layerCount = 1;
-        copy.extent.width = img->width; copy.extent.height = img->height; copy.extent.depth = 1;
-        dd->vtable.cmd_copy_image(s->blit_cmd, img->render_img,
-                                  VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, img->staging_img,
+        copy.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        copy.srcSubresource.layerCount = 1;
+        copy.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        copy.dstSubresource.layerCount = 1;
+        copy.extent.width = img->width;
+        copy.extent.height = img->height;
+        copy.extent.depth = 1;
+        dd->vtable.cmd_copy_image(s->blit_cmd, real_img,
+                                  VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                  img->staging_img,
                                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
 
-        /* Transition staging: TRANSFER_DST → GENERAL for mapping. */
-        VkImageMemoryBarrier bar_c = {};
-        bar_c.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-        bar_c.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        bar_c.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
-        bar_c.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        bar_c.newLayout = VK_IMAGE_LAYOUT_GENERAL;
-        bar_c.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        bar_c.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        bar_c.image = img->staging_img;
-        bar_c.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT; bar_c.subresourceRange.levelCount = 1; bar_c.subresourceRange.layerCount = 1;
-        dd->vtable.cmd_pipeline_barrier(s->blit_cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                                        VK_PIPELINE_STAGE_HOST_BIT, 0, 0, NULL, 0, NULL, 1, &bar_c);
+        /* Transition real image back: TRANSFER_SRC -> PRESENT_SRC (for real present) */
+        VkImageMemoryBarrier bar_a_back = {};
+        bar_a_back.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        bar_a_back.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        bar_a_back.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT;
+        bar_a_back.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        bar_a_back.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+        bar_a_back.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        bar_a_back.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        bar_a_back.image = real_img;
+        bar_a_back.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        bar_a_back.subresourceRange.levelCount = 1;
+        bar_a_back.subresourceRange.layerCount = 1;
+
+        dd->vtable.cmd_pipeline_barrier(s->blit_cmd,
+                                        VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0,
+                                        0, NULL, 0, NULL, 1, &bar_a_back);
 
         dd->vtable.end_cmd(s->blit_cmd);
 
@@ -824,44 +818,48 @@ VkResult layer_queue_present(VkQueue queue, const VkPresentInfoKHR *info) {
         dd->vtable.queue_submit(queue, 1, &si, s->blit_fence);
         dd->vtable.wait_fences(dd->device, 1, &s->blit_fence, VK_TRUE, 5000000000ULL);
 
-        /* Map staging memory and copy to memfd. */
-        void *mapped = NULL;
-        VkResult res = dd->vtable.map_mem(dd->device, img->staging_mem, 0,
-                                          img->staging_size, 0, &mapped);
-        if (res != VK_SUCCESS || !mapped) {
-            LOGE("vkMapMemory failed res=%d", res);
-            result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
-            continue;
+        /* Send cached dmabuf fd to bridge */
+        if (img->dmabuf_fd >= 0) {
+            if (s->bridge_sock < 0) {
+                s->bridge_sock = bridge_connect(WAYLANDIE_BRIDGE_SOCKET);
+                if (s->bridge_sock >= 0)
+                    LOGI("bridge connected sock=%d", s->bridge_sock);
+            }
+            if (s->bridge_sock >= 0) {
+                bridge_send_dmabuf(s->bridge_sock, img->dmabuf_fd,
+                                   img->width, img->height, img->drm_format,
+                                   img->stride, img->staging_size);
+            }
         }
 
-        int fd = syscall(279, "waylandie", 1);
-        if (fd < 0) {
-            LOGE("memfd_create failed errno=%d", errno);
-            dd->vtable.unmap_mem(dd->device, img->staging_mem);
-            result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
-            continue;
-        }
-
-        write(fd, mapped, img->staging_size);
-        dd->vtable.unmap_mem(dd->device, img->staging_mem);
-
-        /* Send to bridge. */
-        if (s->bridge_sock < 0) {
-            s->bridge_sock = bridge_connect(WAYLANDIE_BRIDGE_SOCKET);
-            if (s->bridge_sock >= 0) LOGI("bridge connected sock=%d", s->bridge_sock);
-        }
-        if (s->bridge_sock >= 0) {
-            bridge_send_dmabuf(s->bridge_sock, fd, img->width, img->height,
-                               img->drm_format, img->stride, img->staging_size);
-        }
-
-        close(fd);
         s->present_count++;
         if (s->present_count <= 3 || (s->present_count % 60) == 0)
-            LOGI("present #%llu: %ux%u stride=%u", (unsigned long long)s->present_count,
-                 img->width, img->height, img->stride);
+            LOGI("present #%llu: %ux%u stride=%u fd=%d",
+                 (unsigned long long)s->present_count,
+                 img->width, img->height, img->stride, img->dmabuf_fd);
     }
-    return result;
+
+    /* Call real vkQueuePresentKHR with real swapchain handles.
+     * If we consumed the wait semaphores above, pass 0 to real present
+     * (our blit fence already ensured GPU ordering on this queue). */
+    if (any_layer_swapchain) {
+        VkSwapchainKHR real_swapchains[WAYLANDIE_MAX_IMAGES];
+        for (uint32_t i = 0; i < info->swapchainCount && i < WAYLANDIE_MAX_IMAGES; i++) {
+            swapchain_data *s = find_swapchain(info->pSwapchains[i]);
+            real_swapchains[i] = s ? s->real_swapchain : info->pSwapchains[i];
+        }
+        VkPresentInfoKHR real_info = *info;
+        real_info.pSwapchains = real_swapchains;
+        /* pImageIndices stays the same — real index == our index */
+        if (semaphores_consumed) {
+            real_info.waitSemaphoreCount = 0;
+            real_info.pWaitSemaphores = NULL;
+        }
+        return dd->vtable.real_present(queue, &real_info);
+    }
+
+    /* No layer swapchains — just delegate to real present as-is */
+    return dd->vtable.real_present(queue, info);
 }
 
 /* ------------------------------------------------------------------ */
@@ -892,14 +890,12 @@ static void ensure_device_vtable(device_data *data) {
     data->vtable.alloc_mem = (PFN_vkAllocateMemory)fp(data->device, "vkAllocateMemory");
     data->vtable.free_mem = (PFN_vkFreeMemory)fp(data->device, "vkFreeMemory");
     data->vtable.bind_img_mem = (PFN_vkBindImageMemory)fp(data->device, "vkBindImageMemory");
-    data->vtable.map_mem = (PFN_vkMapMemory)fp(data->device, "vkMapMemory");
-    data->vtable.unmap_mem = (PFN_vkUnmapMemory)fp(data->device, "vkUnmapMemory");
     data->vtable.get_img_mem_reqs2 = (PFN_vkGetImageMemoryRequirements2)fp(data->device, "vkGetImageMemoryRequirements2");
     data->vtable.get_subres_layout = (PFN_vkGetImageSubresourceLayout)fp(data->device, "vkGetImageSubresourceLayout");
     data->vtable.cmd_copy_image = (PFN_vkCmdCopyImage)fp(data->device, "vkCmdCopyImage");
     data->vtable.cmd_pipeline_barrier = (PFN_vkCmdPipelineBarrier)fp(data->device, "vkCmdPipelineBarrier");
 
-    if (data->graphics_queue == VK_NULL_HANDLE && data->queue_family >= 0)
+    if (data->graphics_queue == VK_NULL_HANDLE && data->queue_family < UINT32_MAX)
         data->vtable.get_device_queue(data->device, data->queue_family, 0, &data->graphics_queue);
 
     LOGI("ensure_device_vtable: device=%p queue=%p", (void *)data->device, (void *)data->graphics_queue);
@@ -988,7 +984,7 @@ static VkResult layer_create_device(VkPhysicalDevice phys, const VkDeviceCreateI
     data->physical_device = phys;
     data->inst_data = inst;
     data->vtable.get_device_proc_addr = fp_gdpa;
-    data->queue_family = 0;
+    data->queue_family = UINT32_MAX;
     data->graphics_queue = VK_NULL_HANDLE;
     if (ci->queueCreateInfoCount > 0)
         data->queue_family = ci->pQueueCreateInfos[0].queueFamilyIndex;
@@ -998,19 +994,12 @@ static VkResult layer_create_device(VkPhysicalDevice phys, const VkDeviceCreateI
     g_devices = data;
     pthread_mutex_unlock(&g_lock);
 
-    /* Spawn watcher thread to patch dispatch table after vkCreateDevice completes. */
-    if (is_enabled()) {
-        int expected = 0;
-        if (atomic_compare_exchange_strong(&g_watcher_started, &expected, 1)) {
-            pthread_t tid;
-            if (pthread_create(&tid, NULL, watcher_thread, (void *)*dev) == 0) {
-                pthread_detach(tid);
-                LOGI("create_device: watcher spawned (device=%p)", (void *)*dev);
-            }
-        }
-    }
+    /* No watcher thread. No dispatch table patching.
+     * Rely entirely on standard Vulkan layer interception via
+     * layer_get_device_proc_addr / layer_get_instance_proc_addr. */
 
-    LOGI("create_device: device=%p family=%u", (void *)*dev, data->queue_family);
+    LOGI("create_device: device=%p family=%u passthrough=%d",
+         (void *)*dev, data->queue_family, is_passthrough());
     return VK_SUCCESS;
 }
 
