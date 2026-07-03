@@ -1057,6 +1057,15 @@ echo "  AHardwareBuffer typedef added: $(grep -c 'typedef struct AHardwareBuffer
 sed -i 's/\*(const PTR32 \*)UlongToPtr(params->pBuffer) = PtrToUlong(pBuffer_host);/*(PTR32 *)UlongToPtr(params->pBuffer) = PtrToUlong(pBuffer_host);/' /tmp/proton-wine/dlls/winevulkan/vulkan_thunks.c
 cd /tmp/proton-wine
 
+# CRITICAL: Clean winevulkan object tree to force recompilation with patched Makefile.in.
+# Without this, make may skip rebuilding winevulkan.so if it thinks targets are up-to-date.
+echo "=== Cleaning winevulkan build tree ==="
+make -C dlls/winevulkan clean 2>&1 | tail -5 || true
+
+# Verify the generated Makefile has -ldl BEFORE building
+echo "=== Verifying -ldl in generated Makefile ==="
+grep "UNIX_LIBS" dlls/winevulkan/Makefile 2>/dev/null || echo "WARNING: Makefile not yet generated — will verify after configure"
+
 make -j$(nproc) -k \
   dlls/winewayland.drv/aarch64-windows/winewayland.drv \
   dlls/winewayland.drv/winewayland.so \
@@ -1067,6 +1076,20 @@ make -j$(nproc) -k \
   dlls/winevulkan/arm64ec-windows/winevulkan.dll \
   dlls/winevulkan/winevulkan.so \
   2>&1 | tail -300 || true
+
+# CRITICAL: Verify -ldl is in the ACTUAL link command by rebuilding winevulkan.so verbosely.
+# This catches cases where the Makefile.in patch didn't propagate to the generated Makefile.
+echo "=== Verifying winevulkan.so link line contains -ldl ==="
+make -j1 dlls/winevulkan/winevulkan.so V=1 2>&1 | grep -E "winevulkan\.so.*-shared|UNIX_LIBS|-ldl" | tail -5
+# Extract the actual clang/gcc link command and check for -ldl
+LINK_LINE=$(make -j1 dlls/winevulkan/winevulkan.so V=1 2>&1 | grep -E "winevulkan\.so.*-shared" | head -1)
+if echo "$LINK_LINE" | grep -q -- "-ldl"; then
+    echo "  VERIFIED: -ldl is in the winevulkan.so link command"
+else
+    echo "  WARNING: -ldl NOT found in link command!"
+    echo "  Link line: $LINK_LINE"
+    echo "  Makefile UNIX_LIBS: $(grep '^UNIX_LIBS' dlls/winevulkan/Makefile 2>/dev/null || echo 'NOT FOUND')"
+fi
 
 # If winevulkan.so wasn't built, run verbose make to see the actual error
 if [ ! -f /tmp/proton-wine/dlls/winevulkan/winevulkan.so ] || \
