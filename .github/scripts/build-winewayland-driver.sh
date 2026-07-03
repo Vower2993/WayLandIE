@@ -1001,17 +1001,27 @@ echo "=== [8/9] Build winewayland targets ==="
 #   wine client error:0: version mismatch 933/932.
 # Instead, the 8MB stack fix is achieved by patching the PE headers of
 # explorer.exe + rundll32.exe at install time (see WaylandDriverInstaller.java).
-# Add "android" to UNEXPOSED_PLATFORMS so android_surface functions are NOT
-# in the generated dispatch table enum. Proton's PE side (winevulkan.dll)
-# was also built without android_surface support, so this keeps the
-# PE/Unix enums in sync.
-echo "=== Patching winevulkan make_vulkan for android_surface ==="
+# CRITICAL: Do NOT add "android" to UNEXPOSED_PLATFORMS.
+# The previous patch (since the beginning of the project) ADDED "android"
+# to UNEXPOSED_PLATFORMS, thinking it would exclude android_surface functions.
+# But the logic in make_vulkan is:
+#   if platform != "win32" and platform not in UNEXPOSED_PLATFORMS:
+#       skip  (don't expose)
+# Adding "android" to UNEXPOSED_PLATFORMS makes the condition False →
+# android_surface IS exposed → enum includes vkCreateAndroidSurfaceKHR →
+# PE/Unix enum mismatch → vkCreateInstance dispatches to wrong function.
+#
+# By DEFAULT (android NOT in UNEXPOSED_PLATFORMS), android_surface is
+# already skipped because android != "win32" and android not in the set.
+# The default behavior is correct.
+echo "=== Verifying android NOT in UNEXPOSED_PLATFORMS ==="
 cd /tmp/proton-wine
-if grep -q '"android"' dlls/winevulkan/make_vulkan; then
-    echo "  android already in UNEXPOSED_PLATFORMS — skipping patch"
+if grep -A5 "^UNEXPOSED_PLATFORMS" dlls/winevulkan/make_vulkan | grep -q '"android"'; then
+    echo "  REMOVING 'android' from UNEXPOSED_PLATFORMS (was incorrectly added)"
+    sed -i '/^UNEXPOSED_PLATFORMS = {$/,/^}/{/    "android",/d}' dlls/winevulkan/make_vulkan
+    echo "  Removed 'android' from UNEXPOSED_PLATFORMS"
 else
-    sed -i '/^UNEXPOSED_PLATFORMS = {$/a\    "android",' dlls/winevulkan/make_vulkan
-    echo "  Added 'android' to UNEXPOSED_PLATFORMS"
+    echo "  android not in UNEXPOSED_PLATFORMS — correct (default behavior)"
 fi
 
 # CRITICAL: Patch config.h to define VK_USE_PLATFORM_WIN32_KHR.
