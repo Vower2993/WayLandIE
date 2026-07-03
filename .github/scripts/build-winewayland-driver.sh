@@ -250,10 +250,10 @@ with open(path, "r") as f:
 if "WayLandIE layer chain construction" in src:
     print("  winevulkan chain construction: already applied (skipping)")
 else:
-    # 1. Add #include <dlfcn.h> after #include <time.h>
+    # 1. Add #include <dlfcn.h> and <stdio.h> after #include <time.h>
     src = src.replace(
         '#include <time.h>\n',
-        '#include <time.h>\n#include <dlfcn.h>\n',
+        '#include <time.h>\n#include <dlfcn.h>\n#include <stdio.h>\n',
         1
     )
 
@@ -291,6 +291,11 @@ static PFN_vkCreateInstance g_waylandie_layer_create_instance;
 static VkResult waylandie_wrapped_create_instance(const VkInstanceCreateInfo *ci,
         const VkAllocationCallbacks *alloc, VkInstance *inst)
 {
+    /* Use fprintf(stderr, ...) directly — bypasses wine's ERR() debug channel
+     * system entirely. This guarantees output regardless of WINEDEBUG settings
+     * or debug channel compilation flags. */
+    fprintf(stderr, "WayLandIE wrapper: ENTER wine_vkCreateInstance ci=%p\n", (const void*)ci);
+
     if (!g_waylandie_layer_handle)
     {
         g_waylandie_layer_handle = dlopen("libvk_layer_waylandie_dmabuf.so", RTLD_NOW);
@@ -300,8 +305,13 @@ static VkResult waylandie_wrapped_create_instance(const VkInstanceCreateInfo *ci
                 dlsym(g_waylandie_layer_handle, "vkGetInstanceProcAddr");
             if (layer_gipa)
                 g_waylandie_layer_create_instance = (PFN_vkCreateInstance)layer_gipa(NULL, "vkCreateInstance");
+            fprintf(stderr, "WayLandIE wrapper: dlopen=%p gipa=%p create_instance=%p\n",
+                    g_waylandie_layer_handle, (void*)layer_gipa, (void*)g_waylandie_layer_create_instance);
         }
-        ERR("WayLandIE layer: dlopen=%p create_instance=%p\n", g_waylandie_layer_handle, (void*)g_waylandie_layer_create_instance);
+        else
+        {
+            fprintf(stderr, "WayLandIE wrapper: dlopen FAILED: %s\n", dlerror());
+        }
     }
 
     if (g_waylandie_layer_create_instance)
@@ -325,6 +335,7 @@ static VkResult waylandie_wrapped_create_instance(const VkInstanceCreateInfo *ci
     }
 
     /* Fallback: call host vkCreateInstance directly (no layer) */
+    fprintf(stderr, "WayLandIE wrapper: FALLBACK to host vkCreateInstance (no layer loaded)\n");
     return vk_funcs->p_vkCreateInstance(ci, alloc, inst);
 }
 """
