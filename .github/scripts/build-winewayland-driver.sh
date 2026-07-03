@@ -218,6 +218,132 @@ PATCH_EOF
 #
 # The Phase 6 NULL-instance guard (above) is KEPT — it's a pure safety fix.
 
+# === winevulkan: WayLandIE layer chain construction in wine_vkCreateInstance ===
+#
+# VK_LAYER_PATH does NOT work with adrenotools (it creates an isolated
+# linker namespace that does not read VK_LAYER_PATH). LD_PRELOAD breaks
+# the wine/FEX preloader. The dispatch table injection had a Wine-handle
+# vs host-handle mismatch.
+#
+# This patch modifies wine_vkCreateInstance() to:
+#   1. dlopen the layer .so (RTLD_NOW, not RTLD_GLOBAL — no interposition)
+#   2. Get the layer's vkGetInstanceProcAddr via dlsym
+#   3. Construct a VkLayerInstanceCreateInfo chain node containing the
+#      HOST driver's GIPA/GDPA (from vk_funcs)
+#   4. Call the layer's vkCreateInstance (its PATH 1 chain walk extracts
+#      the host GIPA and calls the real vkCreateInstance via it)
+#
+# The layer receives WINE VkInstance handles (not host handles) and
+# forwards them down the chain — no handle-type mismatch. The layer is
+# handle-transparent (returns raw host VkSwapchainKHR), so winevulkan's
+# thunk wrapping works correctly.
+#
+# The layer's vkCreateDevice is handled the same way: we replace
+# vk_funcs->p_vkCreateInstance with a wrapper that constructs the chain,
+# and the layer's PATH 1 handles vkCreateDevice via the cached GIPA.
+echo "=== Patching winevulkan: WayLandIE layer chain construction ==="
+python3 - <<'CHAIN_INJECT_EOF'
+path = "dlls/winevulkan/vulkan.c"
+with open(path, "r") as f:
+    src = f.read()
+
+if "WayLandIE layer chain construction" in src:
+    print("  winevulkan chain construction: already applied (skipping)")
+else:
+    # 1. Add #include <dlfcn.h> after #include <time.h>
+    src = src.replace(
+        '#include <time.h>\n',
+        '#include <time.h>\n#include <dlfcn.h>\n',
+        1
+    )
+
+    # 2. Add layer injection globals + chain types after vk_funcs declaration
+    old_vk_funcs = "const struct vulkan_funcs *vk_funcs;\n"
+    new_vk_funcs = r"""const struct vulkan_funcs *vk_funcs;
+
+/* WayLandIE layer chain construction types.
+ * Wine's vulkan.h does NOT include vk_layer.h, so define manually. */
+#define WAYLANDIE_VK_STRUCTURE_TYPE_LOADER_INSTANCE_CREATE_INFO ((VkStructureType)24)
+#define WAYLANDIE_VK_LAYER_LINK_INFO 0
+
+typedef struct waylandie_VkLayerInstanceLink {
+    PFN_vkGetInstanceProcAddr pfnNextGetInstanceProcAddr;
+    PFN_vkGetDeviceProcAddr   pfnNextGetDeviceProcAddr;
+} waylandie_VkLayerInstanceLink;
+
+typedef struct waylandie_VkLayerInstanceCreateInfo {
+    VkStructureType sType;
+    const void *pNext;
+    uint32_t function;
+    union {
+        waylandie_VkLayerInstanceLink *pLayerInfo;
+    } u;
+} waylandie_VkLayerInstanceCreateInfo;
+
+static void *g_waylandie_layer_handle;
+static PFN_vkCreateInstance g_waylandie_layer_create_instance;
+
+/* Wrapper for vkCreateInstance: dlopen the layer, construct the chain
+ * node with the HOST GIPA/GDPA, then call the layer's vkCreateInstance.
+ * The layer's PATH 1 (chain walk) extracts the host GIPA and calls the
+ * real vkCreateInstance via it. The layer receives WINE handles and
+ * forwards them down — no handle-type mismatch. */
+static VkResult waylandie_wrapped_create_instance(const VkInstanceCreateInfo *ci,
+        const VkAllocationCallbacks *alloc, VkInstance *inst)
+{
+    if (!g_waylandie_layer_handle)
+    {
+        g_waylandie_layer_handle = dlopen("libvk_layer_waylandie_dmabuf.so", RTLD_NOW);
+        if (g_waylandie_layer_handle)
+        {
+            PFN_vkGetInstanceProcAddr layer_gipa = (PFN_vkGetInstanceProcAddr)
+                dlsym(g_waylandie_layer_handle, "vkGetInstanceProcAddr");
+            if (layer_gipa)
+                g_waylandie_layer_create_instance = (PFN_vkCreateInstance)layer_gipa(NULL, "vkCreateInstance");
+        }
+        ERR("WayLandIE layer: dlopen=%p create_instance=%p\n", g_waylandie_layer_handle, (void*)g_waylandie_layer_create_instance);
+    }
+
+    if (g_waylandie_layer_create_instance)
+    {
+        waylandie_VkLayerInstanceLink link;
+        waylandie_VkLayerInstanceCreateInfo layer_info;
+        VkInstanceCreateInfo patched;
+
+        link.pfnNextGetInstanceProcAddr = vk_funcs->p_vkGetInstanceProcAddr;
+        link.pfnNextGetDeviceProcAddr = vk_funcs->p_vkGetDeviceProcAddr;
+
+        layer_info.sType = WAYLANDIE_VK_STRUCTURE_TYPE_LOADER_INSTANCE_CREATE_INFO;
+        layer_info.pNext = ci->pNext;
+        layer_info.function = WAYLANDIE_VK_LAYER_LINK_INFO;
+        layer_info.u.pLayerInfo = &link;
+
+        patched = *ci;
+        patched.pNext = &layer_info;
+
+        return g_waylandie_layer_create_instance(&patched, alloc, inst);
+    }
+
+    /* Fallback: call host vkCreateInstance directly (no layer) */
+    return vk_funcs->p_vkCreateInstance(ci, alloc, inst);
+}
+"""
+    if old_vk_funcs not in src:
+        raise SystemExit("  ERROR: could not find 'const struct vulkan_funcs *vk_funcs;' to patch")
+    src = src.replace(old_vk_funcs, new_vk_funcs, 1)
+
+    # 3. Replace the vkCreateInstance call in wine_vkCreateInstance
+    old_call = "    return vk_funcs->p_vkCreateInstance(create_info, NULL /* allocator */, client_instance_ptr);"
+    new_call = "    return waylandie_wrapped_create_instance(create_info, NULL /* allocator */, client_instance_ptr);"
+    if old_call not in src:
+        raise SystemExit("  ERROR: could not find vk_funcs->p_vkCreateInstance call in wine_vkCreateInstance")
+    src = src.replace(old_call, new_call, 1)
+
+    with open(path, "w") as f:
+        f.write(src)
+    print("  winevulkan chain construction: PATCHED")
+CHAIN_INJECT_EOF
+
 # === winevulkan: NO MORE MANUAL_UNIX_THUNKS or winevulkan_dmabuf.c ===
 # The runtime Vulkan layer (libvk_layer_waylandie_dmabuf.so) now handles
 # all swapchain/present interception via standard Vulkan layer interception.
