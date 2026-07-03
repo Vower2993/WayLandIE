@@ -13,6 +13,16 @@ git checkout -b wayland-v3
 
 The `main` branch is at commit `7d8cb49` and has a CI pipeline that builds the APK. Do not break it. Create a feature branch, push your changes there, and let CI build from that branch for testing.
 
+## ⚠️ BUILD LUDASHI VARIANT ONLY
+
+**The CI workflow currently builds the `pubg` variant. You MUST change it to build the `ludashi` variant only.**
+
+In `.github/workflows/pr-ci.yml`, change the build matrix to use `ludashi` instead of `pubg`:
+- `gradleTask`: `assembleLudashiDebug` (not `assemblePubgDebug`)
+- `apkPath`: `app/build/outputs/apk/ludashi/debug/ludashi.apk` (not `pubg.apk`)
+
+The `ludashi` variant is the correct build flavor for this project. Do NOT build `pubg` or `standard` variants — they waste CI time and produce APKs the user cannot use.
+
 ---
 
 ## GitHub PAT
