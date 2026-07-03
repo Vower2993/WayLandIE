@@ -263,7 +263,8 @@ else:
 
 /* WayLandIE layer chain construction types.
  * Wine's vulkan.h does NOT include vk_layer.h, so define manually. */
-#define WAYLANDIE_VK_STRUCTURE_TYPE_LOADER_INSTANCE_CREATE_INFO ((VkStructureType)24)
+#define WAYLANDIE_VK_STRUCTURE_TYPE_LOADER_INSTANCE_CREATE_INFO ((VkStructureType)47)
+#define WAYLANDIE_VK_STRUCTURE_TYPE_LOADER_DEVICE_CREATE_INFO   ((VkStructureType)48)
 #define WAYLANDIE_VK_LAYER_LINK_INFO 0
 
 typedef struct waylandie_VkLayerInstanceLink {
