@@ -744,6 +744,32 @@ else
     echo "  Added 'android' to UNEXPOSED_PLATFORMS"
 fi
 
+# CRITICAL: Patch config.h to define VK_USE_PLATFORM_WIN32_KHR.
+#
+# Wine's configure.ac only defines VK_USE_PLATFORM_WIN32_KHR when building
+# for Windows (PE side). On Android (--host=aarch64-linux-android), configure
+# skips it. But we NEED it on the Unix side too, so that:
+# 1. make_vulkan generates vkCreateWin32SurfaceKHR into the dispatch table
+# 2. vulkan_thunks.c compiles the win32_surface thunk (guarded by #ifdef)
+# 3. vkGetInstanceProcAddr("vkCreateWin32SurfaceKHR") returns non-NULL
+#
+# Without this, DXVK can't create a surface → can't create a swapchain →
+# game deadlocks in vkGetEventStatus polling.
+#
+# The -DVK_USE_PLATFORM_WIN32_KHR in CFLAGS alone is NOT enough because
+# vulkan_thunks.c checks #ifdef VK_USE_PLATFORM_WIN32_KHR which reads
+# config.h, not the compiler command line.
+echo "=== Patching config.h for VK_USE_PLATFORM_WIN32_KHR ==="
+CONFIG_H="/tmp/proton-wine/include/config.h"
+if grep -q "VK_USE_PLATFORM_WIN32_KHR" "$CONFIG_H" 2>/dev/null; then
+    echo "  VK_USE_PLATFORM_WIN32_KHR already in config.h"
+else
+    echo "" >> "$CONFIG_H"
+    echo "/* WayLandIE: Enable Win32 surface support on Android Unix side */" >> "$CONFIG_H"
+    echo "#define VK_USE_PLATFORM_WIN32_KHR 1" >> "$CONFIG_H"
+    echo "  Added VK_USE_PLATFORM_WIN32_KHR to config.h"
+fi
+
 # Regenerate vulkan.h and vulkan_driver.h with android_surface support
 echo "=== Regenerating Vulkan headers ==="
 cd /tmp/proton-wine/dlls/winevulkan
@@ -751,6 +777,16 @@ python3 make_vulkan 2>&1 | tail -5
 # Verify android_surface is now in the generated headers
 echo "  VK_KHR_xlib_surface count: $(grep -c "VK_KHR_xlib_surface" /tmp/proton-wine/include/wine/vulkan.h || true)"
 echo "  vkCreateAndroidSurfaceKHR count: $(grep -c "vkCreateAndroidSurfaceKHR" /tmp/proton-wine/include/wine/vulkan.h || true)"
+echo "  vkCreateWin32SurfaceKHR count: $(grep -c "vkCreateWin32SurfaceKHR" /tmp/proton-wine/include/wine/vulkan.h || true)"
+echo "  VK_KHR_win32_surface count: $(grep -c "VK_KHR_win32_surface" /tmp/proton-wine/include/wine/vulkan.h || true)"
+# FATAL check: vkCreateWin32SurfaceKHR MUST be in the generated headers
+WIN32_SURFACE_COUNT=$(grep -c "vkCreateWin32SurfaceKHR" /tmp/proton-wine/include/wine/vulkan.h || true)
+if [ "$WIN32_SURFACE_COUNT" -lt 1 ]; then
+    echo "FATAL: vkCreateWin32SurfaceKHR not generated — VK_USE_PLATFORM_WIN32_KHR not effective"
+    echo "  config.h VK_USE_PLATFORM_WIN32_KHR: $(grep -c VK_USE_PLATFORM_WIN32_KHR /tmp/proton-wine/include/config.h || true)"
+    exit 1
+fi
+echo "  VERIFIED: vkCreateWin32SurfaceKHR is in generated headers ($WIN32_SURFACE_COUNT occurrences)"
 # Fix: Add typedef for AHardwareBuffer so generated thunk32_ code compiles.
 # The generated code uses bare 'AHardwareBuffer' but vulkan.h only has
 # 'struct AHardwareBuffer;' forward declaration without a typedef.
