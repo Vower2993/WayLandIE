@@ -353,6 +353,22 @@ CHAIN_INJECT_EOF
 # The ONLY change we need in winevulkan is adding VK_USE_PLATFORM_WIN32_KHR
 # so that vkCreateWin32SurfaceKHR is compiled into the Unix dispatch table.
 # This is done later via CFLAGS after configure.
+
+# === winevulkan: Add -ldl to UNIX_LIBS for dlopen/dlsym ===
+# Our chain construction patch calls dlopen/dlsym/dlerror in winevulkan.so.
+# The default Makefile.in only links -lwin32u + pthread. Without -ldl,
+# the dlopen call crashes at runtime (SIGSEGV) because the symbol is
+# undefined. This causes vkCreateInstance to fail silently — the ERR()
+# log never fires because the crash happens before it.
+echo "=== Patching winevulkan Makefile.in: add -ldl to UNIX_LIBS ==="
+MAKEFILE_IN="/tmp/proton-wine/dlls/winevulkan/Makefile.in"
+if grep -q 'UNIX_LIBS.*-ldl' "$MAKEFILE_IN" 2>/dev/null; then
+    echo "  -ldl already in UNIX_LIBS — skipping"
+else
+    sed -i 's/^UNIX_LIBS = -lwin32u $(PTHREAD_LIBS)/UNIX_LIBS = -lwin32u $(PTHREAD_LIBS) -ldl/' "$MAKEFILE_IN"
+    echo "  Added -ldl to UNIX_LIBS"
+    grep "^UNIX_LIBS" "$MAKEFILE_IN"
+fi
 echo "=== Skipping MANUAL_UNIX_THUNKS patch (runtime layer handles interception) ==="
 echo "=== Skipping winevulkan_dmabuf.c copy (no longer needed) ==="
 
