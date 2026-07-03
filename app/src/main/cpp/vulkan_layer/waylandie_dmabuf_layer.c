@@ -1340,66 +1340,15 @@ static VkResult layer_create_device(VkPhysicalDevice physicalDevice,
         return VK_ERROR_INITIALIZATION_FAILED;
     }
 
-    /* Force-inject VK_KHR_external_memory_fd + VK_KHR_external_memory into
-     * the device extension list. DXVK doesn't request these (it uses
-     * VK_KHR_external_memory_win32 which Wine maps), but we need them to
-     * export dmabuf fds via vkGetMemoryFdKHR.
-     *
-     * We build a modified VkDeviceCreateInfo with the extra extensions
-     * appended. The original pCreateInfo is const, so we allocate a copy. */
-    const char *extra_exts[] = {
-        "VK_KHR_external_memory_fd",
-        "VK_KHR_external_memory",
-        "VK_EXT_external_memory_dma_buf",
-    };
-    int extra_count = 0;
-    /* Check which extensions are already requested by DXVK. */
-    for (int e = 0; e < 3; e++) {
-        bool already = false;
-        for (uint32_t i = 0; i < pCreateInfo->enabledExtensionCount; i++) {
-            if (pCreateInfo->ppEnabledExtensionNames[i] &&
-                strcmp(pCreateInfo->ppEnabledExtensionNames[i], extra_exts[e]) == 0) {
-                already = true;
-                break;
-            }
-        }
-        if (!already) extra_count++;
-    }
-
-    VkDeviceCreateInfo modified_create_info;
-    const char **modified_exts = NULL;
-    if (extra_count > 0 && atomic_load(&g_enabled)) {
-        modified_create_info = *pCreateInfo;
-        modified_exts = (const char **)malloc(
-            (pCreateInfo->enabledExtensionCount + extra_count) * sizeof(char *));
-        if (modified_exts) {
-            uint32_t idx = 0;
-            for (uint32_t i = 0; i < pCreateInfo->enabledExtensionCount; i++) {
-                modified_exts[idx++] = pCreateInfo->ppEnabledExtensionNames[i];
-            }
-            for (int e = 0; e < 3; e++) {
-                bool already = false;
-                for (uint32_t i = 0; i < pCreateInfo->enabledExtensionCount; i++) {
-                    if (pCreateInfo->ppEnabledExtensionNames[i] &&
-                        strcmp(pCreateInfo->ppEnabledExtensionNames[i], extra_exts[e]) == 0) {
-                        already = true;
-                        break;
-                    }
-                }
-                if (!already) {
-                    modified_exts[idx++] = extra_exts[e];
-                    LOGI("layer_create_device: injecting extension %s", extra_exts[e]);
-                }
-            }
-            modified_create_info.enabledExtensionCount = idx;
-            modified_create_info.ppEnabledExtensionNames = modified_exts;
-            pCreateInfo = &modified_create_info;
-        }
-    }
+    /* Do NOT inject extensions. winevulkan rejects extensions it doesn't
+     * expose (VK_KHR_external_memory_fd, VK_EXT_external_memory_dma_buf are
+     * in UNEXPOSED_EXTENSIONS). The host driver already has these enabled
+     * via the wayland driver's mapping of VK_KHR_external_memory_win32 → _fd.
+     * We obtain vkGetMemoryFdKHR via GetDeviceProcAddr at runtime — if the
+     * host device has the extension enabled, GDPA will return the pointer. */
 
     /* Call the next layer's vkCreateDevice. */
     VkResult res = fp_create_device(physicalDevice, pCreateInfo, pAllocator, pDevice);
-    if (modified_exts) free(modified_exts);
     if (res != VK_SUCCESS) return res;
 
     /* Allocate device data. */
