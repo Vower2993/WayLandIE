@@ -310,9 +310,12 @@ static device_data *find_device(VkDevice dev) {
 }
 
 static swapchain_data *find_swapchain(VkSwapchainKHR sw) {
+    /* Handle-transparent lookup: compare the raw host VkSwapchainKHR
+     * stored in real_swapchain, NOT a pointer cast. The layer returns
+     * the raw host handle to the caller, so sw IS real_swapchain. */
     pthread_mutex_lock(&g_lock);
     for (swapchain_data *s = g_swapchains; s; s = s->next)
-        if ((VkSwapchainKHR)(uintptr_t)s == sw) {
+        if (s->real_swapchain == sw) {
             pthread_mutex_unlock(&g_lock);
             return s;
         }
@@ -668,8 +671,12 @@ VkResult layer_create_swapchain(VkDevice device, const VkSwapchainCreateInfoKHR 
     g_swapchains = sw;
     pthread_mutex_unlock(&g_lock);
 
-    *ret = (VkSwapchainKHR)(uintptr_t)sw;
-    LOGI("create_swapchain: success real=%p staging=%u", (void *)real_swapchain, count);
+    /* Handle-transparent: return the RAW host VkSwapchainKHR, not a
+     * pointer to our swapchain_data. The caller (winevulkan/loader)
+     * sees the real driver handle. Our internal find_swapchain() looks
+     * up swapchain_data by comparing real_swapchain == handle. */
+    *ret = real_swapchain;
+    LOGI("create_swapchain: success real=%p staging=%u (handle-transparent)", (void *)real_swapchain, count);
     return VK_SUCCESS;
 
 fail:
@@ -916,17 +923,14 @@ VkResult layer_queue_present(VkQueue queue, const VkPresentInfoKHR *info) {
                  img->width, img->height, img->stride, img->dmabuf_fd);
     }
 
-    /* Call real vkQueuePresentKHR with real swapchain handles.
-     * If we consumed the wait semaphores above, pass 0 to real present
-     * (our blit fence already ensured GPU ordering on this queue). */
+    /* Call real vkQueuePresentKHR.
+     * Handle-transparent: info->pSwapchains already contains the raw host
+     * VkSwapchainKHR handles (we returned them from layer_create_swapchain).
+     * No handle rewriting needed — pass info straight through. Only strip
+     * wait semaphores if we consumed them above. */
     if (any_layer_swapchain) {
-        VkSwapchainKHR real_swapchains[WAYLANDIE_MAX_IMAGES];
-        for (uint32_t i = 0; i < info->swapchainCount && i < WAYLANDIE_MAX_IMAGES; i++) {
-            swapchain_data *s = find_swapchain(info->pSwapchains[i]);
-            real_swapchains[i] = s ? s->real_swapchain : info->pSwapchains[i];
-        }
         VkPresentInfoKHR real_info = *info;
-        real_info.pSwapchains = real_swapchains;
+        /* pSwapchains stays the same — handles are already host handles */
         /* pImageIndices stays the same — real index == our index */
         if (semaphores_consumed) {
             real_info.waitSemaphoreCount = 0;
