@@ -108,7 +108,11 @@ public final class WaylandDriverInstaller {
             if (arm64ecDir.isDirectory()) {
                 copyIfExists(prefix, "lib/wine/aarch64-windows/libarm64ecfex.dll", arm64ecDir);
                 copyIfExists(prefix, "lib/wine/aarch64-windows/ntdll.dll", arm64ecDir);
-                copyIfExists(prefix, "lib/wine/aarch64-windows/winevulkan.dll", arm64ecDir);
+                // winevulkan.dll: read from arm64ec-windows source to match the destination arch.
+                // Unlike ntdll.dll (which is a single hybrid PE), winevulkan.dll is built as
+                // two separate PEs (aarch64 vs arm64ec). Loading the aarch64 PE under FEX for
+                // 32-bit games causes thunk enum mismatch in the winevulkan dispatch table.
+                copyIfExists(prefix, "lib/wine/arm64ec-windows/winevulkan.dll", arm64ecDir);
             } else {
                 Log.i(TAG, "ensureDriverInstalled: arm64ec-windows dir not present — skipping arm64ec copies");
             }
