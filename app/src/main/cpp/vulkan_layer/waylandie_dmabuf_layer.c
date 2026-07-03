@@ -1,24 +1,18 @@
 /* WayLandIE dmabuf zero-copy Vulkan layer.
  *
- * Intercepts the swapchain lifecycle to create AHardwareBuffer-backed images
- * whose dmabuf fds can be exported, then forwards each presented frame to
- * the WaylandIE bridge socket (waylandie.display.bridge.v1). The Java
- * WaylandBridgeServer receives the dmabuf and presents it via SurfaceControl.
+ * Two-stage blit pipeline:
+ * Image A (OPTIMAL, COLOR_ATTACHMENT) — DXVK renders here
+ * Image B (LINEAR, TRANSFER_DST) — staging for memfd export
+ * On present: vkCmdCopyImage A→B, vkMapMemory B, memcpy to memfd, bridge
  *
- * This is the Level 2 zero-copy path: DXVK renders into AHB-backed images,
- * the layer exports each AHB's dmabuf fd on present, and the bridge forwards
- * it to SurfaceFlinger with zero CPU memcpy.
+ * Hooking: dispatch table patched via pointer comparison (no hardcoded indices).
  *
  * Copyright 2024 WayLandIE Project */
 
-/* Must come before any system header for Dl_info / dladdr. */
 #define _GNU_SOURCE
-
-/* Vulkan header must come first for the layer dispatch macros. */
 #include <vulkan/vk_layer.h>
 #include <vulkan/vulkan.h>
 #include <vulkan/vulkan_android.h>
-
 #include <android/hardware_buffer.h>
 #include <android/log.h>
 #include <dlfcn.h>
@@ -35,16 +29,11 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
-#include <sys/mman.h>
-#include <linux/memfd.h>
 
-/* Fallback defines for older NDK / Vulkan header versions. */
 #ifndef VK_LAYER_EXPORT
 #define VK_LAYER_EXPORT __attribute__((visibility("default")))
 #endif
 
-/* AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM was added in API 26 but may not be
- * exposed in all NDK versions. Define it if missing. */
 #ifndef AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM
 #define AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM 5
 #endif
@@ -54,73 +43,64 @@
 #define LOGW(...) __android_log_print(ANDROID_LOG_WARN,  LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
-#define WAYLANDIE_MAX_SWAPCHAIN_IMAGES 8
-#define WAYLANDIE_BRIDGE_SOCKET_DEFAULT "waylandie.display.bridge.v1"
+#define WAYLANDIE_MAX_IMAGES 8
+#define WAYLANDIE_BRIDGE_SOCKET "waylandie.display.bridge.v1"
 
-/* DRM fourcc codes for the dmabuf-present command. */
 #define DRM_FORMAT_ARGB8888 0x34325241U
-#define DRM_FORMAT_XRGB8888 0x34325258U
 #define DRM_FORMAT_ABGR8888 0x34324241U
-#define DRM_FORMAT_XBGR8888 0x34324258U
-#define DRM_FORMAT_RGBA8888 0x34424152U
-#define DRM_FORMAT_BGRA8888 0x34414742U
 
 /* ------------------------------------------------------------------ */
-/* Layer dispatch tables                                               */
+/* Dispatch tables                                                    */
 /* ------------------------------------------------------------------ */
 
 typedef struct {
     PFN_vkGetInstanceProcAddr get_instance_proc_addr;
-    PFN_vkGetDeviceProcAddr   get_device_proc_addr;
-    /* Instance-level functions we pass through. */
-    PFN_vkCreateInstance       create_instance;
-    PFN_vkDestroyInstance      destroy_instance;
-    PFN_vkEnumeratePhysicalDevices enumerate_physical_devices;
-    PFN_vkGetPhysicalDeviceProperties get_physical_device_properties;
-    PFN_vkGetPhysicalDeviceMemoryProperties get_physical_device_memory_properties;
-    PFN_vkGetInstanceProcAddr  gipa;
+    PFN_vkGetDeviceProcAddr get_device_proc_addr;
+    PFN_vkCreateInstance create_instance;
+    PFN_vkDestroyInstance destroy_instance;
+    PFN_vkCreateDevice create_device;
+    PFN_vkDestroyDevice destroy_device;
+    PFN_vkGetPhysicalDeviceMemoryProperties get_phys_mem_props;
 } instance_dispatch;
 
 typedef struct {
     PFN_vkGetDeviceProcAddr get_device_proc_addr;
-    PFN_vkDestroyDevice     destroy_device;
-    PFN_vkGetDeviceQueue    get_device_queue;
-    PFN_vkCreateCommandPool create_command_pool;
-    PFN_vkDestroyCommandPool destroy_command_pool;
-    PFN_vkAllocateCommandBuffers allocate_command_buffers;
-    PFN_vkFreeCommandBuffers free_command_buffers;
-    PFN_vkBeginCommandBuffer begin_command_buffer;
-    PFN_vkEndCommandBuffer   end_command_buffer;
-    PFN_vkQueueSubmit        queue_submit;
-    PFN_vkQueueWaitIdle      queue_wait_idle;
-    PFN_vkCreateFence        create_fence;
-    PFN_vkDestroyFence       destroy_fence;
-    PFN_vkWaitForFences      wait_for_fences;
-    PFN_vkResetFences        reset_fences;
-    PFN_vkCreateImage        create_image;
-    PFN_vkDestroyImage       destroy_image;
-    PFN_vkAllocateMemory     allocate_memory;
-    PFN_vkFreeMemory         free_memory;
-    PFN_vkBindImageMemory    bind_image_memory;
-    PFN_vkGetImageMemoryRequirements2 get_image_memory_requirements2;  /* returns void */
-    PFN_vkMapMemory          map_memory;
-    PFN_vkUnmapMemory        unmap_memory;
-    /* Swapchain functions (real driver). We don't create a real swapchain,
-     * but we keep the pointers for completeness. */
-    PFN_vkCreateSwapchainKHR  real_create_swapchain;
+    PFN_vkDestroyDevice destroy_device;
+    PFN_vkGetDeviceQueue get_device_queue;
+    PFN_vkCreateCommandPool create_cmd_pool;
+    PFN_vkDestroyCommandPool destroy_cmd_pool;
+    PFN_vkAllocateCommandBuffers alloc_cmd_bufs;
+    PFN_vkFreeCommandBuffers free_cmd_bufs;
+    PFN_vkBeginCommandBuffer begin_cmd;
+    PFN_vkEndCommandBuffer end_cmd;
+    PFN_vkQueueSubmit queue_submit;
+    PFN_vkQueueWaitIdle queue_wait_idle;
+    PFN_vkCreateFence create_fence;
+    PFN_vkDestroyFence destroy_fence;
+    PFN_vkWaitForFences wait_fences;
+    PFN_vkResetFences reset_fences;
+    PFN_vkCreateImage create_image;
+    PFN_vkDestroyImage destroy_image;
+    PFN_vkAllocateMemory alloc_mem;
+    PFN_vkFreeMemory free_mem;
+    PFN_vkBindImageMemory bind_img_mem;
+    PFN_vkMapMemory map_mem;
+    PFN_vkUnmapMemory unmap_mem;
+    PFN_vkGetImageMemoryRequirements2 get_img_mem_reqs2;
+    PFN_vkGetImageSubresourceLayout get_subres_layout;
+    PFN_vkCmdCopyImage cmd_copy_image;
+    PFN_vkCmdPipelineBarrier cmd_pipeline_barrier;
+    PFN_vkCreateSwapchainKHR real_create_swapchain;
     PFN_vkDestroySwapchainKHR real_destroy_swapchain;
-    PFN_vkGetSwapchainImagesKHR real_get_swapchain_images;
-    PFN_vkAcquireNextImageKHR real_acquire_next_image;
-    PFN_vkQueuePresentKHR     real_queue_present;
+    PFN_vkGetSwapchainImagesKHR real_get_images;
+    PFN_vkAcquireNextImageKHR real_acquire;
+    PFN_vkQueuePresentKHR real_present;
 } device_dispatch;
-
-/* ------------------------------------------------------------------ */
-/* Per-instance / per-device tracking                                  */
-/* ------------------------------------------------------------------ */
 
 typedef struct instance_data {
     instance_dispatch vtable;
     VkInstance instance;
+    VkPhysicalDevice physical_device;
     struct instance_data *next;
 } instance_data;
 
@@ -135,1529 +115,987 @@ typedef struct device_data {
 } device_data;
 
 /* ------------------------------------------------------------------ */
-/* Opaque-FD-backed virtual swapchain                                 */
+/* Two-stage blit swapchain                                           */
+/* Image A: OPTIMAL tiling, COLOR_ATTACHMENT (DXVK renders here)      */
+/* Image B: LINEAR tiling, TRANSFER_DST (staging for memfd export)    */
 /* ------------------------------------------------------------------ */
 
 typedef struct {
-    VkImage image;
-    VkDeviceMemory memory;
-    VkDeviceSize allocation_size;
-    int dmabuf_fd;  /* -1 for CPU copy path (memfd on present) */
+    VkImage render_img;       /* Image A — OPTIMAL, render target */
+    VkDeviceMemory render_mem;
+    VkImage staging_img;      /* Image B — LINEAR, transfer dst */
+    VkDeviceMemory staging_mem;
+    VkDeviceSize staging_size;
     uint32_t stride;
     uint64_t offset;
-    uint64_t size;
     uint32_t width, height;
     uint32_t drm_format;
     bool in_use;
-    VkFence render_fence;  /* signaled when DXVK finishes rendering */
 } swapchain_image;
 
 typedef struct swapchain_data {
     device_data *dev_data;
     uint32_t image_count;
-    swapchain_image images[WAYLANDIE_MAX_SWAPCHAIN_IMAGES];
-    uint32_t acquire_index;  /* round-robin index for acquire */
+    swapchain_image images[WAYLANDIE_MAX_IMAGES];
+    uint32_t acquire_index;
     VkFormat format;
     VkExtent2D extent;
-    /* Command pool + scratch command buffer for semaphore signaling. */
-    VkCommandPool command_pool;
-    VkCommandBuffer scratch_cmd;
-    VkFence scratch_fence;
-    /* Bridge socket connection (reused across presents). */
+    VkCommandPool cmd_pool;
+    VkCommandBuffer blit_cmd;
+    VkFence blit_fence;
     int bridge_sock;
-    char bridge_socket_name[256];
     uint64_t present_count;
     struct swapchain_data *next;
 } swapchain_data;
 
 /* ------------------------------------------------------------------ */
-/* Global registries (protected by mutexes)                           */
+/* Globals                                                            */
 /* ------------------------------------------------------------------ */
 
-static pthread_mutex_t g_instance_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static instance_data *g_instances = NULL;
-
-static pthread_mutex_t g_device_lock = PTHREAD_MUTEX_INITIALIZER;
 static device_data *g_devices = NULL;
-
-static pthread_mutex_t g_swapchain_lock = PTHREAD_MUTEX_INITIALIZER;
 static swapchain_data *g_swapchains = NULL;
-
-/* Enable flag — read once per present, cheap. */
 static atomic_int g_enabled = 0;
-static atomic_int g_layer_active = 0;
+static atomic_int g_watcher_started = 0;
+
+/* Saved real function pointers (from dispatch table patching) */
+static PFN_vkCreateSwapchainKHR  g_real_create_swapchain = NULL;
+static PFN_vkDestroySwapchainKHR g_real_destroy_swapchain = NULL;
+static PFN_vkGetSwapchainImagesKHR g_real_get_images = NULL;
+static PFN_vkAcquireNextImageKHR g_real_acquire = NULL;
+static PFN_vkQueuePresentKHR     g_real_present = NULL;
 
 /* ------------------------------------------------------------------ */
-/* Helpers: look up tracked objects                                   */
+/* Helpers                                                            */
 /* ------------------------------------------------------------------ */
 
-static instance_data *find_instance_data(VkInstance instance) {
-    pthread_mutex_lock(&g_instance_lock);
-    for (instance_data *d = g_instances; d; d = d->next) {
-        if (d->instance == instance) {
-            pthread_mutex_unlock(&g_instance_lock);
-            return d;
+static int is_enabled(void) {
+    if (atomic_load(&g_enabled) == 0) {
+        const char *env = getenv("WAYLANDIE_DMABUF_LAYER_ENABLE");
+        if (env && env[0] == '1') {
+            atomic_store(&g_enabled, 1);
+            LOGI("WayLandIE dmabuf layer ENABLED");
+        } else {
+            atomic_store(&g_enabled, -1);
         }
     }
-    pthread_mutex_unlock(&g_instance_lock);
-    return NULL;
+    return atomic_load(&g_enabled) == 1;
 }
 
-static device_data *find_device_data(VkDevice device) {
-    pthread_mutex_lock(&g_device_lock);
-    for (device_data *d = g_devices; d; d = d->next) {
-        if (d->device == device) {
-            pthread_mutex_unlock(&g_device_lock);
-            return d;
-        }
-    }
-    pthread_mutex_unlock(&g_device_lock);
-    return NULL;
-}
-
-static device_data *find_device_data_by_physical(VkPhysicalDevice phys) {
-    /* We don't track physical devices directly; find via device list. */
-    (void)phys;
-    return NULL;
-}
-
-static swapchain_data *find_swapchain_data(VkSwapchainKHR swapchain) {
-    pthread_mutex_lock(&g_swapchain_lock);
-    for (swapchain_data *s = g_swapchains; s; s = s->next) {
-        if ((VkSwapchainKHR)(uintptr_t)s == swapchain) {
-            pthread_mutex_unlock(&g_swapchain_lock);
-            return s;
-        }
-    }
-    pthread_mutex_unlock(&g_swapchain_lock);
-    return NULL;
-}
-
-/* ------------------------------------------------------------------ */
-/* Bridge socket helpers                                              */
-/* ------------------------------------------------------------------ */
-
-static int bridge_connect(const char *socket_name) {
-    int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
-    if (fd < 0) return -1;
-    struct sockaddr_un addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sun_family = AF_UNIX;
-    size_t name_len = strlen(socket_name);
-    if (name_len + 1 > sizeof(addr.sun_path)) { close(fd); return -1; }
-    addr.sun_path[0] = '\0';  /* abstract socket */
-    memcpy(addr.sun_path + 1, socket_name, name_len);
-    socklen_t addr_len = (socklen_t)(offsetof(struct sockaddr_un, sun_path) + 1 + name_len);
-    if (connect(fd, (struct sockaddr *)&addr, addr_len) != 0) {
-        close(fd);
-        return -1;
-    }
-    return fd;
-}
-
-static int bridge_send_dmabuf(int sock, int dmabuf_fd,
-                              uint32_t width, uint32_t height,
-                              uint32_t drm_format, uint64_t modifier,
-                              uint32_t stride, uint64_t size) {
-    char command[512];
-    int cmd_len = snprintf(command, sizeof(command),
-        "dmabuf-present fast=1 window=fullscreen width=%u height=%u "
-        "format=%u modifier=0x%016llx planes=1 stride0=%u offset0=0 "
-        "size=%llu driver=turnip\n",
-        width, height, drm_format,
-        (unsigned long long)modifier, stride,
-        (unsigned long long)size);
-    if (cmd_len <= 0 || (size_t)cmd_len >= sizeof(command)) return -1;
-
-    char control[CMSG_SPACE(sizeof(int))];
-    struct iovec iov = { .iov_base = command, .iov_len = (size_t)cmd_len };
-    struct msghdr msg;
-    memset(control, 0, sizeof(control));
-    memset(&msg, 0, sizeof(msg));
-    msg.msg_iov = &iov;
-    msg.msg_iovlen = 1;
-    msg.msg_control = control;
-    msg.msg_controllen = sizeof(control);
-    struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
-    if (!cmsg) return -1;
-    cmsg->cmsg_level = SOL_SOCKET;
-    cmsg->cmsg_type = SCM_RIGHTS;
-    cmsg->cmsg_len = CMSG_LEN(sizeof(int));
-    memcpy(CMSG_DATA(cmsg), &dmabuf_fd, sizeof(int));
-    msg.msg_controllen = cmsg->cmsg_len;
-
-    ssize_t sent = sendmsg(sock, &msg, MSG_NOSIGNAL);
-    if (sent < 0 || (size_t)sent != iov.iov_len) return -1;
-
-    /* Read response (don't block forever). */
-    char response[256];
-    struct timeval tv = { .tv_sec = 1, .tv_usec = 0 };
-    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    ssize_t rlen = recv(sock, response, sizeof(response) - 1, 0);
-    if (rlen > 0) {
-        response[rlen] = '\0';
-        if (strstr(response, "status=pass")) return 0;
-        LOGW("bridge responded: %s", response);
-    }
-    return 0;  /* treat as success even on timeout — frame is sent */
-}
-
-/* ------------------------------------------------------------------ */
-/* AHardwareBuffer helpers                                            */
-/* ------------------------------------------------------------------ */
-
-/* native_handle_t — matches Android's <cutils/native_handle.h>.
- * We declare it locally because the NDK sysroot doesn't always expose it. */
-typedef struct native_handle {
-    int version;
-    int numFds;
-    int numInts;
-    int data[0];
-} native_handle_t;
-
-/* AHardwareBuffer_getNativeHandle is a hidden API. We dlsym it at runtime. */
-typedef const native_handle_t *(*PFN_AHardwareBuffer_getNativeHandle)(const AHardwareBuffer *);
-
-static PFN_AHardwareBuffer_getNativeHandle g_get_native_handle = NULL;
-
-static void init_ahb_native_handle(void) {
-    if (g_get_native_handle) return;
-    void *lib = dlopen("libandroid.so", RTLD_NOW | RTLD_LOCAL);
-    if (!lib) {
-        LOGW("dlopen libandroid.so failed: %s", dlerror());
-        return;
-    }
-    g_get_native_handle = (PFN_AHardwareBuffer_getNativeHandle)
-        dlsym(lib, "AHardwareBuffer_getNativeHandle");
-    if (!g_get_native_handle) {
-        LOGW("AHardwareBuffer_getNativeHandle not found — dmabuf export will fail");
-    }
-}
-
-static int ahb_get_dmabuf_fd(AHardwareBuffer *ahb) {
-    if (!g_get_native_handle) {
-        init_ahb_native_handle();
-        if (!g_get_native_handle) return -1;
-    }
-    const native_handle_t *h = g_get_native_handle(ahb);
-    if (!h || h->numFds < 1) return -1;
-    return dup(h->data[0]);
-}
-
-static uint32_t vk_format_to_drm(VkFormat format) {
-    switch (format) {
+static uint32_t vk_format_to_drm(VkFormat fmt) {
+    switch (fmt) {
         case VK_FORMAT_B8G8R8A8_UNORM:
         case VK_FORMAT_B8G8R8A8_SRGB:
             return DRM_FORMAT_ARGB8888;
         case VK_FORMAT_R8G8B8A8_UNORM:
         case VK_FORMAT_R8G8B8A8_SRGB:
             return DRM_FORMAT_ABGR8888;
-        case VK_FORMAT_R8G8B8A8_SNORM:
-            return DRM_FORMAT_ABGR8888;
-        case VK_FORMAT_A8B8G8R8_SRGB_PACK32:
-        case VK_FORMAT_A8B8G8R8_UNORM_PACK32:
-            return DRM_FORMAT_RGBA8888;
         default:
-            return DRM_FORMAT_XRGB8888;  /* fallback — bridge handles it */
+            return DRM_FORMAT_ARGB8888;
     }
 }
 
-/* Map Vulkan format to AHardwareBuffer format. */
-static uint32_t vk_format_to_ahb(VkFormat format) {
-    switch (format) {
-        case VK_FORMAT_B8G8R8A8_UNORM:
-        case VK_FORMAT_B8G8R8A8_SRGB:
-            return AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM;
-        case VK_FORMAT_R8G8B8A8_UNORM:
-        case VK_FORMAT_R8G8B8A8_SRGB:
-            return AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM;
-        case VK_FORMAT_A8B8G8R8_SRGB_PACK32:
-        case VK_FORMAT_A8B8G8R8_UNORM_PACK32:
-            return AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM;
-        default:
-            return AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM;
-    }
+static instance_data *find_instance(VkInstance inst) {
+    pthread_mutex_lock(&g_lock);
+    for (instance_data *d = g_instances; d; d = d->next)
+        if (d->instance == inst) { pthread_mutex_unlock(&g_lock); return d; }
+    pthread_mutex_unlock(&g_lock);
+    return NULL;
+}
+
+static device_data *find_device(VkDevice dev) {
+    pthread_mutex_lock(&g_lock);
+    for (device_data *d = g_devices; d; d = d->next)
+        if (d->device == dev) { pthread_mutex_unlock(&g_lock); return d; }
+    pthread_mutex_unlock(&g_lock);
+    return NULL;
+}
+
+static swapchain_data *find_swapchain(VkSwapchainKHR sw) {
+    pthread_mutex_lock(&g_lock);
+    for (swapchain_data *s = g_swapchains; s; s = s->next)
+        if ((VkSwapchainKHR)(uintptr_t)s == sw) {
+            pthread_mutex_unlock(&g_lock);
+            return s;
+        }
+    pthread_mutex_unlock(&g_lock);
+    return NULL;
 }
 
 /* ------------------------------------------------------------------ */
-/* Forward declarations for layer swapchain/present hooks.            */
-/* Needed because patch_dispatch_table references them, and           */
-/* layer_create_swapchain references layer_destroy_swapchain.         */
-/* ------------------------------------------------------------------ */
-static VkResult layer_create_swapchain(VkDevice device,
-                                       const VkSwapchainCreateInfoKHR *pCreateInfo,
-                                       const VkAllocationCallbacks *pAllocator,
-                                       VkSwapchainKHR *pSwapchain);
-static void layer_destroy_swapchain(VkDevice device, VkSwapchainKHR swapchain,
-                                    const VkAllocationCallbacks *pAllocator);
-static VkResult layer_get_swapchain_images(VkDevice device, VkSwapchainKHR swapchain,
-                                           uint32_t *pSwapchainImageCount,
-                                           VkImage *pSwapchainImages);
-static VkResult layer_acquire_next_image(VkDevice device, VkSwapchainKHR swapchain,
-                                         uint64_t timeout, VkSemaphore semaphore,
-                                         VkFence fence, uint32_t *pImageIndex);
-static VkResult layer_queue_present(VkQueue queue, const VkPresentInfoKHR *pPresentInfo);
-
-/* Forward declaration — lazy vtable resolver + dispatch table patcher. */
-static void ensure_device_vtable(device_data *data);
-
-/* ------------------------------------------------------------------ */
-/* Layer create/destroy swapchain (opaque-FD-backed)                  */
+/* Bridge socket                                                      */
 /* ------------------------------------------------------------------ */
 
-static VkResult create_opaque_fd_image(device_data *dev_data,
-                                       VkFormat format,
-                                       VkExtent2D extent,
-                                       VkImageUsageFlags usage,
-                                       swapchain_image *out) {
+static int bridge_connect(const char *name) {
+    int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (fd < 0) return -1;
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    size_t len = strlen(name);
+    if (len + 1 > sizeof(addr.sun_path)) { close(fd); return -1; }
+    addr.sun_path[0] = '\0';
+    memcpy(addr.sun_path + 1, name, len);
+    if (connect(fd, (struct sockaddr *)&addr,
+                (socklen_t)(offsetof(struct sockaddr_un, sun_path) + 1 + len)) != 0) {
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+static int bridge_send_dmabuf(int sock, int fd, uint32_t w, uint32_t h,
+                              uint32_t fmt, uint32_t stride, uint64_t size) {
+    char cmd[512];
+    int n = snprintf(cmd, sizeof(cmd),
+        "dmabuf-present fast=1 window=fullscreen width=%u height=%u "
+        "format=%u modifier=0x0000000000000000 planes=1 stride0=%u offset0=0 "
+        "size=%llu driver=turnip\n",
+        w, h, fmt, stride, (unsigned long long)size);
+    if (n <= 0 || (size_t)n >= sizeof(cmd)) return -1;
+
+    char ctrl[CMSG_SPACE(sizeof(int))];
+    struct iovec iov = { .iov_base = cmd, .iov_len = (size_t)n };
+    struct msghdr msg = {};
+    msg.msg_iov = &iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = ctrl;
+    msg.msg_controllen = sizeof(ctrl);
+    struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
+    if (!cmsg) return -1;
+    cmsg->cmsg_level = SOL_SOCKET;
+    cmsg->cmsg_type = SCM_RIGHTS;
+    cmsg->cmsg_len = CMSG_LEN(sizeof(int));
+    memcpy(CMSG_DATA(cmsg), &fd, sizeof(int));
+    msg.msg_controllen = cmsg->cmsg_len;
+
+    if (sendmsg(sock, &msg, MSG_NOSIGNAL) < 0) return -1;
+
+    char resp[256];
+    struct timeval tv = { .tv_sec = 1, .tv_usec = 0 };
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    recv(sock, resp, sizeof(resp) - 1, 0);
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Dispatch table patching — pointer comparison, no hardcoded indices  */
+/* ------------------------------------------------------------------ */
+
+static int count_non_null(void **table, int max) {
+    int c = 0;
+    for (int i = 0; i < max; i++) if (table[i]) c++;
+    return c;
+}
+
+static int patch_dispatch_table(VkDevice device) {
+    void **table = (void **)((char *)device + 8);
+    if (!table) return -1;
+
+    int non_null = count_non_null(table, 256);
+    LOGI("patch: table=%p %d/256 non-null", (void *)table, non_null);
+    if (non_null < 100) {
+        LOGW("patch: table not populated (%d/256)", non_null);
+        return -1;
+    }
+
+    /* Get real function pointers via fp_gdpa (next layer's GDPA). */
+    device_data *dd = find_device(device);
+    if (!dd || !dd->vtable.get_device_proc_addr) {
+        LOGE("patch: no device_data or fp_gdpa");
+        return -1;
+    }
+    PFN_vkGetDeviceProcAddr fp_gdpa = dd->vtable.get_device_proc_addr;
+
+    void *target_create = (void *)fp_gdpa(device, "vkCreateSwapchainKHR");
+    void *target_destroy = (void *)fp_gdpa(device, "vkDestroySwapchainKHR");
+    void *target_images = (void *)fp_gdpa(device, "vkGetSwapchainImagesKHR");
+    void *target_acquire = (void *)fp_gdpa(device, "vkAcquireNextImageKHR");
+    void *target_present = (void *)fp_gdpa(device, "vkQueuePresentKHR");
+
+    LOGI("patch: targets: create=%p destroy=%p images=%p acquire=%p present=%p",
+         target_create, target_destroy, target_images, target_acquire, target_present);
+
+    if (!target_create || !target_present) {
+        LOGW("patch: swapchain functions not available");
+        return -1;
+    }
+
+    /* Scan for matching pointers. */
+    int found = 0;
+    int idx_create = -1, idx_destroy = -1, idx_images = -1;
+    int idx_acquire = -1, idx_present = -1;
+
+    for (int i = 0; i < 2048 && found < 5; i++) {
+        void *entry = table[i];
+        if (entry == target_create && idx_create < 0) {
+            idx_create = i; g_real_create_swapchain = entry;
+            table[i] = (void *)layer_create_swapchain; found++;
+            LOGI("patch: [%d] create_swapchain", i);
+        } else if (entry == target_destroy && idx_destroy < 0) {
+            idx_destroy = i; g_real_destroy_swapchain = entry;
+            table[i] = (void *)layer_destroy_swapchain; found++;
+            LOGI("patch: [%d] destroy_swapchain", i);
+        } else if (entry == target_images && idx_images < 0) {
+            idx_images = i; g_real_get_images = entry;
+            table[i] = (void *)layer_get_swapchain_images; found++;
+            LOGI("patch: [%d] get_images", i);
+        } else if (entry == target_acquire && idx_acquire < 0) {
+            idx_acquire = i; g_real_acquire = entry;
+            table[i] = (void *)layer_acquire_next_image; found++;
+            LOGI("patch: [%d] acquire", i);
+        } else if (entry == target_present && idx_present < 0) {
+            idx_present = i; g_real_present = entry;
+            table[i] = (void *)layer_queue_present; found++;
+            LOGI("patch: [%d] present", i);
+        }
+    }
+
+    /* If create_swapchain not found by pointer, try index 253 (confirmed working). */
+    if (idx_create < 0) {
+        void *orig = table[253];
+        if (orig && orig != (void *)layer_create_swapchain) {
+            table[253] = (void *)layer_create_swapchain;
+            g_real_create_swapchain = orig;
+            idx_create = 253; found++;
+            LOGI("patch: [253] create_swapchain (index fallback)");
+        }
+    }
+
+    LOGI("patch: patched %d/5", found);
+    return found > 0 ? 0 : -1;
+}
+
+/* Watcher thread: waits for dispatch table to be populated. */
+static void *watcher_thread(void *arg) {
+    VkDevice device = (VkDevice)arg;
+    LOGI("watcher: waiting for dispatch table (device=%p)", (void *)device);
+    for (int i = 0; i < 200; i++) {
+        usleep(10000);
+        void **table = (void **)((char *)device + 8);
+        int n = count_non_null(table, 256);
+        if (n >= 150) {
+            LOGI("watcher: table populated (%d/256) after %d attempts", n, i + 1);
+            int rc = patch_dispatch_table(device);
+            if (rc == 0) LOGI("watcher: patched successfully");
+            else LOGE("watcher: patch failed (rc=%d)", rc);
+            return NULL;
+        }
+    }
+    LOGE("watcher: timed out");
+    return NULL;
+}
+
+/* ------------------------------------------------------------------ */
+/* Two-stage blit image creation                                      */
+/* ------------------------------------------------------------------ */
+
+static VkResult create_blit_images(device_data *dd, VkFormat fmt,
+                                   VkExtent2D extent, VkImageUsageFlags usage,
+                                   swapchain_image *out) {
     memset(out, 0, sizeof(*out));
-    out->dmabuf_fd = -1;
+    VkResult res;
 
-    /* Create an image with external memory handle type DMA_BUF_BIT_EXT.
-     * Our layer operates on the HOST VkDevice (below winevulkan in the chain),
-     * so fp_gdpa goes through the Vulkan loader to the HOST Turnip driver.
-     * winevulkan's PE-side filtering does NOT affect us. The HOST device
-     * has VK_KHR_external_memory_fd enabled via wayland_map_device_extensions. */
-    VkExternalMemoryImageCreateInfo ext_mem_info;
-    memset(&ext_mem_info, 0, sizeof(ext_mem_info));
-    ext_mem_info.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO;
-    ext_mem_info.pNext = NULL;
-    ext_mem_info.handleTypes =
-        VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+    /* Image A: OPTIMAL tiling, COLOR_ATTACHMENT (DXVK renders here). */
+    VkImageCreateInfo a_info = {};
+    a_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    a_info.imageType = VK_IMAGE_TYPE_2D;
+    a_info.format = fmt;
+    a_info.extent = {extent.width, extent.height, 1};
+    a_info.mipLevels = 1;
+    a_info.arrayLayers = 1;
+    a_info.samples = VK_SAMPLE_COUNT_1_BIT;
+    a_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+    a_info.usage = usage | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT
+                   | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    a_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
-    VkImageCreateInfo img_info;
-    memset(&img_info, 0, sizeof(img_info));
-    img_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-    img_info.pNext = &ext_mem_info;
-    img_info.imageType = VK_IMAGE_TYPE_2D;
-    img_info.format = format;
-    img_info.extent.width = extent.width;
-    img_info.extent.height = extent.height;
-    img_info.extent.depth = 1;
-    img_info.mipLevels = 1;
-    img_info.arrayLayers = 1;
-    img_info.samples = VK_SAMPLE_COUNT_1_BIT;
-    img_info.tiling = VK_IMAGE_TILING_LINEAR; /* Try LINEAR for correct stride */
-    img_info.usage = usage
-                   | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT
-                   | VK_IMAGE_USAGE_TRANSFER_SRC_BIT
-                   | VK_IMAGE_USAGE_TRANSFER_DST_BIT
-                   | VK_IMAGE_USAGE_SAMPLED_BIT;
-    img_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    img_info.queueFamilyIndexCount = 0;
-    img_info.pQueueFamilyIndices = NULL;
-    img_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-
-    VkResult res = dev_data->vtable.create_image(dev_data->device, &img_info, NULL, &out->image);
+    res = dd->vtable.create_image(dd->device, &a_info, NULL, &out->render_img);
     if (res != VK_SUCCESS) {
-        LOGE("vkCreateImage (opaque-fd) failed res=%d format=%d %ux%u",
-             res, format, extent.width, extent.height);
+        LOGE("vkCreateImage A failed res=%d", res);
         return res;
     }
 
-    /* 2. Get image memory requirements. */
-    VkMemoryRequirements2 mem_reqs2;
-    memset(&mem_reqs2, 0, sizeof(mem_reqs2));
-    mem_reqs2.sType = VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2;
-    VkImageMemoryRequirementsInfo2 img_req_info;
-    memset(&img_req_info, 0, sizeof(img_req_info));
-    img_req_info.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_REQUIREMENTS_INFO_2;
-    img_req_info.image = out->image;
-    /* Use vkGetImageMemoryRequirements2 (returns void, not VkResult). */
-    if (dev_data->vtable.get_image_memory_requirements2) {
-        dev_data->vtable.get_image_memory_requirements2(
-            dev_data->device, &img_req_info, &mem_reqs2);
-    } else {
-        LOGE("vkGetImageMemoryRequirements2 not available");
-        goto err_img;
-    }
-    out->allocation_size = mem_reqs2.memoryRequirements.size;
-    uint32_t mem_type_bits = mem_reqs2.memoryRequirements.memoryTypeBits;
+    /* Image B: LINEAR tiling, TRANSFER_DST (staging for memfd). */
+    VkImageCreateInfo b_info = {};
+    b_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    b_info.imageType = VK_IMAGE_TYPE_2D;
+    b_info.format = fmt;
+    b_info.extent = {extent.width, extent.height, 1};
+    b_info.mipLevels = 1;
+    b_info.arrayLayers = 1;
+    b_info.samples = VK_SAMPLE_COUNT_1_BIT;
+    b_info.tiling = VK_IMAGE_TILING_LINEAR;
+    b_info.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    b_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
-    /* 3. Find a compatible memory type — prefer DEVICE_LOCAL. */
+    res = dd->vtable.create_image(dd->device, &b_info, NULL, &out->staging_img);
+    if (res != VK_SUCCESS) {
+        LOGE("vkCreateImage B failed res=%d", res);
+        goto err_a;
+    }
+
+    /* Get memory requirements for both images. */
+    VkMemoryRequirements2 a_reqs = {}, b_reqs = {};
+    a_reqs.sType = VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2;
+    b_reqs.sType = VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2;
+    VkImageMemoryRequirementsInfo2 req_info = {};
+    req_info.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_REQUIREMENTS_INFO_2;
+
+    req_info.image = out->render_img;
+    dd->vtable.get_img_mem_reqs2(dd->device, &req_info, &a_reqs);
+
+    req_info.image = out->staging_img;
+    dd->vtable.get_img_mem_reqs2(dd->device, &req_info, &b_reqs);
+
+    /* Query stride from staging image (LINEAR only). */
+    VkImageSubresource subres = {};
+    subres.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    VkSubresourceLayout layout = {};
+    dd->vtable.get_subres_layout(dd->device, out->staging_img, &subres, &layout);
+    out->stride = (uint32_t)layout.rowPitch;
+    out->offset = 0;
+    out->staging_size = layout.size;
+    LOGI("staging layout: stride=%u size=%llu", out->stride,
+         (unsigned long long)layout.size);
+
+    /* Get memory properties. */
     VkPhysicalDeviceMemoryProperties mem_props;
-    dev_data->inst_data->vtable.get_physical_device_memory_properties(
-        dev_data->physical_device, &mem_props);
-    uint32_t mem_type_index = 0;
-    bool found = false;
+    dd->inst_data->vtable.get_phys_mem_props(dd->physical_device, &mem_props);
+
+    /* Allocate memory for Image A — prefer DEVICE_LOCAL. */
+    uint32_t a_type = 0;
     for (uint32_t i = 0; i < mem_props.memoryTypeCount; i++) {
-        if ((mem_type_bits & (1u << i)) &&
-            (mem_props.memoryTypes[i].propertyFlags &
-             VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
-            mem_type_index = i;
-            found = true;
-            break;
+        if ((a_reqs.memoryRequirements.memoryTypeBits & (1u << i)) &&
+            (mem_props.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
+            a_type = i; break;
         }
     }
-    if (!found) {
-        for (uint32_t i = 0; i < mem_props.memoryTypeCount; i++) {
-            if (mem_type_bits & (1u << i)) {
-                mem_type_index = i;
-                found = true;
-                break;
-            }
+    VkMemoryAllocateInfo a_alloc = {};
+    a_alloc.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    a_alloc.allocationSize = a_reqs.memoryRequirements.size;
+    a_alloc.memoryTypeIndex = a_type;
+    res = dd->vtable.alloc_mem(dd->device, &a_alloc, NULL, &out->render_mem);
+    if (res != VK_SUCCESS) { LOGE("alloc A failed res=%d", res); goto err_b; }
+    res = dd->vtable.bind_img_mem(dd->device, out->render_img, out->render_mem, 0);
+    if (res != VK_SUCCESS) { LOGE("bind A failed res=%d", res); goto err_am; }
+
+    /* Allocate memory for Image B — MUST be HOST_VISIBLE | HOST_COHERENT. */
+    uint32_t b_type = 0;
+    bool b_found = false;
+    for (uint32_t i = 0; i < mem_props.memoryTypeCount; i++) {
+        if ((b_reqs.memoryRequirements.memoryTypeBits & (1u << i)) &&
+            (mem_props.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) &&
+            (mem_props.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) {
+            b_type = i; b_found = true; break;
         }
     }
-    if (!found) {
-        LOGE("no compatible memory type for opaque-fd image (bits=0x%x)", mem_type_bits);
-        goto err_img;
+    if (!b_found) {
+        LOGE("no HOST_VISIBLE|HOST_COHERENT memory type for staging image");
+        goto err_am;
     }
+    LOGI("staging memory type %u: flags=0x%x", b_type,
+         mem_props.memoryTypes[b_type].propertyFlags);
 
-    /* 4. Allocate device memory (regular allocation, not import). */
-    VkMemoryAllocateInfo alloc_info;
-    memset(&alloc_info, 0, sizeof(alloc_info));
-    alloc_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    alloc_info.pNext = NULL;
-    alloc_info.allocationSize = out->allocation_size;
-    alloc_info.memoryTypeIndex = mem_type_index;
-
-    res = dev_data->vtable.allocate_memory(dev_data->device, &alloc_info, NULL, &out->memory);
-    if (res != VK_SUCCESS) {
-        LOGE("vkAllocateMemory (opaque-fd) failed res=%d size=%llu", res,
-             (unsigned long long)out->allocation_size);
-        goto err_img;
-    }
-
-    /* 5. Bind memory to image. */
-    res = dev_data->vtable.bind_image_memory(dev_data->device, out->image, out->memory, 0);
-    if (res != VK_SUCCESS) {
-        LOGE("vkBindImageMemory (opaque-fd) failed res=%d", res);
-        goto err_mem;
-    }
-
-    /* 6. Export dmabuf fd via vkGetMemoryFdKHR.
-     * Our layer sees the HOST device — fp_gdpa goes through the Vulkan
-     * loader to Turnip, NOT through winevulkan's PE-side filtering.
-     * The HOST device has VK_KHR_external_memory_fd enabled. */
-    PFN_vkGetMemoryFdKHR p_get_fd = (PFN_vkGetMemoryFdKHR)
-        dev_data->vtable.get_device_proc_addr(dev_data->device, "vkGetMemoryFdKHR");
-    if (!p_get_fd) {
-        LOGE("vkGetMemoryFdKHR not available via fp_gdpa");
-        goto err_mem;
-    }
-    VkMemoryGetFdInfoKHR fd_info;
-    memset(&fd_info, 0, sizeof(fd_info));
-    fd_info.sType = VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR;
-    fd_info.memory = out->memory;
-    fd_info.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
-    int fd = -1;
-    res = p_get_fd(dev_data->device, &fd_info, &fd);
-    if (res != VK_SUCCESS || fd < 0) {
-        LOGE("vkGetMemoryFdKHR failed res=%d fd=%d", res, fd);
-        goto err_mem;
-    }
-    out->dmabuf_fd = fd;
-
-    /* 7. Query stride via vkGetImageSubresourceLayout (LINEAR only). */
-    PFN_vkGetImageSubresourceLayout p_get_layout = (PFN_vkGetImageSubresourceLayout)
-        dev_data->vtable.get_device_proc_addr(dev_data->device, "vkGetImageSubresourceLayout");
-    if (p_get_layout) {
-        VkImageSubresource subres;
-        memset(&subres, 0, sizeof(subres));
-        subres.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        VkSubresourceLayout layout;
-        memset(&layout, 0, sizeof(layout));
-        p_get_layout(dev_data->device, out->image, &subres, &layout);
-        out->stride = (uint32_t)layout.rowPitch;
-        out->offset = 0;
-        out->size = layout.size;
-    } else {
-        out->stride = extent.width * 4;
-        out->offset = 0;
-        out->size = out->allocation_size;
-    }
-
-    /* 7. Create a fence for render completion signaling. */
-    VkFenceCreateInfo fence_info;
-    memset(&fence_info, 0, sizeof(fence_info));
-    fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-    res = dev_data->vtable.create_fence(dev_data->device, &fence_info, NULL, &out->render_fence);
-    if (res != VK_SUCCESS) {
-        LOGE("vkCreateFence (render fence) failed res=%d", res);
-        goto err_fd;
-    }
+    VkMemoryAllocateInfo b_alloc = {};
+    b_alloc.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    b_alloc.allocationSize = b_reqs.memoryRequirements.size;
+    b_alloc.memoryTypeIndex = b_type;
+    res = dd->vtable.alloc_mem(dd->device, &b_alloc, NULL, &out->staging_mem);
+    if (res != VK_SUCCESS) { LOGE("alloc B failed res=%d", res); goto err_am; }
+    res = dd->vtable.bind_img_mem(dd->device, out->staging_img, out->staging_mem, 0);
+    if (res != VK_SUCCESS) { LOGE("bind B failed res=%d", res); goto err_bm; }
 
     out->width = extent.width;
     out->height = extent.height;
-    out->drm_format = vk_format_to_drm(format);
+    out->drm_format = vk_format_to_drm(fmt);
     out->in_use = false;
-    LOGI("created dmabuf image %dx%d drm=0x%08x fd=%d stride=%u size=%llu",
-         out->width, out->height, out->drm_format, out->dmabuf_fd,
-         (unsigned long long)out->allocation_size);
+    LOGI("created blit images %ux%u drm=0x%08x stride=%u",
+         extent.width, extent.height, out->drm_format, out->stride);
     return VK_SUCCESS;
 
-err_fd:
-    close(out->dmabuf_fd);
-    out->dmabuf_fd = -1;
-err_mem:
-    dev_data->vtable.free_memory(dev_data->device, out->memory, NULL);
-    out->memory = VK_NULL_HANDLE;
-err_img:
-    dev_data->vtable.destroy_image(dev_data->device, out->image, NULL);
-    out->image = VK_NULL_HANDLE;
-    return res != VK_SUCCESS ? res : VK_ERROR_OUT_OF_DEVICE_MEMORY;
+err_bm:
+    dd->vtable.free_mem(dd->device, out->staging_mem, NULL);
+err_am:
+    dd->vtable.free_mem(dd->device, out->render_mem, NULL);
+err_b:
+    dd->vtable.destroy_image(dd->device, out->staging_img, NULL);
+err_a:
+    dd->vtable.destroy_image(dd->device, out->render_img, NULL);
+    return res;
 }
 
-static void destroy_opaque_fd_image(device_data *dev_data, swapchain_image *img) {
-    if (img->render_fence != VK_NULL_HANDLE) {
-        dev_data->vtable.destroy_fence(dev_data->device, img->render_fence, NULL);
-        img->render_fence = VK_NULL_HANDLE;
-    }
-    if (img->dmabuf_fd >= 0) {
-        close(img->dmabuf_fd);
-        img->dmabuf_fd = -1;
-    }
-    if (img->image != VK_NULL_HANDLE) {
-        dev_data->vtable.destroy_image(dev_data->device, img->image, NULL);
-        img->image = VK_NULL_HANDLE;
-    }
-    if (img->memory != VK_NULL_HANDLE) {
-        dev_data->vtable.free_memory(dev_data->device, img->memory, NULL);
-        img->memory = VK_NULL_HANDLE;
-    }
+static void destroy_blit_images(device_data *dd, swapchain_image *img) {
+    if (img->staging_mem) dd->vtable.free_mem(dd->device, img->staging_mem, NULL);
+    if (img->render_mem) dd->vtable.free_mem(dd->device, img->render_mem, NULL);
+    if (img->staging_img) dd->vtable.destroy_image(dd->device, img->staging_img, NULL);
+    if (img->render_img) dd->vtable.destroy_image(dd->device, img->render_img, NULL);
 }
 
-static VkResult layer_create_swapchain(VkDevice device,
-                                       const VkSwapchainCreateInfoKHR *pCreateInfo,
-                                       const VkAllocationCallbacks *pAllocator,
-                                       VkSwapchainKHR *pSwapchain) {
-    device_data *dev_data = find_device_data(device);
-    if (dev_data) ensure_device_vtable(dev_data);
-    if (!dev_data || !atomic_load(&g_enabled)) {
-        /* Layer disabled or device not tracked — pass through to real driver. */
-        if (dev_data && dev_data->vtable.real_create_swapchain) {
-            return dev_data->vtable.real_create_swapchain(device, pCreateInfo, pAllocator, pSwapchain);
-        }
+/* ------------------------------------------------------------------ */
+/* Layer hooks — standard Vulkan signatures                           */
+/* ------------------------------------------------------------------ */
+
+/* Forward declarations. */
+static VkResult layer_create_swapchain(VkDevice, const VkSwapchainCreateInfoKHR *,
+                                       const VkAllocationCallbacks *, VkSwapchainKHR *);
+static void layer_destroy_swapchain(VkDevice, VkSwapchainKHR, const VkAllocationCallbacks *);
+static VkResult layer_get_swapchain_images(VkDevice, VkSwapchainKHR, uint32_t *, VkImage *);
+static VkResult layer_acquire_next_image(VkDevice, VkSwapchainKHR, uint64_t,
+                                         VkSemaphore, VkFence, uint32_t *);
+static VkResult layer_queue_present(VkQueue, const VkPresentInfoKHR *);
+static void ensure_device_vtable(device_data *data);
+
+VkResult layer_create_swapchain(VkDevice device, const VkSwapchainCreateInfoKHR *info,
+                                const VkAllocationCallbacks *alloc, VkSwapchainKHR *ret) {
+    device_data *dd = find_device(device);
+    if (dd) ensure_device_vtable(dd);
+    if (!dd || !is_enabled()) {
+        if (g_real_create_swapchain)
+            return g_real_create_swapchain(device, info, alloc, ret);
         return VK_ERROR_INITIALIZATION_FAILED;
     }
 
-    LOGI("layer_create_swapchain: %ux%u format=%d imageCount=%u",
-         pCreateInfo->imageExtent.width, pCreateInfo->imageExtent.height,
-         pCreateInfo->imageFormat, pCreateInfo->minImageCount);
+    LOGI("create_swapchain: %ux%u fmt=%d count=%u",
+         info->imageExtent.width, info->imageExtent.height,
+         info->imageFormat, info->minImageCount);
 
-    /* If DXVK is recreating the swapchain, destroy the old one first. */
-    if (pCreateInfo->oldSwapchain != VK_NULL_HANDLE) {
-        LOGI("layer_create_swapchain: destroying old swapchain=%p",
-             (void *)pCreateInfo->oldSwapchain);
-        layer_destroy_swapchain(device, pCreateInfo->oldSwapchain, pAllocator);
-    }
+    uint32_t count = info->minImageCount;
+    if (count > WAYLANDIE_MAX_IMAGES) count = WAYLANDIE_MAX_IMAGES;
+    if (count < 2) count = 2;
 
-    uint32_t image_count = pCreateInfo->minImageCount;
-    if (image_count > WAYLANDIE_MAX_SWAPCHAIN_IMAGES) {
-        image_count = WAYLANDIE_MAX_SWAPCHAIN_IMAGES;
-    }
-    if (image_count < 2) image_count = 2;
-
-    swapchain_data *sw = (swapchain_data *)calloc(1, sizeof(swapchain_data));
+    swapchain_data *sw = (swapchain_data *)calloc(1, sizeof(*sw));
     if (!sw) return VK_ERROR_OUT_OF_HOST_MEMORY;
-    sw->dev_data = dev_data;
-    sw->image_count = image_count;
-    sw->format = pCreateInfo->imageFormat;
-    sw->extent = pCreateInfo->imageExtent;
-    sw->acquire_index = 0;
+    sw->dev_data = dd;
+    sw->image_count = count;
+    sw->format = info->imageFormat;
+    sw->extent = info->imageExtent;
     sw->bridge_sock = -1;
-    sw->present_count = 0;
 
-    /* Read bridge socket name from env (set by GuestProgramLauncherComponent). */
-    const char *sock_name = getenv("WAYLANDIE_BRIDGE_SOCKET");
-    if (!sock_name || !*sock_name) sock_name = WAYLANDIE_BRIDGE_SOCKET_DEFAULT;
-    strncpy(sw->bridge_socket_name, sock_name, sizeof(sw->bridge_socket_name) - 1);
-
-    /* Create AHB-backed images. */
-    for (uint32_t i = 0; i < image_count; i++) {
-        VkResult res = create_opaque_fd_image(dev_data, sw->format, sw->extent,
-                                                pCreateInfo->imageUsage, &sw->images[i]);
+    for (uint32_t i = 0; i < count; i++) {
+        VkResult res = create_blit_images(dd, sw->format, sw->extent,
+                                          info->imageUsage, &sw->images[i]);
         if (res != VK_SUCCESS) {
-            LOGE("create_opaque_fd_image failed for image %u", i);
-            for (uint32_t j = 0; j < i; j++) {
-                destroy_opaque_fd_image(dev_data, &sw->images[j]);
-            }
+            for (uint32_t j = 0; j < i; j++) destroy_blit_images(dd, &sw->images[j]);
             free(sw);
             return res;
         }
     }
 
-    /* Create command pool for semaphore signaling. */
-    VkCommandPoolCreateInfo pool_info;
-    memset(&pool_info, 0, sizeof(pool_info));
+    /* Create command pool + blit command buffer. */
+    VkCommandPoolCreateInfo pool_info = {};
     pool_info.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
     pool_info.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
-    pool_info.queueFamilyIndex = dev_data->queue_family;
-    VkResult res = dev_data->vtable.create_command_pool(device, &pool_info, NULL, &sw->command_pool);
-    if (res != VK_SUCCESS) {
-        LOGE("vkCreateCommandPool failed res=%d", res);
-        for (uint32_t i = 0; i < image_count; i++) {
-            destroy_opaque_fd_image(dev_data, &sw->images[i]);
-        }
-        free(sw);
-        return res;
-    }
+    pool_info.queueFamilyIndex = dd->queue_family;
+    VkResult res = dd->vtable.create_cmd_pool(dd->device, &pool_info, NULL, &sw->cmd_pool);
+    if (res != VK_SUCCESS) { LOGE("create_cmd_pool res=%d", res); goto fail; }
 
-    VkCommandBufferAllocateInfo cmd_alloc;
-    memset(&cmd_alloc, 0, sizeof(cmd_alloc));
-    cmd_alloc.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-    cmd_alloc.commandPool = sw->command_pool;
-    cmd_alloc.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    cmd_alloc.commandBufferCount = 1;
-    res = dev_data->vtable.allocate_command_buffers(device, &cmd_alloc, &sw->scratch_cmd);
-    if (res != VK_SUCCESS) {
-        LOGE("vkAllocateCommandBuffers failed res=%d", res);
-        dev_data->vtable.destroy_command_pool(device, sw->command_pool, NULL);
-        for (uint32_t i = 0; i < image_count; i++) {
-            destroy_opaque_fd_image(dev_data, &sw->images[i]);
-        }
-        free(sw);
-        return res;
-    }
+    VkCommandBufferAllocateInfo cmd_info = {};
+    cmd_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    cmd_info.commandPool = sw->cmd_pool;
+    cmd_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    cmd_info.commandBufferCount = 1;
+    res = dd->vtable.alloc_cmd_bufs(dd->device, &cmd_info, &sw->blit_cmd);
+    if (res != VK_SUCCESS) { LOGE("alloc_cmd res=%d", res); goto fail; }
 
-    VkFenceCreateInfo fence_info;
-    memset(&fence_info, 0, sizeof(fence_info));
+    VkFenceCreateInfo fence_info = {};
     fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-    res = dev_data->vtable.create_fence(device, &fence_info, NULL, &sw->scratch_fence);
-    if (res != VK_SUCCESS) {
-        LOGE("vkCreateFence (scratch) failed res=%d", res);
-        dev_data->vtable.free_command_buffers(device, sw->command_pool, 1, &sw->scratch_cmd);
-        dev_data->vtable.destroy_command_pool(device, sw->command_pool, NULL);
-        for (uint32_t i = 0; i < image_count; i++) {
-            destroy_opaque_fd_image(dev_data, &sw->images[i]);
-        }
-        free(sw);
-        return res;
-    }
+    res = dd->vtable.create_fence(dd->device, &fence_info, NULL, &sw->blit_fence);
+    if (res != VK_SUCCESS) { LOGE("create_fence res=%d", res); goto fail; }
 
-    /* Register the swapchain. */
-    pthread_mutex_lock(&g_swapchain_lock);
+    pthread_mutex_lock(&g_lock);
     sw->next = g_swapchains;
     g_swapchains = sw;
-    pthread_mutex_unlock(&g_swapchain_lock);
+    pthread_mutex_unlock(&g_lock);
 
-    /* Return the swapchain_data pointer as the VkSwapchainKHR handle. */
-    *pSwapchain = (VkSwapchainKHR)(uintptr_t)sw;
-    atomic_store(&g_layer_active, 1);
-    LOGI("layer_create_swapchain: success, %u AHB-backed images, swapchain=%p",
-         image_count, (void *)*pSwapchain);
+    *ret = (VkSwapchainKHR)(uintptr_t)sw;
+    LOGI("create_swapchain: success %u images", count);
     return VK_SUCCESS;
+
+fail:
+    for (uint32_t i = 0; i < count; i++) destroy_blit_images(dd, &sw->images[i]);
+    if (sw->blit_fence) dd->vtable.destroy_fence(dd->device, sw->blit_fence, NULL);
+    if (sw->blit_cmd) dd->vtable.free_cmd_bufs(dd->device, sw->cmd_pool, 1, &sw->blit_cmd);
+    if (sw->cmd_pool) dd->vtable.destroy_cmd_pool(dd->device, sw->cmd_pool, NULL);
+    free(sw);
+    return res;
 }
 
-static void layer_destroy_swapchain(VkDevice device, VkSwapchainKHR swapchain,
-                                    const VkAllocationCallbacks *pAllocator) {
-    (void)pAllocator;
-    if (!swapchain) return;
-    swapchain_data *sw = find_swapchain_data(swapchain);
-    if (!sw) {
-        /* Not our swapchain — pass through. */
-        device_data *dev_data = find_device_data(device);
-        if (dev_data && dev_data->vtable.real_destroy_swapchain) {
-            dev_data->vtable.real_destroy_swapchain(device, swapchain, pAllocator);
-        }
+void layer_destroy_swapchain(VkDevice device, VkSwapchainKHR sw, const VkAllocationCallbacks *alloc) {
+    if (!sw) return;
+    swapchain_data *s = find_swapchain(sw);
+    if (!s) {
+        if (g_real_destroy_swapchain) g_real_destroy_swapchain(device, sw, alloc);
         return;
     }
+    device_data *dd = s->dev_data;
+    LOGI("destroy_swapchain: presents=%llu", (unsigned long long)s->present_count);
 
-    LOGI("layer_destroy_swapchain: swapchain=%p presents=%llu",
-         (void *)swapchain, (unsigned long long)sw->present_count);
-
-    /* Remove from registry. */
-    pthread_mutex_lock(&g_swapchain_lock);
+    pthread_mutex_lock(&g_lock);
     swapchain_data **pp = &g_swapchains;
-    while (*pp) {
-        if (*pp == sw) { *pp = sw->next; break; }
-        pp = &(*pp)->next;
-    }
-    pthread_mutex_unlock(&g_swapchain_lock);
+    while (*pp) { if (*pp == s) { *pp = s->next; break; } pp = &(*pp)->next; }
+    pthread_mutex_unlock(&g_lock);
 
-    /* Wait for any pending operations. */
-    if (sw->dev_data->vtable.queue_wait_idle && sw->dev_data->graphics_queue) {
-        sw->dev_data->vtable.queue_wait_idle(sw->dev_data->graphics_queue);
-    }
-
-    /* Cleanup. */
-    if (sw->scratch_fence != VK_NULL_HANDLE) {
-        sw->dev_data->vtable.destroy_fence(device, sw->scratch_fence, NULL);
-    }
-    if (sw->scratch_cmd != VK_NULL_HANDLE) {
-        sw->dev_data->vtable.free_command_buffers(device, sw->command_pool, 1, &sw->scratch_cmd);
-    }
-    if (sw->command_pool != VK_NULL_HANDLE) {
-        sw->dev_data->vtable.destroy_command_pool(device, sw->command_pool, NULL);
-    }
-    for (uint32_t i = 0; i < sw->image_count; i++) {
-        destroy_opaque_fd_image(sw->dev_data, &sw->images[i]);
-    }
-    if (sw->bridge_sock >= 0) {
-        close(sw->bridge_sock);
-    }
-    free(sw);
-    atomic_store(&g_layer_active, 0);
+    for (uint32_t i = 0; i < s->image_count; i++) destroy_blit_images(dd, &s->images[i]);
+    if (s->blit_fence) dd->vtable.destroy_fence(dd->device, s->blit_fence, NULL);
+    if (s->blit_cmd) dd->vtable.free_cmd_bufs(dd->device, s->cmd_pool, 1, &s->blit_cmd);
+    if (s->cmd_pool) dd->vtable.destroy_cmd_pool(dd->device, s->cmd_pool, NULL);
+    if (s->bridge_sock >= 0) close(s->bridge_sock);
+    free(s);
 }
 
-static VkResult layer_get_swapchain_images(VkDevice device, VkSwapchainKHR swapchain,
-                                           uint32_t *pSwapchainImageCount,
-                                           VkImage *pSwapchainImages) {
-    swapchain_data *sw = find_swapchain_data(swapchain);
-    if (!sw) {
-        device_data *dev_data = find_device_data(device);
-        if (dev_data && dev_data->vtable.real_get_swapchain_images) {
-            return dev_data->vtable.real_get_swapchain_images(device, swapchain,
-                                                              pSwapchainImageCount, pSwapchainImages);
-        }
+VkResult layer_get_swapchain_images(VkDevice device, VkSwapchainKHR sw,
+                                    uint32_t *count, VkImage *images) {
+    swapchain_data *s = find_swapchain(sw);
+    if (!s) {
+        if (g_real_get_images) return g_real_get_images(device, sw, count, images);
         return VK_ERROR_INITIALIZATION_FAILED;
     }
-
-    if (!pSwapchainImages || *pSwapchainImageCount < sw->image_count) {
-        *pSwapchainImageCount = sw->image_count;
-        return *pSwapchainImages ? VK_INCOMPLETE : VK_SUCCESS;
+    if (!images || *count < s->image_count) {
+        *count = s->image_count;
+        return images ? VK_INCOMPLETE : VK_SUCCESS;
     }
-    *pSwapchainImageCount = sw->image_count;
-    for (uint32_t i = 0; i < sw->image_count; i++) {
-        pSwapchainImages[i] = sw->images[i].image;
+    *count = s->image_count;
+    for (uint32_t i = 0; i < s->image_count; i++)
+        images[i] = s->images[i].render_img;  /* DXVK renders to Image A */
+    return VK_SUCCESS;
+}
+
+VkResult layer_acquire_next_image(VkDevice device, VkSwapchainKHR sw,
+                                  uint64_t timeout, VkSemaphore sem,
+                                  VkFence fence, uint32_t *idx) {
+    swapchain_data *s = find_swapchain(sw);
+    if (!s) {
+        if (g_real_acquire) return g_real_acquire(device, sw, timeout, sem, fence, idx);
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    uint32_t i = s->acquire_index % s->image_count;
+    s->acquire_index++;
+    *idx = i;
+
+    /* Signal semaphore with a dummy command buffer. */
+    if (sem || fence) {
+        device_data *dd = s->dev_data;
+        if (dd->graphics_queue) {
+            VkCommandBufferBeginInfo bi = {};
+            bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+            bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+            dd->vtable.begin_cmd(s->blit_cmd, &bi);
+
+            /* Layout transition: UNDEFINED → GENERAL for render image. */
+            VkImageMemoryBarrier bar = {};
+            bar.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            bar.srcAccessMask = 0;
+            bar.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+            bar.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            bar.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+            bar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            bar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            bar.image = s->images[i].render_img;
+            bar.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+            VkPipelineStageFlags src = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+            VkPipelineStageFlags dst = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+            dd->vtable.cmd_pipeline_barrier(s->blit_cmd, src, dst, 0, 0, NULL, 0, NULL, 1, &bar);
+
+            dd->vtable.end_cmd(s->blit_cmd);
+
+            VkSubmitInfo si = {};
+            si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+            si.commandBufferCount = 1;
+            si.pCommandBuffers = &s->blit_cmd;
+            if (sem) { si.signalSemaphoreCount = 1; si.pSignalSemaphores = &sem; }
+            if (fence) dd->vtable.reset_fences(dd->device, 1, &fence);
+            dd->vtable.queue_submit(dd->graphics_queue, 1, &si, fence);
+        }
     }
     return VK_SUCCESS;
 }
 
-static VkResult layer_acquire_next_image(VkDevice device, VkSwapchainKHR swapchain,
-                                         uint64_t timeout, VkSemaphore semaphore,
-                                         VkFence fence, uint32_t *pImageIndex) {
-    swapchain_data *sw = find_swapchain_data(swapchain);
-    if (!sw) {
-        device_data *dev_data = find_device_data(device);
-        if (dev_data && dev_data->vtable.real_acquire_next_image) {
-            return dev_data->vtable.real_acquire_next_image(device, swapchain, timeout,
-                                                            semaphore, fence, pImageIndex);
-        }
+VkResult layer_queue_present(VkQueue queue, const VkPresentInfoKHR *info) {
+    if (!is_enabled()) {
+        if (g_real_present) return g_real_present(queue, info);
         return VK_ERROR_INITIALIZATION_FAILED;
     }
 
-    /* Simple round-robin acquisition. */
-    uint32_t idx = sw->acquire_index % sw->image_count;
-    sw->acquire_index++;
-    sw->images[idx].in_use = true;
+    /* Find device from queue (search all devices). */
+    pthread_mutex_lock(&g_lock);
+    device_data *dd = g_devices;
+    pthread_mutex_unlock(&g_lock);
+    if (!dd) return VK_ERROR_INITIALIZATION_FAILED;
 
-    /* Signal the app's semaphore and fence via a no-op submit. */
-    if (semaphore != VK_NULL_HANDLE || fence != VK_NULL_HANDLE) {
-        VkCommandBufferBeginInfo begin_info;
-        memset(&begin_info, 0, sizeof(begin_info));
-        begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-        begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-        VkResult res = sw->dev_data->vtable.begin_command_buffer(sw->scratch_cmd, &begin_info);
-        if (res != VK_SUCCESS) {
-            LOGE("begin_command_buffer (acquire) failed res=%d", res);
-            return res;
-        }
-        res = sw->dev_data->vtable.end_command_buffer(sw->scratch_cmd);
-        if (res != VK_SUCCESS) {
-            LOGE("end_command_buffer (acquire) failed res=%d", res);
-            return res;
-        }
+    VkResult result = VK_SUCCESS;
+    for (uint32_t i = 0; i < info->swapchainCount; i++) {
+        swapchain_data *s = find_swapchain(info->pSwapchains[i]);
+        if (!s) continue;
+        uint32_t idx = info->pImageIndices[i];
+        if (idx >= s->image_count) continue;
 
-        VkSubmitInfo submit_info;
-        memset(&submit_info, 0, sizeof(submit_info));
-        submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-        submit_info.commandBufferCount = 1;
-        submit_info.pCommandBuffers = &sw->scratch_cmd;
-        if (semaphore != VK_NULL_HANDLE) {
-            submit_info.signalSemaphoreCount = 1;
-            submit_info.pSignalSemaphores = &semaphore;
+        swapchain_image *img = &s->images[idx];
+
+        /* Wait for DXVK's rendering semaphores. */
+        if (info->waitSemaphoreCount > 0) {
+            VkPipelineStageFlags wait = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+            VkSubmitInfo wsi = {};
+            wsi.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+            wsi.waitSemaphoreCount = info->waitSemaphoreCount;
+            wsi.pWaitSemaphores = info->pWaitSemaphores;
+            wsi.pWaitDstStageMask = &wait;
+            dd->vtable.reset_fences(dd->device, 1, &s->blit_fence);
+            dd->vtable.queue_submit(queue, 1, &wsi, s->blit_fence);
+            dd->vtable.wait_fences(dd->device, 1, &s->blit_fence, VK_TRUE, 5000000000ULL);
         }
 
-        res = sw->dev_data->vtable.queue_submit(sw->dev_data->graphics_queue,
-                                                 1, &submit_info, fence);
-        if (res != VK_SUCCESS) {
-            LOGE("queue_submit (acquire signal) failed res=%d", res);
-            return res;
-        }
-    }
+        /* Blit Image A → Image B (OPTIMAL → LINEAR). */
+        VkCommandBufferBeginInfo bi = {};
+        bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        dd->vtable.begin_cmd(s->blit_cmd, &bi);
 
-    *pImageIndex = idx;
-    return VK_SUCCESS;
-}
+        /* Transition render image: GENERAL → TRANSFER_SRC_OPTIMAL. */
+        VkImageMemoryBarrier bar_a = {};
+        bar_a.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        bar_a.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
+        bar_a.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        bar_a.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+        bar_a.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        bar_a.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        bar_a.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        bar_a.image = img->render_img;
+        bar_a.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
 
-static VkResult layer_queue_present(VkQueue queue, const VkPresentInfoKHR *pPresentInfo) {
-    if (!atomic_load(&g_enabled)) {
-        /* Layer disabled — pass through to real driver. */
-        /* We need to find the device from the queue. VkQueue doesn't directly
-         * map to a device in our tracking, so we search all devices. This is
-         * a rare case (layer disabled at runtime). */
-        pthread_mutex_lock(&g_device_lock);
-        device_data *dev_data = g_devices;
-        pthread_mutex_unlock(&g_device_lock);
-        if (dev_data && dev_data->vtable.real_queue_present) {
-            return dev_data->vtable.real_queue_present(queue, pPresentInfo);
-        }
-        return VK_ERROR_INITIALIZATION_FAILED;
-    }
+        /* Transition staging image: UNDEFINED → TRANSFER_DST_OPTIMAL. */
+        VkImageMemoryBarrier bar_b = {};
+        bar_b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        bar_b.srcAccessMask = 0;
+        bar_b.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        bar_b.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        bar_b.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        bar_b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        bar_b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        bar_b.image = img->staging_img;
+        bar_b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
 
-    /* Process each swapchain in the present info. */
-    VkResult final_result = VK_SUCCESS;
-    for (uint32_t i = 0; i < pPresentInfo->swapchainCount; i++) {
-        VkSwapchainKHR sw_handle = pPresentInfo->pSwapchains[i];
-        uint32_t img_idx = pPresentInfo->pImageIndices[i];
-        swapchain_data *sw = find_swapchain_data(sw_handle);
-        if (!sw) {
-            /* Not our swapchain — we can't present it. Skip. */
-            LOGW("queue_present: unknown swapchain %p — skipping", (void *)sw_handle);
-            continue;
-        }
-        if (img_idx >= sw->image_count) {
-            LOGE("queue_present: image index %u out of range (%u)", img_idx, sw->image_count);
-            final_result = VK_ERROR_OUT_OF_DATE_KHR;
-            continue;
-        }
+        VkImageMemoryBarrier bars[] = {bar_a, bar_b};
+        VkPipelineStageFlags src_stages = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+        VkPipelineStageFlags dst_stages = VK_PIPELINE_STAGE_TRANSFER_BIT;
+        dd->vtable.cmd_pipeline_barrier(s->blit_cmd, src_stages, dst_stages, 0,
+                                        0, NULL, 0, NULL, 2, bars);
 
-        swapchain_image *img = &sw->images[img_idx];
+        /* Copy Image A → Image B. */
+        VkImageCopy copy = {};
+        copy.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        copy.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        copy.extent = {img->width, img->height, 1};
+        dd->vtable.cmd_copy_image(s->blit_cmd, img->render_img, img->staging_img,
+                                  VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
 
-        /* Wait for the render semaphores before exporting dmabuf. We submit
-         * a no-op command buffer that waits on the present wait semaphores,
-         * then wait for completion via the scratch fence. */
-        if (pPresentInfo->waitSemaphoreCount > 0) {
-            VkCommandBufferBeginInfo begin_info;
-            memset(&begin_info, 0, sizeof(begin_info));
-            begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-            begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-            VkResult res = sw->dev_data->vtable.begin_command_buffer(sw->scratch_cmd, &begin_info);
-            if (res == VK_SUCCESS) {
-                res = sw->dev_data->vtable.end_command_buffer(sw->scratch_cmd);
-            }
-            if (res != VK_SUCCESS) {
-                LOGE("begin/end cmd (present wait) failed res=%d", res);
-                final_result = res;
-                continue;
-            }
+        /* Transition staging: TRANSFER_DST → GENERAL for mapping. */
+        VkImageMemoryBarrier bar_c = {};
+        bar_c.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        bar_c.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        bar_c.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+        bar_c.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        bar_c.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+        bar_c.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        bar_c.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        bar_c.image = img->staging_img;
+        bar_c.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        dd->vtable.cmd_pipeline_barrier(s->blit_cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                        VK_PIPELINE_STAGE_HOST_BIT, 0, 0, NULL, 0, NULL, 1, &bar_c);
 
-            VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
-            VkSubmitInfo submit_info;
-            memset(&submit_info, 0, sizeof(submit_info));
-            submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-            submit_info.waitSemaphoreCount = pPresentInfo->waitSemaphoreCount;
-            submit_info.pWaitSemaphores = pPresentInfo->pWaitSemaphores;
-            submit_info.pWaitDstStageMask = &wait_stage;
-            submit_info.commandBufferCount = 1;
-            submit_info.pCommandBuffers = &sw->scratch_cmd;
+        dd->vtable.end_cmd(s->blit_cmd);
 
-            res = sw->dev_data->vtable.reset_fences(sw->dev_data->device,
-                                                     1, &sw->scratch_fence);
-            if (res != VK_SUCCESS) {
-                LOGE("reset_fences failed res=%d", res);
-                final_result = res;
-                continue;
-            }
-            res = sw->dev_data->vtable.queue_submit(queue, 1, &submit_info, sw->scratch_fence);
-            if (res != VK_SUCCESS) {
-                LOGE("queue_submit (present wait) failed res=%d", res);
-                final_result = res;
-                continue;
-            }
-            /* Wait for the wait semaphores to be consumed. */
-            res = sw->dev_data->vtable.wait_for_fences(sw->dev_data->device,
-                                                        1, &sw->scratch_fence,
-                                                        VK_TRUE, 5000000000ULL);
-            if (res != VK_SUCCESS) {
-                LOGE("wait_for_fences (present) failed res=%d (timeout?)", res);
-                final_result = res;
-                continue;
-            }
-        }
+        VkSubmitInfo si = {};
+        si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        si.commandBufferCount = 1;
+        si.pCommandBuffers = &s->blit_cmd;
+        dd->vtable.reset_fences(dd->device, 1, &s->blit_fence);
+        dd->vtable.queue_submit(queue, 1, &si, s->blit_fence);
+        dd->vtable.wait_fences(dd->device, 1, &s->blit_fence, VK_TRUE, 5000000000ULL);
 
-        /* Use the dmabuf fd we exported at image creation time. dup() it
-         * because bridge_send_dmabuf + the bridge server will close it. */
-        if (img->dmabuf_fd < 0) {
-            LOGE("dmabuf_fd not available for image %u", img_idx);
-            final_result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
-            continue;
-        }
-        int dmabuf_fd = dup(img->dmabuf_fd);
-        if (dmabuf_fd < 0) {
-            LOGE("dup(dmabuf_fd) failed errno=%d", errno);
-            final_result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
+        /* Map staging memory and copy to memfd. */
+        void *mapped = NULL;
+        VkResult res = dd->vtable.map_mem(dd->device, img->staging_mem, 0,
+                                          img->staging_size, 0, &mapped);
+        if (res != VK_SUCCESS || !mapped) {
+            LOGE("vkMapMemory failed res=%d", res);
+            result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
             continue;
         }
 
-        /* Stride = width * 4 bytes per pixel (BGRA8/RGBA8). */
-        uint32_t stride = img->width * 4;
-        uint64_t dmabuf_size = (uint64_t)stride * (uint64_t)img->height;
-
-        /* Connect to bridge if needed. */
-        if (sw->bridge_sock < 0) {
-            sw->bridge_sock = bridge_connect(sw->bridge_socket_name);
-            if (sw->bridge_sock >= 0) {
-                LOGI("bridge connected sock=%d", sw->bridge_sock);
-            }
+        int fd = syscall(__NR_memfd_create, "waylandie", MFD_CLOEXEC);
+        if (fd < 0) {
+            LOGE("memfd_create failed errno=%d", errno);
+            dd->vtable.unmap_mem(dd->device, img->staging_mem);
+            result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
+            continue;
         }
 
-        /* Send dmabuf to bridge. */
-        if (sw->bridge_sock >= 0) {
-            int send_rc = bridge_send_dmabuf(sw->bridge_sock, dmabuf_fd,
-                                             img->width, img->height,
-                                             img->drm_format, 0ULL,
-                                             stride, dmabuf_size);
-            if (send_rc != 0) {
-                LOGW("bridge_send_dmabuf failed — reconnecting");
-                close(sw->bridge_sock);
-                sw->bridge_sock = bridge_connect(sw->bridge_socket_name);
-                if (sw->bridge_sock >= 0) {
-                    bridge_send_dmabuf(sw->bridge_sock, dmabuf_fd,
-                                       img->width, img->height,
-                                       img->drm_format, 0ULL,
-                                       stride, dmabuf_size);
-                }
-            }
-        } else {
-            LOGW("bridge not connected — frame %llu dropped",
-                 (unsigned long long)sw->present_count);
+        write(fd, mapped, img->staging_size);
+        dd->vtable.unmap_mem(dd->device, img->staging_mem);
+
+        /* Send to bridge. */
+        if (s->bridge_sock < 0) {
+            s->bridge_sock = bridge_connect(WAYLANDIE_BRIDGE_SOCKET);
+            if (s->bridge_sock >= 0) LOGI("bridge connected sock=%d", s->bridge_sock);
+        }
+        if (s->bridge_sock >= 0) {
+            bridge_send_dmabuf(s->bridge_sock, fd, img->width, img->height,
+                               img->drm_format, img->stride, img->staging_size);
         }
 
-        close(dmabuf_fd);
-        img->in_use = false;
-        sw->present_count++;
-
-        if (sw->present_count <= 3 || (sw->present_count % 60) == 0) {
-            LOGI("present #%llu: %ux%u stride=%u drm=0x%08x fd=%d",
-                 (unsigned long long)sw->present_count,
-                 img->width, img->height, img->width * 4, img->drm_format, dmabuf_fd);
-        }
+        close(fd);
+        s->present_count++;
+        if (s->present_count <= 3 || (s->present_count % 60) == 0)
+            LOGI("present #%llu: %ux%u stride=%u", (unsigned long long)s->present_count,
+                 img->width, img->height, img->stride);
     }
-
-    /* We do NOT call the real vkQueuePresentKHR — the bridge handles display. */
-    return final_result;
+    return result;
 }
 
 /* ------------------------------------------------------------------ */
-/* Layer instance/device intercepts                                   */
+/* Device vtable resolution                                          */
 /* ------------------------------------------------------------------ */
-
-static VkResult layer_create_instance(const VkInstanceCreateInfo *pCreateInfo,
-                                      const VkAllocationCallbacks *pAllocator,
-                                      VkInstance *pInstance) {
-    /* Read enable flag. */
-    const char *env = getenv("WAYLANDIE_DMABUF_LAYER_ENABLE");
-    if (env && env[0] == '1') {
-        atomic_store(&g_enabled, 1);
-        LOGI("WayLandIE dmabuf layer ENABLED");
-    } else {
-        atomic_store(&g_enabled, 0);
-        LOGI("WayLandIE dmabuf layer disabled (WAYLANDIE_DMABUF_LAYER_ENABLE not set)");
-    }
-
-    /* Get the next layer's GetInstanceProcAddr from the chain info. */
-    PFN_vkGetInstanceProcAddr fp_gipa = NULL;
-    PFN_vkCreateInstance fp_create_instance = NULL;
-    const VkLayerInstanceCreateInfo *layer_info = (const VkLayerInstanceCreateInfo *)
-        pCreateInfo->pNext;
-    while (layer_info) {
-        if (layer_info->sType == VK_STRUCTURE_TYPE_LOADER_INSTANCE_CREATE_INFO &&
-            layer_info->function == VK_LAYER_LINK_INFO) {
-            PFN_vkGetInstanceProcAddr gipa =
-                layer_info->u.pLayerInfo->pfnNextGetInstanceProcAddr;
-            fp_gipa = gipa;
-            fp_create_instance = (PFN_vkCreateInstance)
-                gipa(VK_NULL_HANDLE, "vkCreateInstance");
-            break;
-        }
-        layer_info = (const VkLayerInstanceCreateInfo *)layer_info->pNext;
-    }
-    if (!fp_create_instance || !fp_gipa) {
-        LOGE("could not find layer link info");
-        return VK_ERROR_INITIALIZATION_FAILED;
-    }
-
-    /* Call the next layer's vkCreateInstance. */
-    VkResult res = fp_create_instance(pCreateInfo, pAllocator, pInstance);
-    if (res != VK_SUCCESS) return res;
-
-    /* Allocate instance data. */
-    instance_data *data = (instance_data *)calloc(1, sizeof(instance_data));
-    if (!data) return VK_ERROR_OUT_OF_HOST_MEMORY;
-    data->instance = *pInstance;
-    data->vtable.get_instance_proc_addr = fp_gipa;
-    data->vtable.create_instance = fp_create_instance;
-    data->vtable.gipa = fp_gipa;
-
-    /* Resolve instance-level functions. */
-    data->vtable.destroy_instance = (PFN_vkDestroyInstance)
-        fp_gipa(*pInstance, "vkDestroyInstance");
-    data->vtable.enumerate_physical_devices = (PFN_vkEnumeratePhysicalDevices)
-        fp_gipa(*pInstance, "vkEnumeratePhysicalDevices");
-    data->vtable.get_physical_device_properties = (PFN_vkGetPhysicalDeviceProperties)
-        fp_gipa(*pInstance, "vkGetPhysicalDeviceProperties");
-    data->vtable.get_physical_device_memory_properties = (PFN_vkGetPhysicalDeviceMemoryProperties)
-        fp_gipa(*pInstance, "vkGetPhysicalDeviceMemoryProperties");
-    data->vtable.get_device_proc_addr = NULL;
-
-    /* Advance the chain so the next layer doesn't double-link. */
-    /* (layer_info->u.pLayerInfo = layer_info->u.pLayerInfo->pNext;) */
-
-    pthread_mutex_lock(&g_instance_lock);
-    data->next = g_instances;
-    g_instances = data;
-    pthread_mutex_unlock(&g_instance_lock);
-
-    return VK_SUCCESS;
-}
-
-static void layer_destroy_instance(VkInstance instance,
-                                   const VkAllocationCallbacks *pAllocator) {
-    instance_data *data = find_instance_data(instance);
-    if (!data) return;
-    PFN_vkDestroyInstance fp_destroy = data->vtable.destroy_instance;
-
-    pthread_mutex_lock(&g_instance_lock);
-    instance_data **pp = &g_instances;
-    while (*pp) {
-        if (*pp == data) { *pp = data->next; break; }
-        pp = &(*pp)->next;
-    }
-    pthread_mutex_unlock(&g_instance_lock);
-    free(data);
-    if (fp_destroy) fp_destroy(instance, pAllocator);
-}
-
-/* ------------------------------------------------------------------ */
-/* winevulkan dispatch table patching                                 */
-/*                                                                    */
-/* PROBLEM: winevulkan.so builds its OWN dispatch table AFTER          */
-/* vkCreateDevice returns. Our layer_create_device runs DURING          */
-/* vkCreateDevice (in the layer chain), so the table is NOT yet        */
-/* populated when we try to patch it.                                 */
-/*                                                                    */
-/* SOLUTION: Spawn a watcher thread from layer_create_device that      */
-/* polls the dispatch table until it's fully populated (>= 900 non-    */
-/* null entries), then patches it. The watcher finds swapchain          */
-/* function indices dynamically by dlopen'ing winevulkan.so and         */
-/* dlsym'ing the wine_vkXxx thunks, then scanning the table for        */
-/* matching pointers.                                                 */
-/*                                                                    */
-/* This completely decouples patching from the vkCreateDevice call      */
-/* chain, avoiding all timing/assertion issues.                        */
-/* ------------------------------------------------------------------ */
-
-#define WINEVULKAN_DISPATCH_TABLE_MAX_ENTRIES 2048
-
-static void *g_real_create_swapchain = NULL;
-static void *g_real_destroy_swapchain = NULL;
-static void *g_real_get_swapchain_images = NULL;
-static void *g_real_acquire_next_image = NULL;
-static void *g_real_queue_present = NULL;
-static atomic_int g_watcher_started = 0;
-
-/* Count non-NULL entries in the first N slots of a dispatch table. */
-static int count_non_null_entries(void **table, int max) {
-    int count = 0;
-    for (int i = 0; i < max; i++) {
-        if (table[i]) count++;
-    }
-    return count;
-}
-
-/* Find the winevulkan module handle via dladdr on a known function. */
-static void *find_winevulkan_module(void *known_ptr) {
-    if (!known_ptr) return NULL;
-    Dl_info info;
-    memset(&info, 0, sizeof(info));
-    if (dladdr(known_ptr, &info) && info.dli_fname) {
-        LOGI("patch: dladdr: fname=%s fbase=%p", info.dli_fname, info.dli_fbase);
-        return dlopen(info.dli_fname, RTLD_NOW | RTLD_NOLOAD);
-    }
-    return NULL;
-}
-
-/* Try to find winevulkan thunk addresses via dlsym. */
-static int find_winevulkan_thunks(void *winevulkan_mod,
-                                   void **out_create, void **out_destroy,
-                                   void **out_get_images, void **out_acquire,
-                                   void **out_present) {
-    if (!winevulkan_mod) return -1;
-    *out_create = dlsym(winevulkan_mod, "wine_vkCreateSwapchainKHR");
-    *out_destroy = dlsym(winevulkan_mod, "wine_vkDestroySwapchainKHR");
-    *out_get_images = dlsym(winevulkan_mod, "wine_vkGetSwapchainImagesKHR");
-    *out_acquire = dlsym(winevulkan_mod, "wine_vkAcquireNextImageKHR");
-    *out_present = dlsym(winevulkan_mod, "wine_vkQueuePresentKHR");
-    LOGI("patch: winevulkan thunks: create=%p destroy=%p images=%p acquire=%p present=%p",
-         *out_create, *out_destroy, *out_get_images, *out_acquire, *out_present);
-    return (*out_create && *out_present) ? 0 : -1;
-}
-
-/* Patch the dispatch table by overwriting swapchain entries at known indices.
- * The dispatch table (struct vulkan_device_funcs) has a FIXED layout determined
- * at compile time by winevulkan's source. The swapchain functions are always at
- * these indices, regardless of which extensions are enabled:
- *   [253] = vkCreateSwapchainKHR
- *   [254] = vkDestroySwapchainKHR
- *   [255] = vkGetSwapchainImagesKHR
- *   [256] = vkAcquireNextImageKHR
- *   [257] = vkQueuePresentKHR
- * Confirmed empirically in test 075508. No dlsym/dladdr needed. */
-#define IDX_CREATE_SWAPCHAIN    253
-#define IDX_DESTROY_SWAPCHAIN   254
-#define IDX_GET_SWAPCHAIN_IMAGES 255
-#define IDX_ACQUIRE_NEXT_IMAGE  256
-#define IDX_QUEUE_PRESENT       257
-
-static int patch_dispatch_table_now(VkDevice device) {
-    void **dispatch_table = (void **)((char *)device + 8);
-    if (!dispatch_table) {
-        LOGE("patch: dispatch table is NULL");
-        return -1;
-    }
-
-    int non_null = count_non_null_entries(dispatch_table, 256);
-    LOGI("patch: table=%p, %d/256 non-null in first 256", (void *)dispatch_table, non_null);
-    if (non_null < 100) {
-        LOGW("patch: table not populated enough (%d/256), aborting", non_null);
-        return -1;
-    }
-
-    /* Use known indices 253-257 (confirmed in test 075508). */
-    int idx_create = IDX_CREATE_SWAPCHAIN;
-    int idx_destroy = IDX_DESTROY_SWAPCHAIN;
-    int idx_images = IDX_GET_SWAPCHAIN_IMAGES;
-    int idx_acquire = IDX_ACQUIRE_NEXT_IMAGE;
-    int idx_present = IDX_QUEUE_PRESENT;
-
-    void *orig_create = dispatch_table[idx_create];
-    void *orig_destroy = dispatch_table[idx_destroy];
-    void *orig_images = dispatch_table[idx_images];
-    void *orig_acquire = dispatch_table[idx_acquire];
-    void *orig_present = dispatch_table[idx_present];
-
-    LOGI("patch: swapchain entries at [%d-%d]: create=%p destroy=%p images=%p acquire=%p present=%p",
-         idx_create, idx_present, orig_create, orig_destroy, orig_images, orig_acquire, orig_present);
-
-    if (!orig_create || !orig_present) {
-        /* Fallback: scan for 5 consecutive non-NULL entries near index 250-260. */
-        LOGW("patch: indices 253-257 have NULLs, scanning for swapchain cluster...");
-        int found_start = -1;
-        for (int i = 200; i < 400; i++) {
-            if (dispatch_table[i] && dispatch_table[i+1] && dispatch_table[i+2] &&
-                dispatch_table[i+3] && dispatch_table[i+4]) {
-                found_start = i;
-                LOGI("patch: found cluster at [%d-%d]: %p %p %p %p %p",
-                     i, i+4, dispatch_table[i], dispatch_table[i+1],
-                     dispatch_table[i+2], dispatch_table[i+3], dispatch_table[i+4]);
-                break;
-            }
-        }
-        if (found_start < 0) {
-            LOGE("patch: could not find swapchain cluster");
-            return -1;
-        }
-        idx_create = found_start;
-        idx_destroy = found_start + 1;
-        idx_images = found_start + 2;
-        idx_acquire = found_start + 3;
-        idx_present = found_start + 4;
-        orig_create = dispatch_table[idx_create];
-        orig_destroy = dispatch_table[idx_destroy];
-        orig_images = dispatch_table[idx_images];
-        orig_acquire = dispatch_table[idx_acquire];
-        orig_present = dispatch_table[idx_present];
-    }
-
-    /* mprotect the table region RW. */
-    uintptr_t table_start = (uintptr_t)dispatch_table;
-    uintptr_t table_end = table_start + ((idx_present + 8) * sizeof(void *));
-    uintptr_t page_start = table_start & ~(uintptr_t)(sysconf(_SC_PAGE_SIZE) - 1);
-    uintptr_t page_end = (table_end + sysconf(_SC_PAGE_SIZE) - 1) & ~(uintptr_t)(sysconf(_SC_PAGE_SIZE) - 1);
-    size_t prot_len = page_end - page_start;
-    if (mprotect((void *)page_start, prot_len, PROT_READ | PROT_WRITE) != 0) {
-        LOGE("patch: mprotect RW failed errno=%d", errno);
-        return -1;
-    }
-
-    /* Overwrite with our hooks, saving originals for pass-through. */
-    g_real_create_swapchain = orig_create;
-    g_real_destroy_swapchain = orig_destroy;
-    g_real_get_swapchain_images = orig_images;
-    g_real_acquire_next_image = orig_acquire;
-    g_real_queue_present = orig_present;
-
-    dispatch_table[idx_create] = (void *)layer_create_swapchain;
-    dispatch_table[idx_destroy] = (void *)layer_destroy_swapchain;
-    dispatch_table[idx_images] = (void *)layer_get_swapchain_images;
-    dispatch_table[idx_acquire] = (void *)layer_acquire_next_image;
-    dispatch_table[idx_present] = (void *)layer_queue_present;
-
-    /* Restore RO. */
-    mprotect((void *)page_start, prot_len, PROT_READ);
-
-    LOGI("patch: patched 5/5 at indices [%d,%d,%d,%d,%d]",
-         idx_create, idx_destroy, idx_images, idx_acquire, idx_present);
-    return 0;
-}
-
-/* Watcher thread: polls until the dispatch table is populated, then patches. */
-static void *dispatch_watcher_thread(void *arg) {
-    VkDevice device = (VkDevice)arg;
-    LOGI("watcher: started, waiting for dispatch table to populate (device=%p)", (void *)device);
-
-    /* The dispatch table is INLINE at offset 8 (struct vulkan_device_funcs).
-     * It's populated by winevulkan AFTER vkCreateDevice returns.
-     * We poll until it has enough non-NULL entries to indicate population. */
-    for (int attempt = 0; attempt < 200; attempt++) {
-        usleep(10000);  /* 10ms */
-        void **dispatch_table = (void **)((char *)device + 8);
-        int non_null = count_non_null_entries(dispatch_table, 256);
-        /* Log first few attempts and every 10th for diagnostics. */
-        if (attempt < 3 || (attempt % 20) == 0) {
-            LOGI("watcher: attempt %d, %d/256 non-null in first 256", attempt + 1, non_null);
-        }
-        /* The table has ~201 non-null entries in first 256 when populated.
-         * Use 150 as threshold (robust against minor variations). */
-        if (non_null >= 150) {
-            LOGI("watcher: table populated (%d/256 non-null) after %d attempts", non_null, attempt + 1);
-            int rc = patch_dispatch_table_now(device);
-            if (rc == 0) {
-                LOGI("watcher: dispatch table patched successfully — layer hooks active");
-            } else {
-                LOGE("watcher: patch_dispatch_table_now failed (rc=%d)", rc);
-            }
-            return NULL;
-        }
-    }
-    LOGE("watcher: timed out waiting for dispatch table to populate");
-    return NULL;
-}
-
-static int patch_dispatch_table(VkDevice device) {
-    /* Spawn a watcher thread that polls until the table is populated. */
-    int expected = 0;
-    if (atomic_compare_exchange_strong(&g_watcher_started, &expected, 1)) {
-        pthread_t tid;
-        if (pthread_create(&tid, NULL, dispatch_watcher_thread, (void *)device) == 0) {
-            pthread_detach(tid);
-            LOGI("patch_dispatch_table: watcher thread spawned");
-            return 0;
-        } else {
-            LOGE("patch_dispatch_table: pthread_create failed");
-            atomic_store(&g_watcher_started, 0);
-            return -1;
-        }
-    }
-    LOGW("patch_dispatch_table: watcher already started");
-    return 0;
-}
-
-
-static VkResult layer_create_device(VkPhysicalDevice physicalDevice,
-                                    const VkDeviceCreateInfo *pCreateInfo,
-                                    const VkAllocationCallbacks *pAllocator,
-                                    VkDevice *pDevice) {
-    /* Find the instance data by scanning. We don't have a direct
-     * physical-device → instance map, so we use the first registered instance. */
-    pthread_mutex_lock(&g_instance_lock);
-    instance_data *inst_data = g_instances;
-    pthread_mutex_unlock(&g_instance_lock);
-    if (!inst_data) {
-        LOGE("layer_create_device: no instance data found");
-        return VK_ERROR_INITIALIZATION_FAILED;
-    }
-
-    /* Get the next layer's GetDeviceProcAddr from the chain info. */
-    PFN_vkGetDeviceProcAddr fp_gdpa = NULL;
-    PFN_vkCreateDevice fp_create_device = NULL;
-    const VkLayerDeviceCreateInfo *layer_info = (const VkLayerDeviceCreateInfo *)
-        pCreateInfo->pNext;
-    while (layer_info) {
-        if (layer_info->sType == VK_STRUCTURE_TYPE_LOADER_DEVICE_CREATE_INFO &&
-            layer_info->function == VK_LAYER_LINK_INFO) {
-            fp_gdpa = layer_info->u.pLayerInfo->pfnNextGetDeviceProcAddr;
-            fp_create_device = (PFN_vkCreateDevice)
-                inst_data->vtable.gipa(VK_NULL_HANDLE, "vkCreateDevice");
-            break;
-        }
-        layer_info = (const VkLayerDeviceCreateInfo *)layer_info->pNext;
-    }
-    if (!fp_create_device || !fp_gdpa) {
-        LOGE("could not find device layer link info");
-        return VK_ERROR_INITIALIZATION_FAILED;
-    }
-
-    /* Do NOT inject extensions. winevulkan rejects extensions it doesn't
-     * expose (VK_KHR_external_memory_fd, VK_EXT_external_memory_dma_buf are
-     * in UNEXPOSED_EXTENSIONS). The host driver already has these enabled
-     * via the wayland driver's mapping of VK_KHR_external_memory_win32 → _fd.
-     * We obtain vkGetMemoryFdKHR via GetDeviceProcAddr at runtime — if the
-     * host device has the extension enabled, GDPA will return the pointer. */
-
-    /* Call the next layer's vkCreateDevice. */
-    VkResult res = fp_create_device(physicalDevice, pCreateInfo, pAllocator, pDevice);
-    if (res != VK_SUCCESS) return res;
-
-    /* Allocate device data. */
-    device_data *data = (device_data *)calloc(1, sizeof(device_data));
-    if (!data) return VK_ERROR_OUT_OF_HOST_MEMORY;
-    data->device = *pDevice;
-    data->physical_device = physicalDevice;
-    data->inst_data = inst_data;
-    data->vtable.get_device_proc_addr = fp_gdpa;
-
-    /* NOTE: The dispatch table at offset 8 is NOT yet populated when
-     * layer_create_device runs — winevulkan populates it AFTER vkCreateDevice
-     * returns to the caller. So we must NOT read swapchain ptrs here.
-     * Instead, we spawn a watcher thread that polls until the table is
-     * populated, then patches it. See patch_dispatch_table() above. */
-    data->queue_family = 0;
-    data->graphics_queue = VK_NULL_HANDLE;
-    if (pCreateInfo->queueCreateInfoCount > 0) {
-        data->queue_family = pCreateInfo->pQueueCreateInfos[0].queueFamilyIndex;
-    }
-
-    pthread_mutex_lock(&g_device_lock);
-    data->next = g_devices;
-    g_devices = data;
-    pthread_mutex_unlock(&g_device_lock);
-
-    /* Initialize AHB native handle resolver. */
-    init_ahb_native_handle();
-
-    /* Spawn a watcher thread that waits for the dispatch table to be
-     * fully populated, then patches it with our hooks. This decouples
-     * patching from the vkCreateDevice call chain. */
-    if (atomic_load(&g_enabled)) {
-        int patch_rc = patch_dispatch_table(*pDevice);
-        if (patch_rc == 0) {
-            LOGI("layer_create_device: watcher thread spawned — will patch when table is ready");
-        } else {
-            LOGE("layer_create_device: failed to spawn watcher thread");
-        }
-    } else {
-        LOGI("layer_create_device: layer disabled — skipping dispatch table patch");
-    }
-
-    LOGI("layer_create_device: device=%p family=%u",
-         (void *)*pDevice, data->queue_family);
-    return VK_SUCCESS;
-}
-
-/* Lazy vtable resolver — called on first use of any device function.
- * At this point winevulkan's vkCreateDevice has completed and fp_gdpa
- * is safe to call. */
 
 static void ensure_device_vtable(device_data *data) {
-    if (data->vtable.destroy_device) return;  /* already resolved */
-    if (!data->device) return;
+    if (data->vtable.destroy_device) return;
+    PFN_vkGetDeviceProcAddr fp = data->vtable.get_device_proc_addr;
+    if (!fp || !data->device) return;
 
-    /* Resolve all device functions via fp_gdpa. This is safe because
-     * ensure_device_vtable is only called from layer_create_swapchain,
-     * which fires AFTER winevulkan's vkCreateDevice has fully completed. */
-    PFN_vkGetDeviceProcAddr fp_gdpa = data->vtable.get_device_proc_addr;
-    if (fp_gdpa) {
-        data->vtable.destroy_device = (PFN_vkDestroyDevice)
-            fp_gdpa(data->device, "vkDestroyDevice");
-        data->vtable.get_device_queue = (PFN_vkGetDeviceQueue)
-            fp_gdpa(data->device, "vkGetDeviceQueue");
-        data->vtable.queue_submit = (PFN_vkQueueSubmit)
-            fp_gdpa(data->device, "vkQueueSubmit");
-        data->vtable.queue_wait_idle = (PFN_vkQueueWaitIdle)
-            fp_gdpa(data->device, "vkQueueWaitIdle");
-        data->vtable.create_fence = (PFN_vkCreateFence)
-            fp_gdpa(data->device, "vkCreateFence");
-        data->vtable.destroy_fence = (PFN_vkDestroyFence)
-            fp_gdpa(data->device, "vkDestroyFence");
-        data->vtable.wait_for_fences = (PFN_vkWaitForFences)
-            fp_gdpa(data->device, "vkWaitForFences");
-        data->vtable.reset_fences = (PFN_vkResetFences)
-            fp_gdpa(data->device, "vkResetFences");
-        data->vtable.create_command_pool = (PFN_vkCreateCommandPool)
-            fp_gdpa(data->device, "vkCreateCommandPool");
-        data->vtable.destroy_command_pool = (PFN_vkDestroyCommandPool)
-            fp_gdpa(data->device, "vkDestroyCommandPool");
-        data->vtable.allocate_command_buffers = (PFN_vkAllocateCommandBuffers)
-            fp_gdpa(data->device, "vkAllocateCommandBuffers");
-        data->vtable.free_command_buffers = (PFN_vkFreeCommandBuffers)
-            fp_gdpa(data->device, "vkFreeCommandBuffers");
-        data->vtable.begin_command_buffer = (PFN_vkBeginCommandBuffer)
-            fp_gdpa(data->device, "vkBeginCommandBuffer");
-        data->vtable.end_command_buffer = (PFN_vkEndCommandBuffer)
-            fp_gdpa(data->device, "vkEndCommandBuffer");
-        data->vtable.create_image = (PFN_vkCreateImage)
-            fp_gdpa(data->device, "vkCreateImage");
-        data->vtable.destroy_image = (PFN_vkDestroyImage)
-            fp_gdpa(data->device, "vkDestroyImage");
-        data->vtable.allocate_memory = (PFN_vkAllocateMemory)
-            fp_gdpa(data->device, "vkAllocateMemory");
-        data->vtable.free_memory = (PFN_vkFreeMemory)
-            fp_gdpa(data->device, "vkFreeMemory");
-        data->vtable.bind_image_memory = (PFN_vkBindImageMemory)
-            fp_gdpa(data->device, "vkBindImageMemory");
-        data->vtable.get_image_memory_requirements2 = (PFN_vkGetImageMemoryRequirements2)
-            fp_gdpa(data->device, "vkGetImageMemoryRequirements2");
-        data->vtable.map_memory = (PFN_vkMapMemory)
-            fp_gdpa(data->device, "vkMapMemory");
-        data->vtable.unmap_memory = (PFN_vkUnmapMemory)
-            fp_gdpa(data->device, "vkUnmapMemory");
-        /* Also resolve swapchain functions for pass-through fallback. */
-        data->vtable.real_create_swapchain = (PFN_vkCreateSwapchainKHR)
-            fp_gdpa(data->device, "vkCreateSwapchainKHR");
-        data->vtable.real_destroy_swapchain = (PFN_vkDestroySwapchainKHR)
-            fp_gdpa(data->device, "vkDestroySwapchainKHR");
-        data->vtable.real_get_swapchain_images = (PFN_vkGetSwapchainImagesKHR)
-            fp_gdpa(data->device, "vkGetSwapchainImagesKHR");
-        data->vtable.real_acquire_next_image = (PFN_vkAcquireNextImageKHR)
-            fp_gdpa(data->device, "vkAcquireNextImageKHR");
-        data->vtable.real_queue_present = (PFN_vkQueuePresentKHR)
-            fp_gdpa(data->device, "vkQueuePresentKHR");
-    }
+    data->vtable.destroy_device = (PFN_vkDestroyDevice)fp(data->device, "vkDestroyDevice");
+    data->vtable.get_device_queue = (PFN_vkGetDeviceQueue)fp(data->device, "vkGetDeviceQueue");
+    data->vtable.create_cmd_pool = (PFN_vkCreateCommandPool)fp(data->device, "vkCreateCommandPool");
+    data->vtable.destroy_cmd_pool = (PFN_vkDestroyCommandPool)fp(data->device, "vkDestroyCommandPool");
+    data->vtable.alloc_cmd_bufs = (PFN_vkAllocateCommandBuffers)fp(data->device, "vkAllocateCommandBuffers");
+    data->vtable.free_cmd_bufs = (PFN_vkFreeCommandBuffers)fp(data->device, "vkFreeCommandBuffers");
+    data->vtable.begin_cmd = (PFN_vkBeginCommandBuffer)fp(data->device, "vkBeginCommandBuffer");
+    data->vtable.end_cmd = (PFN_vkEndCommandBuffer)fp(data->device, "vkEndCommandBuffer");
+    data->vtable.queue_submit = (PFN_vkQueueSubmit)fp(data->device, "vkQueueSubmit");
+    data->vtable.queue_wait_idle = (PFN_vkQueueWaitIdle)fp(data->device, "vkQueueWaitIdle");
+    data->vtable.create_fence = (PFN_vkCreateFence)fp(data->device, "vkCreateFence");
+    data->vtable.destroy_fence = (PFN_vkDestroyFence)fp(data->device, "vkDestroyFence");
+    data->vtable.wait_fences = (PFN_vkWaitForFences)fp(data->device, "vkWaitForFences");
+    data->vtable.reset_fences = (PFN_vkResetFences)fp(data->device, "vkResetFences");
+    data->vtable.create_image = (PFN_vkCreateImage)fp(data->device, "vkCreateImage");
+    data->vtable.destroy_image = (PFN_vkDestroyImage)fp(data->device, "vkDestroyImage");
+    data->vtable.alloc_mem = (PFN_vkAllocateMemory)fp(data->device, "vkAllocateMemory");
+    data->vtable.free_mem = (PFN_vkFreeMemory)fp(data->device, "vkFreeMemory");
+    data->vtable.bind_img_mem = (PFN_vkBindImageMemory)fp(data->device, "vkBindImageMemory");
+    data->vtable.map_mem = (PFN_vkMapMemory)fp(data->device, "vkMapMemory");
+    data->vtable.unmap_mem = (PFN_vkUnmapMemory)fp(data->device, "vkUnmapMemory");
+    data->vtable.get_img_mem_reqs2 = (PFN_vkGetImageMemoryRequirements2)fp(data->device, "vkGetImageMemoryRequirements2");
+    data->vtable.get_subres_layout = (PFN_vkGetImageSubresourceLayout)fp(data->device, "vkGetImageSubresourceLayout");
+    data->vtable.cmd_copy_image = (PFN_vkCmdCopyImage)fp(data->device, "vkCmdCopyImage");
+    data->vtable.cmd_pipeline_barrier = (PFN_vkCmdPipelineBarrier)fp(data->device, "vkCmdPipelineBarrier");
 
-    /* Get the graphics queue. */
-    if (data->graphics_queue == VK_NULL_HANDLE && data->queue_family >= 0 &&
-        data->vtable.get_device_queue) {
-        data->vtable.get_device_queue(data->device, data->queue_family, 0,
-                                      &data->graphics_queue);
-    }
+    if (data->graphics_queue == VK_NULL_HANDLE && data->queue_family >= 0)
+        data->vtable.get_device_queue(data->device, data->queue_family, 0, &data->graphics_queue);
 
-    LOGI("ensure_device_vtable: resolved for device=%p queue=%p",
-         (void *)data->device, (void *)data->graphics_queue);
-    /* Note: dispatch table patching is handled by the watcher thread
-     * spawned in layer_create_device. No need to patch here. */
+    LOGI("ensure_device_vtable: device=%p queue=%p", (void *)data->device, (void *)data->graphics_queue);
 }
 
-static void layer_destroy_device(VkDevice device,
-                                 const VkAllocationCallbacks *pAllocator) {
-    device_data *data = find_device_data(device);
+/* ------------------------------------------------------------------ */
+/* Layer create/destroy instance & device                             */
+/* ------------------------------------------------------------------ */
+
+static VkResult layer_create_instance(const VkInstanceCreateInfo *ci,
+                                      const VkAllocationCallbacks *alloc, VkInstance *inst) {
+    is_enabled();
+
+    PFN_vkGetInstanceProcAddr fp_gipa = NULL;
+    PFN_vkCreateInstance fp_create = NULL;
+    const VkLayerInstanceCreateInfo *li = (const VkLayerInstanceCreateInfo *)ci->pNext;
+    while (li) {
+        if (li->sType == VK_STRUCTURE_TYPE_LOADER_INSTANCE_CREATE_INFO &&
+            li->function == VK_LAYER_LINK_INFO) {
+            fp_gipa = li->u.pLayerInfo->pfnNextGetInstanceProcAddr;
+            fp_create = (PFN_vkCreateInstance)fp_gipa(VK_NULL_HANDLE, "vkCreateInstance");
+            break;
+        }
+        li = (const VkLayerInstanceCreateInfo *)li->pNext;
+    }
+    if (!fp_create || !fp_gipa) return VK_ERROR_INITIALIZATION_FAILED;
+
+    VkResult res = fp_create(ci, alloc, inst);
+    if (res != VK_SUCCESS) return res;
+
+    instance_data *data = (instance_data *)calloc(1, sizeof(*data));
+    data->instance = *inst;
+    data->vtable.get_instance_proc_addr = fp_gipa;
+    data->vtable.create_instance = fp_create;
+    data->vtable.destroy_instance = (PFN_vkDestroyInstance)fp_gipa(*inst, "vkDestroyInstance");
+    data->vtable.get_phys_mem_props = (PFN_vkGetPhysicalDeviceMemoryProperties)
+        fp_gipa(*inst, "vkGetPhysicalDeviceMemoryProperties");
+
+    pthread_mutex_lock(&g_lock);
+    data->next = g_instances;
+    g_instances = data;
+    pthread_mutex_unlock(&g_lock);
+
+    return VK_SUCCESS;
+}
+
+static void layer_destroy_instance(VkInstance inst, const VkAllocationCallbacks *alloc) {
+    instance_data *data = find_instance(inst);
     if (!data) return;
-    PFN_vkDestroyDevice fp_destroy = data->vtable.destroy_device;
-
-    pthread_mutex_lock(&g_device_lock);
-    device_data **pp = &g_devices;
-    while (*pp) {
-        if (*pp == data) { *pp = data->next; break; }
-        pp = &(*pp)->next;
-    }
-    pthread_mutex_unlock(&g_device_lock);
+    PFN_vkDestroyInstance fp = data->vtable.destroy_instance;
+    pthread_mutex_lock(&g_lock);
+    instance_data **pp = &g_instances;
+    while (*pp) { if (*pp == data) { *pp = data->next; break; } pp = &(*pp)->next; }
+    pthread_mutex_unlock(&g_lock);
     free(data);
-    if (fp_destroy) fp_destroy(device, pAllocator);
+    if (fp) fp(inst, alloc);
+}
+
+static VkResult layer_create_device(VkPhysicalDevice phys, const VkDeviceCreateInfo *ci,
+                                    const VkAllocationCallbacks *alloc, VkDevice *dev) {
+    pthread_mutex_lock(&g_lock);
+    instance_data *inst = g_instances;
+    pthread_mutex_unlock(&g_lock);
+    if (!inst) return VK_ERROR_INITIALIZATION_FAILED;
+
+    PFN_vkGetDeviceProcAddr fp_gdpa = NULL;
+    PFN_vkCreateDevice fp_create = NULL;
+    const VkLayerDeviceCreateInfo *li = (const VkLayerDeviceCreateInfo *)ci->pNext;
+    while (li) {
+        if (li->sType == VK_STRUCTURE_TYPE_LOADER_DEVICE_CREATE_INFO &&
+            li->function == VK_LAYER_LINK_INFO) {
+            fp_gdpa = li->u.pLayerInfo->pfnNextGetDeviceProcAddr;
+            fp_create = (PFN_vkCreateDevice)inst->vtable.get_instance_proc_addr(VK_NULL_HANDLE, "vkCreateDevice");
+            break;
+        }
+        li = (const VkLayerDeviceCreateInfo *)li->pNext;
+    }
+    if (!fp_create || !fp_gdpa) return VK_ERROR_INITIALIZATION_FAILED;
+
+    /* Do NOT inject extensions — winevulkan rejects unexposed ones. */
+    VkResult res = fp_create(phys, ci, alloc, dev);
+    if (res != VK_SUCCESS) return res;
+
+    device_data *data = (device_data *)calloc(1, sizeof(*data));
+    data->device = *dev;
+    data->physical_device = phys;
+    data->inst_data = inst;
+    data->vtable.get_device_proc_addr = fp_gdpa;
+    data->queue_family = 0;
+    data->graphics_queue = VK_NULL_HANDLE;
+    if (ci->queueCreateInfoCount > 0)
+        data->queue_family = ci->pQueueCreateInfos[0].queueFamilyIndex;
+
+    pthread_mutex_lock(&g_lock);
+    data->next = g_devices;
+    g_devices = data;
+    pthread_mutex_unlock(&g_lock);
+
+    /* Spawn watcher thread to patch dispatch table after vkCreateDevice completes. */
+    if (is_enabled()) {
+        int expected = 0;
+        if (atomic_compare_exchange_strong(&g_watcher_started, &expected, 1)) {
+            pthread_t tid;
+            if (pthread_create(&tid, NULL, watcher_thread, (void *)*dev) == 0) {
+                pthread_detach(tid);
+                LOGI("create_device: watcher spawned (device=%p)", (void *)*dev);
+            }
+        }
+    }
+
+    LOGI("create_device: device=%p family=%u", (void *)*dev, data->queue_family);
+    return VK_SUCCESS;
+}
+
+static void layer_destroy_device(VkDevice dev, const VkAllocationCallbacks *alloc) {
+    device_data *data = find_device(dev);
+    if (!data) return;
+    PFN_vkDestroyDevice fp = data->vtable.destroy_device;
+    pthread_mutex_lock(&g_lock);
+    device_data **pp = &g_devices;
+    while (*pp) { if (*pp == data) { *pp = data->next; break; } pp = &(*pp)->next; }
+    pthread_mutex_unlock(&g_lock);
+    free(data);
+    if (fp) fp(dev, alloc);
 }
 
 /* ------------------------------------------------------------------ */
-/* Layer entry points (GIPA / GDPA)                                   */
+/* Layer entry points                                                 */
 /* ------------------------------------------------------------------ */
 
 static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
-layer_get_device_proc_addr(VkDevice device, const char *pName);
+layer_get_device_proc_addr(VkDevice dev, const char *name);
 
 static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
-layer_get_instance_proc_addr(VkInstance instance, const char *pName) {
-    if (!pName) return NULL;
+layer_get_instance_proc_addr(VkInstance inst, const char *name) {
+    if (!name) return NULL;
+    if (!strcmp(name, "vkGetInstanceProcAddr")) return (PFN_vkVoidFunction)layer_get_instance_proc_addr;
+    if (!strcmp(name, "vkGetDeviceProcAddr")) return (PFN_vkVoidFunction)layer_get_device_proc_addr;
+    if (!strcmp(name, "vkCreateInstance")) return (PFN_vkVoidFunction)layer_create_instance;
+    if (!strcmp(name, "vkDestroyInstance")) return (PFN_vkVoidFunction)layer_destroy_instance;
+    if (!strcmp(name, "vkCreateDevice")) return (PFN_vkVoidFunction)layer_create_device;
+    if (!strcmp(name, "vkDestroyDevice")) return (PFN_vkVoidFunction)layer_destroy_device;
+    if (!strcmp(name, "vkCreateSwapchainKHR")) return (PFN_vkVoidFunction)layer_create_swapchain;
+    if (!strcmp(name, "vkDestroySwapchainKHR")) return (PFN_vkVoidFunction)layer_destroy_swapchain;
+    if (!strcmp(name, "vkGetSwapchainImagesKHR")) return (PFN_vkVoidFunction)layer_get_swapchain_images;
+    if (!strcmp(name, "vkAcquireNextImageKHR")) return (PFN_vkVoidFunction)layer_acquire_next_image;
+    if (!strcmp(name, "vkQueuePresentKHR")) return (PFN_vkVoidFunction)layer_queue_present;
 
-    /* Core functions the layer implements. */
-    if (strcmp(pName, "vkGetInstanceProcAddr") == 0)
-        return (PFN_vkVoidFunction)layer_get_instance_proc_addr;
-    if (strcmp(pName, "vkGetDeviceProcAddr") == 0)
-        return (PFN_vkVoidFunction)layer_get_device_proc_addr;
-    if (strcmp(pName, "vkCreateInstance") == 0)
-        return (PFN_vkVoidFunction)layer_create_instance;
-    if (strcmp(pName, "vkDestroyInstance") == 0)
-        return (PFN_vkVoidFunction)layer_destroy_instance;
-    if (strcmp(pName, "vkCreateDevice") == 0)
-        return (PFN_vkVoidFunction)layer_create_device;
-    if (strcmp(pName, "vkDestroyDevice") == 0)
-        return (PFN_vkVoidFunction)layer_destroy_device;
-    if (strcmp(pName, "vkCreateSwapchainKHR") == 0)
-        return (PFN_vkVoidFunction)layer_create_swapchain;
-    if (strcmp(pName, "vkDestroySwapchainKHR") == 0)
-        return (PFN_vkVoidFunction)layer_destroy_swapchain;
-    if (strcmp(pName, "vkGetSwapchainImagesKHR") == 0)
-        return (PFN_vkVoidFunction)layer_get_swapchain_images;
-    if (strcmp(pName, "vkAcquireNextImageKHR") == 0)
-        return (PFN_vkVoidFunction)layer_acquire_next_image;
-    if (strcmp(pName, "vkQueuePresentKHR") == 0)
-        return (PFN_vkVoidFunction)layer_queue_present;
-
-    /* Pass through to the next layer. */
-    if (instance) {
-        instance_data *data = find_instance_data(instance);
-        if (data && data->vtable.gipa) {
-            return data->vtable.gipa(instance, pName);
-        }
+    if (inst) {
+        instance_data *data = find_instance(inst);
+        if (data && data->vtable.get_instance_proc_addr)
+            return data->vtable.get_instance_proc_addr(inst, name);
     }
     return NULL;
 }
 
 static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
-layer_get_device_proc_addr(VkDevice device, const char *pName) {
-    if (!pName) return NULL;
+layer_get_device_proc_addr(VkDevice dev, const char *name) {
+    if (!name) return NULL;
+    if (!strcmp(name, "vkGetDeviceProcAddr")) return (PFN_vkVoidFunction)layer_get_device_proc_addr;
+    if (!strcmp(name, "vkCreateSwapchainKHR")) return (PFN_vkVoidFunction)layer_create_swapchain;
+    if (!strcmp(name, "vkDestroySwapchainKHR")) return (PFN_vkVoidFunction)layer_destroy_swapchain;
+    if (!strcmp(name, "vkGetSwapchainImagesKHR")) return (PFN_vkVoidFunction)layer_get_swapchain_images;
+    if (!strcmp(name, "vkAcquireNextImageKHR")) return (PFN_vkVoidFunction)layer_acquire_next_image;
+    if (!strcmp(name, "vkQueuePresentKHR")) return (PFN_vkVoidFunction)layer_queue_present;
+    if (!strcmp(name, "vkDestroyDevice")) return (PFN_vkVoidFunction)layer_destroy_device;
 
-    /* Do NOT trigger ensure_device_vtable here — winevulkan calls
-     * vkGetDeviceProcAddr during vkCreateDevice to populate its dispatch
-     * table, and calling fp_gdpa at that point triggers assertions.
-     * The dispatch table is patched from layer_create_device instead. */
-
-    /* Device-level functions the layer implements. */
-    if (strcmp(pName, "vkGetDeviceProcAddr") == 0)
-        return (PFN_vkVoidFunction)layer_get_device_proc_addr;
-    if (strcmp(pName, "vkCreateSwapchainKHR") == 0)
-        return (PFN_vkVoidFunction)layer_create_swapchain;
-    if (strcmp(pName, "vkDestroySwapchainKHR") == 0)
-        return (PFN_vkVoidFunction)layer_destroy_swapchain;
-    if (strcmp(pName, "vkGetSwapchainImagesKHR") == 0)
-        return (PFN_vkVoidFunction)layer_get_swapchain_images;
-    if (strcmp(pName, "vkAcquireNextImageKHR") == 0)
-        return (PFN_vkVoidFunction)layer_acquire_next_image;
-    if (strcmp(pName, "vkQueuePresentKHR") == 0)
-        return (PFN_vkVoidFunction)layer_queue_present;
-    if (strcmp(pName, "vkDestroyDevice") == 0)
-        return (PFN_vkVoidFunction)layer_destroy_device;
-
-    /* Pass through to the next layer. */
-    if (device) {
-        device_data *data = find_device_data(device);
-        if (data && data->vtable.get_device_proc_addr) {
-            return data->vtable.get_device_proc_addr(device, pName);
-        }
+    if (dev) {
+        device_data *data = find_device(dev);
+        if (data && data->vtable.get_device_proc_addr)
+            return data->vtable.get_device_proc_addr(dev, name);
     }
     return NULL;
 }
 
 /* ------------------------------------------------------------------ */
-/* Layer enumeration (manifest exports)                               */
+/* Layer enumeration                                                  */
 /* ------------------------------------------------------------------ */
 
 VK_LAYER_EXPORT VKAPI_ATTR VkResult VKAPI_CALL
-vkEnumerateInstanceLayerProperties(uint32_t *pPropertyCount,
-                                   VkLayerProperties *pProperties) {
-    if (!pProperties) {
-        *pPropertyCount = 1;
-        return VK_SUCCESS;
-    }
-    if (*pPropertyCount < 1) {
-        *pPropertyCount = 0;
-        return VK_INCOMPLETE;
-    }
-    memset(pProperties, 0, sizeof(VkLayerProperties));
-    strncpy(pProperties[0].layerName, "VK_LAYER_waylandie_dmabuf",
-            sizeof(pProperties[0].layerName) - 1);
-    strncpy(pProperties[0].description, "WayLandIE dmabuf zero-copy present layer",
-            sizeof(pProperties[0].description) - 1);
-    pProperties[0].implementationVersion = 1;
-    pProperties[0].specVersion = VK_MAKE_VERSION(1, 3, 0);
-    *pPropertyCount = 1;
+vkEnumerateInstanceLayerProperties(uint32_t *count, VkLayerProperties *props) {
+    if (!props) { *count = 1; return VK_SUCCESS; }
+    if (*count < 1) { *count = 0; return VK_INCOMPLETE; }
+    memset(props, 0, sizeof(VkLayerProperties));
+    strncpy(props[0].layerName, "VK_LAYER_waylandie_dmabuf", 255);
+    strncpy(props[0].description, "WayLandIE dmabuf present layer", 255);
+    props[0].implementationVersion = 1;
+    props[0].specVersion = VK_MAKE_VERSION(1, 3, 0);
+    *count = 1;
     return VK_SUCCESS;
 }
 
 VK_LAYER_EXPORT VKAPI_ATTR VkResult VKAPI_CALL
-vkEnumerateInstanceExtensionProperties(const char *pLayerName,
-                                       uint32_t *pPropertyCount,
-                                       VkExtensionProperties *pProperties) {
-    if (pLayerName && strcmp(pLayerName, "VK_LAYER_waylandie_dmabuf") == 0) {
-        /* The layer doesn't add new instance extensions. */
-        if (!pProperties) {
-            *pPropertyCount = 0;
-            return VK_SUCCESS;
-        }
-        *pPropertyCount = 0;
-        return VK_SUCCESS;
-    }
-    /* Not our layer — return 0 to let the loader continue. */
-    *pPropertyCount = 0;
+vkEnumerateInstanceExtensionProperties(const char *layer, uint32_t *count,
+                                       VkExtensionProperties *props) {
+    *count = 0;
     return VK_SUCCESS;
 }
 
-/* The loader calls these exported names to get our dispatch. */
 VK_LAYER_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
-vkGetInstanceProcAddr(VkInstance instance, const char *pName) {
-    return layer_get_instance_proc_addr(instance, pName);
+vkGetInstanceProcAddr(VkInstance inst, const char *name) {
+    return layer_get_instance_proc_addr(inst, name);
 }
 
 VK_LAYER_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
-vkGetDeviceProcAddr(VkDevice device, const char *pName) {
-    return layer_get_device_proc_addr(device, pName);
+vkGetDeviceProcAddr(VkDevice dev, const char *name) {
+    return layer_get_device_proc_addr(dev, name);
 }
