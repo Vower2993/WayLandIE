@@ -101,27 +101,17 @@ else
     echo "  WARNING: $WLD_SRC not found — building without dmabuf support"
 fi
 
-# === Apply WayLandIE dmabuf forwarding patch for winevulkan ===
-# Add swapchain/present functions to MANUAL_UNIX_THUNKS so our custom
-# thunks in winevulkan_dmabuf.c are used instead of auto-generated ones.
-echo "=== Patching make_vulkan for dmabuf thunks ==="
-sed -i '/"vkGetSwapchainTimeDomainPropertiesEXT",/a\    "vkCreateSwapchainKHR",\n    "vkDestroySwapchainKHR",\n    "vkGetSwapchainImagesKHR",\n    "vkAcquireNextImageKHR",\n    "vkAcquireNextImage2KHR",\n    "vkQueuePresentKHR",\n    "vkCreateAndroidSurfaceKHR",\n    "vkGetAndroidHardwareBufferPropertiesANDROID",\n    "vkGetMemoryAndroidHardwareBufferANDROID",' dlls/winevulkan/make_vulkan
-echo "  Added 9 functions to MANUAL_UNIX_THUNKS (6 swapchain + 3 android)"
-THUNK_COUNT=$(grep -c "vkCreateSwapchainKHR" dlls/winevulkan/make_vulkan)
-if [ "$THUNK_COUNT" -lt 2 ]; then
-    echo "FATAL: MANUAL_UNIX_THUNKS patch failed — expected vkCreateSwapchainKHR in make_vulkan"
-    exit 1
-fi
-echo "  Verified: $THUNK_COUNT occurrences of vkCreateSwapchainKHR in make_vulkan"
-
-# === Copy winevulkan_dmabuf.c (our manual thunk implementations) ===
-cp "$WLD_SRC/winevulkan_dmabuf.c" dlls/winevulkan/
-# Add it to winevulkan's Makefile.in SOURCES list
-sed -i 's/^\tvulkan.c \\/\tvulkan.c \\\n\twinevulkan_dmabuf.c \\/' dlls/winevulkan/Makefile.in
-# Also need -landroid for __android_log_print and socket functions
-sed -i 's/^UNIX_LIBS = -lwin32u $(PTHREAD_LIBS)/UNIX_LIBS = -lwin32u $(PTHREAD_LIBS) -landroid -llog/' dlls/winevulkan/Makefile.in
-echo "  winevulkan_dmabuf.c added to Makefile.in"
-cat dlls/winevulkan/Makefile.in
+# === winevulkan: NO MORE MANUAL_UNIX_THUNKS or winevulkan_dmabuf.c ===
+# The runtime Vulkan layer (libvk_layer_waylandie_dmabuf.so) now handles
+# all swapchain/present interception via standard Vulkan layer interception.
+# We no longer need source-level winevulkan thunks that caused PE/Unix
+# enum mismatches.
+#
+# The ONLY change we need in winevulkan is adding VK_USE_PLATFORM_WIN32_KHR
+# so that vkCreateWin32SurfaceKHR is compiled into the Unix dispatch table.
+# This is done later via CFLAGS after configure.
+echo "=== Skipping MANUAL_UNIX_THUNKS patch (runtime layer handles interception) ==="
+echo "=== Skipping winevulkan_dmabuf.c copy (no longer needed) ==="
 
 chmod +x autogen.sh
 ./autogen.sh 2>&1 | tail -5
@@ -616,7 +606,23 @@ export STRIP="$TOOLCHAIN/bin/llvm-strip"
 FT_DIR="$WORKSPACE/.github/scripts/freetype-bionic"
 echo "  FreeType bionic static lib: $FT_DIR/lib/libfreetype.a ($(stat -c%s $FT_DIR/lib/libfreetype.a 2>/dev/null || echo 0) bytes)"
 
-export CFLAGS="-fPIC --sysroot=$SYSROOT -I$SYSROOT/usr/include -I$BIONIC_LIBS/include -I$FT_DIR/include/freetype2 -I/tmp/proton-wine/include -D__ANDROID_API__=$API -D__ANDROID__"
+# CRITICAL: Define VK_USE_PLATFORM_WIN32_KHR so that winevulkan's Unix side
+# compiles vkCreateWin32SurfaceKHR into the instance dispatch table.
+#
+# Without this, DXVK's vkGetInstanceProcAddr("vkCreateWin32SurfaceKHR")
+# returns NULL (function not in table) → DXVK can't create a surface →
+# can't create a swapchain → game deadlocks in vkGetEventStatus polling.
+#
+# Proton's PE side (winevulkan.dll) is ALWAYS built with
+# VK_USE_PLATFORM_WIN32_KHR (it's the Windows platform). By defining it
+# on the Unix side too, the PE/Unix dispatch table enums match exactly,
+# and vkCreateWin32SurfaceKHR is resolvable.
+#
+# The Unix-side vkCreateWin32SurfaceKHR thunk doesn't use Windows types
+# directly — it forwards to winevulkan_surface_create() which calls the
+# display driver's p_vulkan_surface_create callback. So no <windows.h>
+# is needed; the flag just controls #ifdef guards in generated code.
+export CFLAGS="-fPIC --sysroot=$SYSROOT -I$SYSROOT/usr/include -I$BIONIC_LIBS/include -I$FT_DIR/include/freetype2 -I/tmp/proton-wine/include -D__ANDROID_API__=$API -D__ANDROID__ -DVK_USE_PLATFORM_WIN32_KHR"
 export CXXFLAGS="$CFLAGS"
 export LDFLAGS="--sysroot=$SYSROOT -L$BIONIC_LIBS/lib -L$FT_DIR/lib -landroid-sysvshm -lffi"
 export PKG_CONFIG_PATH="$BIONIC_LIBS/lib/pkgconfig:$FT_DIR/lib/pkgconfig"
@@ -725,12 +731,10 @@ echo "=== [8/9] Build winewayland targets ==="
 #   wine client error:0: version mismatch 933/932.
 # Instead, the 8MB stack fix is achieved by patching the PE headers of
 # explorer.exe + rundll32.exe at install time (see WaylandDriverInstaller.java).
-# Add "android" to UNEXPOSED_PLATFORMS so the generated enum matches
-# the Proton package's winevulkan.dll. Without this, the unix_call enum
-# has fewer entries (missing android_surface functions), causing a dispatch
-# table index mismatch → NULL pointer crash.
-# The android-specific thunks that would cause compile errors are added
-# to MANUAL_UNIX_THUNKS (see below) with no-op implementations.
+# Add "android" to UNEXPOSED_PLATFORMS so android_surface functions are NOT
+# in the generated dispatch table enum. Proton's PE side (winevulkan.dll)
+# was also built without android_surface support, so this keeps the
+# PE/Unix enums in sync.
 echo "=== Patching winevulkan make_vulkan for android_surface ==="
 cd /tmp/proton-wine
 if grep -q '"android"' dlls/winevulkan/make_vulkan; then
@@ -846,34 +850,65 @@ else
   echo "WARNING: ntdll.dll not built — FEX will still crash. Check make output above."
 fi
 
-# === Do NOT collect winevulkan.dll ===
-# We do NOT replace winevulkan.dll. The Proton package's original PE-side
-# winevulkan.dll must be preserved because it was built from the SAME commit
-# as the Proton wine64 binary. Replacing it with our source-built version
-# causes an enum/dispatch table mismatch (unix_call enum indices differ
-# between commits), resulting in NULL pointer crashes.
+# === Collect winevulkan.dll (PE side) ===
+# We now build AND deploy BOTH winevulkan.dll (PE) and winevulkan.so (Unix)
+# from the same proton_11.0 source with the same VK_USE_PLATFORM flags.
+# This guarantees the PE/Unix dispatch table enums match exactly.
 #
-# The PE side (winevulkan.dll) is patched at install time by
-# WaylandDriverInstaller.patchSurfaceExtension() which replaces
-# VK_KHR_wayland_surface → VK_KHR_xlib_surface string in the binary.
+# Previous approach skipped winevulkan.dll and used Proton's original PE side.
+# That caused vkCreateWin32SurfaceKHR to be unresolvable because Proton's
+# winevulkan.so (also original) was built for Linux, not Android, and
+# couldn't create surfaces on the Android Vulkan driver.
 #
-# We only replace winevulkan.so (Unix side) which has our dmabuf hooks.
-# The Unix side must be ABI-compatible with the PE side. Since both are
-# from proton_11.0, the enum should match.
-echo "=== Skipping winevulkan.dll collection (keeping Proton's original PE side) ==="
+# Now both PE and Unix are from our build with VK_USE_PLATFORM_WIN32_KHR
+# defined, so vkCreateWin32SurfaceKHR is in the dispatch table and
+# resolvable via vkGetInstanceProcAddr.
+echo "=== Collecting winevulkan.dll (PE side) ==="
+for f in \
+  "/tmp/proton-wine/dlls/winevulkan/aarch64-windows/winevulkan.dll" \
+  "/tmp/proton-wine/dlls/winevulkan/arm64ec-windows/winevulkan.dll"; do
+  if [ -f "$f" ] && [ "$(stat -c%s "$f")" -gt 1000 ]; then
+    echo "Found winevulkan PE: $f ($(stat -c%s "$f") bytes)"
+    cp "$f" "$PROTON_OUT/lib/wine/aarch64-windows/winevulkan.dll"
+    cp "$f" "$PROTON_OUT/lib/wine/arm64ec-windows/winevulkan.dll"
+    break
+  fi
+done
+VULKAN_PE_SIZE=$(stat -c%s "$PROTON_OUT/lib/wine/aarch64-windows/winevulkan.dll" 2>/dev/null || echo 0)
+if [ "$VULKAN_PE_SIZE" -lt 1000 ]; then
+  echo "WARNING: winevulkan.dll not built — surface creation will fail"
+else
+  echo "winevulkan.dll collected: $VULKAN_PE_SIZE bytes"
+fi
 
-# === Collect winevulkan.so (Unix-side) ===
-# CRITICAL: The Unix-side winevulkan.so must also be built from source with
-# android_surface support. The Unix side is responsible for:
-# 1. Enumerating available extensions from the real Android Vulkan driver
-# 2. Filtering which extensions to expose to the PE side
-# 3. Actually calling vkCreateInstance with the requested extensions
-# Without android support on the Unix side, it rejects VK_KHR_xlib_surface
-# during vkCreateInstance, even though the PE side has the flag.
-# Do NOT collect winevulkan.so — we use Proton's original winevulkan.so.
-# Our Vulkan layer (libvk_layer_waylandie_dmabuf.so) patches the dispatch
-# table at runtime, so we don't need to replace winevulkan.so.
-echo "=== Skipping winevulkan.so collection (using Proton's original) ==="
+# === Collect winevulkan.so (Unix side) ===
+# The Unix-side winevulkan.so is built with VK_USE_PLATFORM_WIN32_KHR so
+# vkCreateWin32SurfaceKHR is in the instance dispatch table. When DXVK
+# calls vkGetInstanceProcAddr("vkCreateWin32SurfaceKHR"), the Unix side
+# finds it and returns the function pointer.
+#
+# The Unix-side vkCreateWin32SurfaceKHR thunk calls winevulkan_surface_create()
+# which calls winewayland.drv's p_vulkan_surface_create callback, which
+# calls vkCreateXlibSurfaceKHR on the HOST Android Vulkan driver (Turnip).
+echo "=== Collecting winevulkan.so (Unix side) ==="
+VULKAN_SO=""
+for f in \
+  "/tmp/proton-wine/dlls/winevulkan/winevulkan.so" \
+  "/tmp/proton-wine/dlls/winevulkan/winevulkan.dll.so"; do
+  if [ -f "$f" ] && [ "$(stat -c%s "$f")" -gt 1000 ]; then
+    echo "Found winevulkan ELF: $f ($(stat -c%s "$f") bytes)"
+    cp "$f" "$PROTON_OUT/lib/wine/aarch64-unix/winevulkan.so"
+    VULKAN_SO="$f"
+    break
+  fi
+done
+VULKAN_SO_SIZE=$(stat -c%s "$PROTON_OUT/lib/wine/aarch64-unix/winevulkan.so" 2>/dev/null || echo 0)
+if [ "$VULKAN_SO_SIZE" -lt 1000 ]; then
+  echo "WARNING: winevulkan.so not built — checking build errors"
+  make -j1 dlls/winevulkan/winevulkan.so V=1 2>&1 | tail -50 || true
+else
+  echo "winevulkan.so collected: $VULKAN_SO_SIZE bytes"
+fi
 
 # Verify the new ntdll has the FEX-required exports
 echo "=== Verifying ntdll exports ==="
@@ -923,9 +958,18 @@ if [ "$SO_SIZE" -lt 1000 ]; then
   exit 1
 fi
 
-# winevulkan.so is NOT collected (we use Proton's original).
-# No FATAL check needed — our Vulkan layer patches the dispatch table at runtime.
-echo "winevulkan.so: using Proton's original (not replaced)"
+# winevulkan.so and winevulkan.dll are now built and collected from our source.
+# If either is missing, surface creation will fail — make it a FATAL error.
+if [ "$VULKAN_SO_SIZE" -lt 1000 ]; then
+  echo "FATAL: winevulkan.so missing or too small — vkCreateWin32SurfaceKHR will not be available"
+  exit 1
+fi
+if [ "$VULKAN_SIZE" -lt 1000 ]; then
+  echo "FATAL: winevulkan.dll missing or too small — PE/Unix enum mismatch will crash"
+  exit 1
+fi
+echo "winevulkan.dll: $VULKAN_SIZE bytes (built from source with VK_USE_PLATFORM_WIN32_KHR)"
+echo "winevulkan.so: $VULKAN_SO_SIZE bytes (built from source with VK_USE_PLATFORM_WIN32_KHR)"
 
 cd "$OUTDIR"
 mkdir -p "$WORKSPACE/app/src/main/assets"

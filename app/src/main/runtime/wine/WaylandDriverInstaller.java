@@ -97,40 +97,36 @@ public final class WaylandDriverInstaller {
             copyIfExists(prefix, "lib/wine/aarch64-unix/winewayland.so", wineAarch64Unix);
             copyIfExists(prefix, "lib/wine/aarch64-windows/libarm64ecfex.dll", wineAarch64Windows);
             copyIfExists(prefix, "lib/wine/aarch64-windows/ntdll.dll", wineAarch64Windows);
-            // Copy source-built winevulkan.so (Unix-side) — has our dmabuf hooks
+            // Copy source-built winevulkan.so (Unix-side) — built with VK_USE_PLATFORM_WIN32_KHR
+            // so vkCreateWin32SurfaceKHR is in the dispatch table.
             copyIfExists(prefix, "lib/wine/aarch64-unix/winevulkan.so", wineAarch64Unix);
-            // Do NOT copy winevulkan.dll — keep Proton's original PE side
-            // to avoid enum/dispatch table mismatch with the wine64 binary.
+            // Copy source-built winevulkan.dll (PE side) — built from the same source
+            // with the same flags as winevulkan.so, guaranteeing PE/Unix enum match.
+            copyIfExists(prefix, "lib/wine/aarch64-windows/winevulkan.dll", wineAarch64Windows);
             // arm64ec-windows dir may not exist in all Proton builds — only copy if dir exists
             File arm64ecDir = new File(winePath, "lib/wine/arm64ec-windows");
             if (arm64ecDir.isDirectory()) {
-                copyIfExists(prefix, "lib/wine/arm64ec-windows/libarm64ecfex.dll", arm64ecDir);
-                copyIfExists(prefix, "lib/wine/arm64ec-windows/ntdll.dll", arm64ecDir);
+                copyIfExists(prefix, "lib/wine/aarch64-windows/libarm64ecfex.dll", arm64ecDir);
+                copyIfExists(prefix, "lib/wine/aarch64-windows/ntdll.dll", arm64ecDir);
+                copyIfExists(prefix, "lib/wine/aarch64-windows/winevulkan.dll", arm64ecDir);
             } else {
                 Log.i(TAG, "ensureDriverInstalled: arm64ec-windows dir not present — skipping arm64ec copies");
             }
 
-            // CRITICAL: Binary-patch winevulkan.dll to replace Vulkan surface
-            // extension strings with VK_KHR_xlib_surface.
+            // Binary-patch winevulkan.dll to replace VK_KHR_wayland_surface → VK_KHR_xlib_surface.
             //
-            // WHY: Wine's winevulkan.dll contains hardcoded extension name
-            // strings: "VK_KHR_wayland_surface" and "VK_KHR_win32_surface".
-            // DXVK requests VK_KHR_win32_surface (Wine maps it to the native
-            // platform surface). But the Android Vulkan wrapper (Turnip/Adreno)
-            // only supports VK_KHR_xlib_surface. So vkCreateInstance fails
-            // with VK_ERROR_EXTENSION_NOT_PRESENT.
+            // Our source-built winevulkan.dll contains "VK_KHR_wayland_surface" in its
+            // extension list (from proton-wine source). The Android Vulkan driver (Turnip)
+            // doesn't support VK_KHR_wayland_surface, so we patch it to VK_KHR_xlib_surface.
             //
-            // FIX: Replace BOTH strings with "VK_KHR_xlib_surface" (19 bytes)
-            // using same-length null-patched binary patch:
-            //   "VK_KHR_wayland_surface" (22B) → "VK_KHR_xlib_surface\0\0\0" (22B)
-            //   "VK_KHR_win32_surface" (19B) → "VK_KHR_xlib_surface\0\0\0" (22B)
-            // Also patch winex11.drv which contains VK_KHR_win32_surface too.
+            // We do NOT patch VK_KHR_win32_surface — it must stay as-is because:
+            // 1. DXVK requests VK_KHR_win32_surface (its natural behavior)
+            // 2. Our winevulkan.so (built with VK_USE_PLATFORM_WIN32_KHR) now has
+            //    vkCreateWin32SurfaceKHR in its dispatch table
+            // 3. wayland_map_instance_extensions in vulkan.c maps win32_surface → xlib_surface
+            //    at the flag level for the HOST driver
             //
             // winevulkan.dll locations — patch ALL copies that wine might load:
-            // 1. winePath/lib/wine/aarch64-windows/winevulkan.dll (Proton install)
-            // 2. winePath/lib/wine/arm64ec-windows/winevulkan.dll (arm64ec, may not exist)
-            // 3. prefix/drive_c/windows/system32/winevulkan.dll (container's system32)
-            // 4. prefix/drive_c/windows/syswow64/winevulkan.dll (32-bit, may not exist)
             File winevulkanAarch64 = new File(wineAarch64Windows, "winevulkan.dll");
             File winevulkanArm64ec = new File(winePath, "lib/wine/arm64ec-windows/winevulkan.dll");
             File winevulkanPrefix = new File(prefix, "drive_c/windows/system32/winevulkan.dll");
@@ -139,7 +135,7 @@ public final class WaylandDriverInstaller {
             patchSurfaceExtension(winevulkanArm64ec);
             patchSurfaceExtension(winevulkanPrefix);
             patchSurfaceExtension(winevulkanSyswow64);
-            // Also patch winex11.drv — it also contains VK_KHR_win32_surface
+            // Also patch winex11.drv — it also contains VK_KHR_wayland_surface
             File winex11Aarch64 = new File(wineAarch64Windows, "winex11.drv");
             File winex11Prefix = new File(prefix, "drive_c/windows/system32/winex11.drv");
             patchSurfaceExtension(winex11Aarch64);
