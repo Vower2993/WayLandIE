@@ -379,6 +379,35 @@ static VkResult waylandie_wrapped_create_instance(const VkInstanceCreateInfo *ci
     print("  winevulkan chain construction: PATCHED")
 CHAIN_INJECT_EOF
 
+# === winevulkan: NO loader.c GIPA patch — PE side can't use dlopen ===
+# The PE-side loader.c runs in the wine process and can't call dlopen directly.
+# Instead, the dmabuf layer delegation happens on the Unix side via the
+# chain construction patch's dlopen. The layer's hooks are returned via
+# the layer's GIPA, which is called from the wrapper's dlsym.
+#
+# For the dmabuf layer to intercept vkCreateSwapchainKHR / vkQueuePresentKHR,
+# the layer manifest must be discovered by the Vulkan loader. On Android with
+# adrenotools, VK_LAYER_PATH is blocked. The layer IS installed to
+# /usr/share/vulkan/implicit_layer.d/ but adrenotools creates an isolated
+# namespace that may not read it.
+#
+# ALTERNATIVE: The layer's hooks are NOT needed if we patch winewayland.drv's
+# wayland_vulkan_surface_create to create a headless surface. DXVK creates a
+# swapchain on the headless surface. The swapchain images are regular Vulkan
+# images. We then need the dmabuf layer to intercept present — but without
+# the layer in the chain, present goes to the HOST driver's vkQueuePresentKHR
+# which does nothing (headless surface has no display).
+#
+# REAL SOLUTION: The dmabuf layer must be in the dispatch chain. This requires
+# either:
+#   a) VK_LAYER_PATH to work (blocked by adrenotools)
+#   b) adrenotools to be patched to allow layer loading
+#   c) A different injection mechanism (e.g., LD_PRELOAD of a wrapper .so
+#      that intercepts vkGetInstanceProcAddr before adrenotools)
+# Option (c) is the most feasible but requires a separate wrapper .so.
+# For now, the headless surface approach at least prevents the game from
+# rendering directly to SurfaceFlinger.
+
 # === winevulkan: Diagnostic logging in wine_vkEnumeratePhysicalDevices ===
 #
 # ROOT CAUSE UNDER INVESTIGATION (Finding #15):
