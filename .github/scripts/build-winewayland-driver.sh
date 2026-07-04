@@ -400,6 +400,49 @@ static VkResult waylandie_wrapped_create_instance(const VkInstanceCreateInfo *ci
         }
     }
 
+    /* CRITICAL: Modify the client_instance->extensions BITFIELD directly.
+     *
+     * CAUSE: win32u_vkCreateInstance IGNORES translated_ci.ppEnabledExtensionNames
+     * (the string array). Instead, it copies client_instance->extensions (a
+     * bitfield struct) at line 689:
+     *   instance->obj.extensions = client_instance->extensions;
+     * Then convert_instance_create_info rebuilds the extension list from the
+     * bitfield. The bitfield was set by the PE side from the ORIGINAL extension
+     * names (including VK_KHR_win32_surface). Our string-array translation
+     * above was useless — the bitfield still had has_VK_KHR_win32_surface=1.
+     *
+     * EFFECT: By modifying the bitfield BEFORE the call, win32u copies the
+     * modified bitfield. convert_instance_create_info outputs VK_KHR_xlib_surface
+     * (not VK_KHR_win32_surface or VK_EXT_headless_surface). The Turnip driver
+     * supports VK_KHR_xlib_surface → vkCreateInstance returns res=0.
+     *
+     * SIDE EFFECTS: has_VK_KHR_win32_surface stays 0. This is safe because
+     * surface creation in wayland_vulkan_surface_create uses the
+     * WAYLANDIE_ANATIVE_WINDOW env var, not the extension flag. The
+     * surface_maintenance1 auto-enable (line 502 checks has_VK_KHR_win32_surface)
+     * also won't fire — which is what we want.
+     *
+     * RISK: Zero. VkInstance_T is defined in wine/vulkan_driver.h (included via
+     * vulkan_private.h → vulkan_loader.h). Field offsets are correct at compile
+     * time because we compile against the same proton-wine source. */
+    if (inst && *inst)
+    {
+        struct VkInstance_T *client_instance = (struct VkInstance_T *)*inst;
+        if (client_instance->extensions.has_VK_KHR_win32_surface)
+        {
+            client_instance->extensions.has_VK_KHR_win32_surface = 0;
+            client_instance->extensions.has_VK_KHR_xlib_surface = 1;
+            fprintf(stderr, "WayLandIE wrapper: BITFIELD translated has_VK_KHR_win32_surface → has_VK_KHR_xlib_surface\n");
+        }
+        /* Force-disable surface_maintenance1 + swapchain_maintenance1.
+         * The Turnip driver doesn't support them. The auto-enable at
+         * line 502 checks has_VK_KHR_win32_surface (now 0), so it won't
+         * fire. But belt-and-suspenders: clear the bits directly too. */
+        client_instance->extensions.has_VK_EXT_surface_maintenance1 = 0;
+        client_instance->extensions.has_VK_EXT_swapchain_maintenance1 = 0;
+        fprintf(stderr, "WayLandIE wrapper: BITFIELD cleared surface_maintenance1 + swapchain_maintenance1\n");
+    }
+
     /* Call the ORIGINAL vk_funcs->p_vkCreateInstance (win32u_vkCreateInstance).
      * This properly creates the vulkan_instance struct, enumerates physical
      * devices, and sets up all dispatch tables. */
