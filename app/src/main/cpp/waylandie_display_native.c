@@ -5516,14 +5516,21 @@ Java_com_winlator_cmod_runtime_display_environment_components_WaylandBridgeServe
             transaction,
             surface_control,
             ASURFACE_TRANSACTION_VISIBILITY_SHOW);
+    /* Use OPAQUE transparency + full alpha so SurfaceFlinger actually
+     * composites the buffer. The previous TRANSLUCENT + 0.999 alpha
+     * caused the presentLayer to render as invisible/black on some
+     * devices because the parent SurfaceView (XServerSurfaceView) has
+     * no content in Wayland mode (render thread is skipped) — there's
+     * no opaque background behind the presentLayer, so a translucent
+     * layer composites against empty/black parent content. */
     ASurfaceTransaction_setBufferTransparency(
             transaction,
             surface_control,
-            ASURFACE_TRANSACTION_TRANSPARENCY_TRANSLUCENT);
+            ASURFACE_TRANSACTION_TRANSPARENCY_OPAQUE);
     ASurfaceTransaction_setBufferAlpha(
             transaction,
             surface_control,
-            WAYLANDIE_PRESENT_COMPOSITION_NUDGE_ALPHA);
+            1.0f);
     ASurfaceTransaction_setPosition(transaction, surface_control, 0, 0);
     waylandie_surface_transaction_set_crop(transaction, surface_control, &crop);
     ASurfaceTransaction_setDamageRegion(transaction, surface_control, &crop, 1);
