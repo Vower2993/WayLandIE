@@ -196,6 +196,7 @@ struct server_state {
     int completed_after_client_exit;
     int android_windows;
     int next_window_id;
+    int has_ever_displayed; /* 0 until the first buffer is presented to the display */
     double total_present_ms;
     double total_app_wait_us;
     double total_app_slot_wait_us;
@@ -2947,13 +2948,23 @@ static int buffer_is_primary_for_surface(struct surface_state *surface, struct s
             && buffer->kind == BUFFER_KIND_DMABUF) {
         return 1;
     }
-    /* Accept any window >= 200x200 as primary. The old 80% threshold
+    /* If nothing has been displayed yet, accept ANY non-zero buffer.
+     * This ensures the desktop/taskbar/launcher appears immediately
+     * instead of waiting for a full-screen buffer that may never come
+     * (winewayland.drv renders child windows before the desktop surface). */
+    if (surface->server && !surface->server->has_ever_displayed) {
+        return 1;
+    }
+    /* Accept any window >= 100x100 as primary. The old 80% threshold
      * (width*5 >= output_width*4) skipped the Mono installer dialog
      * (~400x300), the taskbar (1920x128), and game launcher windows.
-     * With 200px minimum, all these windows are displayed. The first
+     * With 100px minimum, all these windows are displayed. The first
      * primary window to commit gets presented; subsequent smaller
-     * windows are still skipped to avoid flickering. */
-    if (buffer->width < 200 || buffer->height < 200) {
+     * windows are still skipped to avoid flickering.
+     *
+     * Lowered from 200 to 100 to catch small game launcher windows
+     * and installer dialogs that are between 100x100 and 200x200. */
+    if (buffer->width < 100 || buffer->height < 100) {
         return 0;
     }
     return 1;
@@ -4460,7 +4471,12 @@ static void surface_commit(struct wl_client *client, struct wl_resource *resourc
         fflush(stdout);
     }
     struct shm_buffer_state *buffer_to_present = presentable->pending_buffer;
-    if (!buffer_is_primary_for_surface(surface, buffer_to_present)) {
+    /* Check primary against the PRESENTABLE surface (which may be a child
+     * subsurface), not the parent surface. The old code checked against
+     * 'surface' (parent), which caused child subsurface buffers (e.g., 768x512
+     * game launcher windows) to be skipped as 'nonprimary' when the parent's
+     * buffer was small (e.g., 1280x128 taskbar). */
+    if (!buffer_is_primary_for_surface(presentable, buffer_to_present)) {
         printf("wayland-shm-ahb commit=nonprimary-skipped size=%dx%d\n",
                 buffer_to_present != NULL ? buffer_to_present->width : 0,
                 buffer_to_present != NULL ? buffer_to_present->height : 0);
@@ -4486,6 +4502,10 @@ static void surface_commit(struct wl_client *client, struct wl_resource *resourc
         send_surface_presentation_feedback(presentable, 0);
         present_failed = 1;
         fflush(stdout);
+    } else {
+        /* Mark that we've successfully displayed at least one buffer.
+         * After this, the primary-size check applies to avoid flickering. */
+        surface->server->has_ever_displayed = 1;
     }
     if (presentable != surface && surface->pending_buffer != NULL && surface->pending_buffer->resource != NULL) {
         wl_buffer_send_release(surface->pending_buffer->resource);
