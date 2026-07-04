@@ -54,6 +54,23 @@ public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Cal
 
     public void setWaylandMode(boolean wayland) {
         this.waylandMode = wayland;
+        if (wayland) {
+            /* In Wayland mode, the VulkanRenderer render thread is skipped
+             * (see startRenderThreadIfNeeded). The SurfaceView's own surface
+             * has no content — only the presentLayer (child SurfaceControl
+             * created by WaylandBridgeServer) has content.
+             *
+             * setZOrderOnTop(true) ensures the SurfaceView's SurfaceControl
+             * (and its children) is composited ON TOP of the window's other
+             * content. Without this, Android 16 (Samsung S25 Ultra) may not
+             * composite child layers of an empty/inactive parent.
+             *
+             * This was the root cause of 'display shows nothing in Wayland
+             * mode' — the presentLayer was receiving frames (status=pass)
+             * but SurfaceFlinger wasn't compositing it because the parent
+             * SurfaceView had no buffer queue (render thread skipped). */
+            setZOrderOnTop(true);
+        }
     }
 
     public VulkanRenderer getRenderer() {

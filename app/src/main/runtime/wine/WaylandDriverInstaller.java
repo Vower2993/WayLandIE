@@ -168,6 +168,32 @@ public final class WaylandDriverInstaller {
             patchSurfaceExtension(new File(wineAarch64Unix, "winewayland.so"));
             patchSurfaceExtension(new File(prefix, "lib/wine/aarch64-unix/winewayland.so"));
 
+            // CRITICAL: Binary-patch win32u.dll.so to neutralize
+            // VK_EXT_surface_maintenance1 + VK_EXT_swapchain_maintenance1.
+            //
+            // win32u.dll.so (Unix side) is NOT rebuilt from source — it ships
+            // pre-built in the Proton archive. It contains an auto-enable check:
+            //   if (has_VK_KHR_win32_surface && host.has_VK_EXT_surface_maintenance1)
+            //       has_VK_EXT_surface_maintenance1 = 1;
+            // The Turnip driver ADVERTISES this extension but doesn't support it,
+            // causing DXVK's vkCreateInstance to return -7.
+            //
+            // We can't patch the binary code, but we CAN patch the extension NAME
+            // STRING in the .rodata section. When win32u compares the HOST driver's
+            // extension names against the string, the strcmp won't match, so
+            // host_extensions.has_VK_EXT_surface_maintenance1 stays 0, and the
+            // auto-enable doesn't fire.
+            //
+            // "VK_EXT_surface_maintenance1"  (28 chars) → "VK_EXT_surface_maintenance0" (28 chars)
+            // "VK_EXT_swapchain_maintenance1" (29 chars) → "VK_EXT_swapchain_maintenance0" (29 chars)
+            // Both are same-length replacements — no overflow.
+            File win32uUnix = new File(wineAarch64Unix, "win32u.dll.so");
+            File win32uPrefix = new File(prefix, "lib/wine/aarch64-unix/win32u.dll.so");
+            patchExtensionString(win32uUnix, "VK_EXT_surface_maintenance1", "VK_EXT_surface_maintenance0");
+            patchExtensionString(win32uPrefix, "VK_EXT_surface_maintenance1", "VK_EXT_surface_maintenance0");
+            patchExtensionString(win32uUnix, "VK_EXT_swapchain_maintenance1", "VK_EXT_swapchain_maintenance0");
+            patchExtensionString(win32uPrefix, "VK_EXT_swapchain_maintenance1", "VK_EXT_swapchain_maintenance0");
+
             // Do NOT patch DXVK DLLs — DXVK should request VK_KHR_win32_surface
             // (its natural behavior). Wine's wayland_map_instance_extensions
             // maps win32_surface → xlib_surface internally at the flag level.
@@ -461,6 +487,49 @@ public final class WaylandDriverInstaller {
      * For longer replacement: write replacement + null, overwriting 3 bytes past
      * the original string. The null prevents bleeding into the next string.
      */
+
+    /**
+     * Binary-patch an extension name string in a .so file. Replaces all
+     * occurrences of searchStr with replaceStr (must be same length).
+     * Used to neutralize VK_EXT_surface_maintenance1 in win32u.dll.so
+     * (which is not rebuilt from source) to prevent the auto-enable that
+     * causes DXVK vkCreateInstance -7.
+     */
+    private static void patchExtensionString(File soFile, String searchStr, String replaceStr) {
+        if (soFile == null || !soFile.exists()) {
+            Log.w(TAG, "patchExtensionString: file not found: " + soFile);
+            return;
+        }
+        if (searchStr.length() != replaceStr.length()) {
+            Log.e(TAG, "patchExtensionString: length mismatch: '" + searchStr + "' (" + searchStr.length() + ") vs '" + replaceStr + "' (" + replaceStr.length() + ")");
+            return;
+        }
+        try {
+            byte[] data = java.nio.file.Files.readAllBytes(soFile.toPath());
+            byte[] search = searchStr.getBytes("ASCII");
+            byte[] replace = replaceStr.getBytes("ASCII");
+            int patched = 0;
+            for (int i = 0; i <= data.length - search.length; i++) {
+                boolean match = true;
+                for (int j = 0; j < search.length; j++) {
+                    if (data[i + j] != search[j]) { match = false; break; }
+                }
+                if (match) {
+                    System.arraycopy(replace, 0, data, i, replace.length);
+                    patched++;
+                }
+            }
+            if (patched > 0) {
+                java.nio.file.Files.write(soFile.toPath(), data);
+                Log.i(TAG, "patchExtensionString: replaced '" + searchStr + "' → '" + replaceStr + "' (" + patched + "x) in " + soFile.getName());
+            } else {
+                Log.w(TAG, "patchExtensionString: '" + searchStr + "' not found in " + soFile.getName());
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "patchExtensionString failed: " + e.getMessage());
+        }
+    }
+
     private static void patchSurfaceExtension(File soFile) {
         if (soFile == null || !soFile.exists()) {
             Log.w(TAG, "patchSurfaceExtension: file not found: " + soFile);
