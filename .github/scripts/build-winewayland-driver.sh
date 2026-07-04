@@ -588,6 +588,82 @@ failed:
     print("  init_physical_devices diagnostic: PATCHED")
 INITDIAG_EOF
 
+# === win32u/vulkan.c: Disable VK_EXT_surface_maintenance1 + swapchain_maintenance1 auto-enable ===
+#
+# ROOT CAUSE of DXVK -7 (VK_ERROR_EXTENSION_NOT_PRESENT):
+# winevulkan's convert_instance_create_info() in dlls/win32u/vulkan.c has
+# an auto-enable check around line 502:
+#   if (instance->obj.extensions.has_VK_KHR_win32_surface &&
+#       instance->obj.extensions.has_VK_KHR_get_surface_capabilities2)
+#       instance->obj.extensions.has_VK_EXT_surface_maintenance1 = 1;
+#
+# DXVK requests VK_KHR_win32_surface + VK_KHR_get_surface_capabilities2 +
+# VK_KHR_surface. The auto-enable fires, adding VK_EXT_surface_maintenance1
+# to the HOST extension list. The Turnip driver does NOT support
+# VK_EXT_surface_maintenance1 → HOST rejects with -7.
+#
+# Our waylandie_wrapped_create_instance already strips these from the
+# CLIENT extension list, but the auto-enable in convert_instance_create_info
+# re-adds them. We must patch out the auto-enable assignments directly.
+#
+# This patch finds ALL occurrences of:
+#   has_VK_EXT_surface_maintenance1 = 1
+#   has_VK_EXT_swapchain_maintenance1 = 1
+# and replaces the = 1 with = 0, effectively disabling the auto-enable.
+echo "=== Patching win32u/vulkan.c: disable surface_maintenance1 + swapchain_maintenance1 auto-enable ==="
+python3 - <<'MAINTDISABLE_EOF'
+import os
+import glob
+
+patched_files = []
+patterns = [
+    ("has_VK_EXT_surface_maintenance1 = 1;",
+     "has_VK_EXT_surface_maintenance1 = 0; /* WayLandIE: disable auto-enable — Turnip doesn't support it */"),
+    ("has_VK_EXT_swapchain_maintenance1 = 1;",
+     "has_VK_EXT_swapchain_maintenance1 = 0; /* WayLandIE: disable auto-enable — depends on surface_maintenance1 */"),
+]
+
+# Search both win32u and winevulkan source dirs
+for srcdir in ["dlls/win32u", "dlls/winevulkan"]:
+    if not os.path.isdir(srcdir):
+        continue
+    for fname in glob.glob(os.path.join(srcdir, "*.c")):
+        with open(fname, "r") as f:
+            src = f.read()
+        if "WayLandIE: disable auto-enable" in src:
+            continue  # already patched
+        original = src
+        for old, new in patterns:
+            count = src.count(old)
+            if count > 0:
+                src = src.replace(old, new)
+                print(f"  {fname}: replaced {count}x '{old[:50]}...'")
+        if src != original:
+            with open(fname, "w") as f:
+                f.write(src)
+            patched_files.append(fname)
+
+if patched_files:
+    print(f"  surface_maintenance1 auto-enable: PATCHED in {len(patched_files)} file(s)")
+    for f in patched_files:
+        print(f"    - {f}")
+else:
+    # Check if already patched
+    already = False
+    for srcdir in ["dlls/win32u", "dlls/winevulkan"]:
+        if not os.path.isdir(srcdir):
+            continue
+        for fname in glob.glob(os.path.join(srcdir, "*.c")):
+            with open(fname, "r") as f:
+                if "WayLandIE: disable auto-enable" in f.read():
+                    already = True
+                    break
+    if already:
+        print("  surface_maintenance1 auto-enable: already applied (skipping)")
+    else:
+        print("  WARNING: could not find surface_maintenance1 auto-enable pattern — source may have changed")
+MAINTDISABLE_EOF
+
 # === winevulkan: NO MORE MANUAL_UNIX_THUNKS or winevulkan_dmabuf.c ===
 # The runtime Vulkan layer (libvk_layer_waylandie_dmabuf.so) now handles
 # all swapchain/present interception via standard Vulkan layer interception.
