@@ -6096,12 +6096,22 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
                 String guestExecutable;
 
             if ("wayland".equals(displayMode)) {
-                // In Wayland mode, DON'T use "wine explorer /desktop=shell" —
-                // the Wayland compositor IS the desktop. The explorer wrapper
-                // launches a separate explorer.exe process that can crash and
-                // trigger LdrShutdownProcess, killing the wine session before
-                // the game finishes loading. Instead, launch the game directly.
-                guestExecutable = "wine " + wineStartCmd;
+                // Wayland mode: use "wine explorer /desktop=shell" — the same as X11 mode.
+                //
+                // WHY: explorer.exe's load_graphics_driver() function is REQUIRED to:
+                //   1. Read Graphics=wayland,x11 from HKCU\Software\Wine\Drivers
+                //   2. Try LoadLibraryW(L"winewayland.drv") — if it succeeds, set
+                //      GraphicsDriver="winewayland" in the display device registry key
+                //   3. Create the display device GUID and set it on the desktop window
+                //
+                // Without explorer.exe, NO process can load the graphics driver because
+                // load_desktop_driver() reads the GraphicsDriver registry value which is
+                // only set by explorer's load_graphics_driver(). Every process gets
+                // null_user_driver → nodrv_CreateWindow.
+                //
+                // The previous comment "the Wayland compositor IS the desktop" was wrong —
+                // Wine still needs explorer to set up the display device registry entries.
+                guestExecutable = "wine explorer /desktop=shell," + xServer.screenInfo + " " + wineStartCmd;
             } else {
                 // X11 mode: use virtual desktop (no window manager available)
                 guestExecutable = "wine explorer /desktop=shell," + xServer.screenInfo + " " + wineStartCmd;
