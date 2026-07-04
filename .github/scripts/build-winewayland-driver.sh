@@ -392,6 +392,168 @@ static VkResult waylandie_wrapped_create_instance(const VkInstanceCreateInfo *ci
     print("  winevulkan chain construction: PATCHED")
 CHAIN_INJECT_EOF
 
+# === win32u/vulkan.c: Patch nulldrv to create Xlib surfaces using ANativeWindow ===
+#
+# ROOT CAUSE (Finding #13):
+# On Android, the winewayland driver fails to load (wayland_process_init()
+# can't connect to a Wayland display server). winevulkan falls back to the
+# nulldrv. The nulldrv:
+#   1. Enables VK_EXT_headless_surface (NOT VK_KHR_xlib_surface)
+#   2. nulldrv_vulkan_surface_create creates a HEADLESS surface
+#   3. DXVK creates a swapchain on the headless surface
+#   4. No frames are rendered (headless surface has no display)
+#   5. DXVK eventually crashes or hangs
+#
+# FIX:
+#   1. Patch nulldrv_map_instance_extensions to ALSO enable VK_KHR_xlib_surface
+#      when VK_KHR_win32_surface is requested. This makes the HOST instance
+#      support xlib_surface, so p_vkCreateXlibSurfaceKHR is loaded (non-NULL).
+#   2. Patch nulldrv_vulkan_surface_create to create an Xlib surface using
+#      the ANativeWindow (from WAYLANDIE_ANATIVE_WINDOW env var) instead of
+#      a headless surface. The adrenotools Turnip wrapper supports
+#      VK_KHR_xlib_surface and uses the ANativeWindow directly.
+#
+# This fix is in win32u/vulkan.c (the nulldrv functions), NOT in
+# win32u_vkCreateInstance or init_physical_device. The nulldrv is a
+# separate fallback driver that we can safely patch.
+echo "=== Patching win32u/vulkan.c: nulldrv Xlib surface creation ==="
+python3 - <<'NULLDRV_PATCH_EOF'
+import re
+path = "dlls/win32u/vulkan.c"
+with open(path, "r") as f:
+    src = f.read()
+
+if "WayLandIE nulldrv Xlib surface patch" in src:
+    print("  nulldrv Xlib surface patch: already applied (skipping)")
+else:
+    # 1. Patch nulldrv_map_instance_extensions to enable VK_KHR_xlib_surface
+    old_map = """static void nulldrv_map_instance_extensions( struct vulkan_instance_extensions *extensions )
+{
+    if (extensions->has_VK_KHR_win32_surface) extensions->has_VK_EXT_headless_surface = 1;
+    if (extensions->has_VK_EXT_headless_surface) extensions->has_VK_KHR_win32_surface = 1;
+}"""
+
+    new_map = """static void nulldrv_map_instance_extensions( struct vulkan_instance_extensions *extensions )
+{
+    /* WayLandIE nulldrv Xlib surface patch: enable VK_KHR_xlib_surface
+     * (not just VK_EXT_headless_surface) when VK_KHR_win32_surface is requested.
+     * This makes the HOST instance support xlib_surface, so p_vkCreateXlibSurfaceKHR
+     * is loaded and available for nulldrv_vulkan_surface_create below. */
+    if (extensions->has_VK_KHR_win32_surface) extensions->has_VK_EXT_headless_surface = 1;
+    if (extensions->has_VK_EXT_headless_surface) extensions->has_VK_KHR_win32_surface = 1;
+    if (extensions->has_VK_KHR_win32_surface) extensions->has_VK_KHR_xlib_surface = 1;
+    if (extensions->has_VK_KHR_xlib_surface) extensions->has_VK_KHR_win32_surface = 1;
+}"""
+
+    if old_map not in src:
+        raise SystemExit("  ERROR: could not find nulldrv_map_instance_extensions to patch")
+    src = src.replace(old_map, new_map, 1)
+
+    # 2. Patch nulldrv_vulkan_surface_create to use Xlib surface with ANativeWindow
+    old_surface = """static VkResult nulldrv_vulkan_surface_create( HWND hwnd, BOOL raw, const struct vulkan_instance *instance,
+                                               VkSurfaceKHR *surface, struct client_surface **client )
+{
+    VkHeadlessSurfaceCreateInfoEXT create_info = {.sType = VK_STRUCTURE_TYPE_HEADLESS_SURFACE_CREATE_INFO_EXT};
+    VkResult res;
+
+    if (!(*client = nulldrv_client_surface_create( hwnd ))) return VK_ERROR_OUT_OF_HOST_MEMORY;
+    if ((res = instance->p_vkCreateHeadlessSurfaceEXT( instance->host.instance, &create_info, NULL, surface )))
+    {
+        client_surface_release(*client);
+        *client = NULL;
+    }
+
+    return res;
+}"""
+
+    new_surface = """static VkResult nulldrv_vulkan_surface_create( HWND hwnd, BOOL raw, const struct vulkan_instance *instance,
+                                               VkSurfaceKHR *surface, struct client_surface **client )
+{
+    /* WayLandIE nulldrv Xlib surface patch: create an Xlib surface using
+     * the ANativeWindow (from WAYLANDIE_ANATIVE_WINDOW env var) instead of
+     * a headless surface. The adrenotools Turnip wrapper supports
+     * VK_KHR_xlib_surface and uses the ANativeWindow directly.
+     *
+     * If WAYLANDIE_ANATIVE_WINDOW is not set or vkCreateXlibSurfaceKHR is
+     * not available, fall back to the original headless surface. */
+    VkResult res;
+
+    if (!(*client = nulldrv_client_surface_create( hwnd ))) return VK_ERROR_OUT_OF_HOST_MEMORY;
+
+    /* Try Xlib surface first. We define the struct layout manually to avoid
+     * needing VK_USE_PLATFORM_XLIB_KHR + X11 headers in win32u/vulkan.c.
+     * The layout matches VkXlibSurfaceCreateInfoKHR from vulkan_core.h:
+     *   sType (4B) + pad (4B) + pNext (8B) + flags (4B) + pad (4B) + dpy (8B) + window (8B) */
+    if (instance->p_vkCreateXlibSurfaceKHR)
+    {
+        const char *anw_env = getenv("WAYLANDIE_ANATIVE_WINDOW");
+        if (anw_env && anw_env[0])
+        {
+            uint64_t anw_val = strtoull(anw_env, NULL, 0);
+            if (anw_val)
+            {
+                struct {
+                    VkStructureType sType;
+                    const void *pNext;
+                    uint32_t flags;
+                    void *dpy;
+                    uint64_t window;
+                } xlib_info;
+                xlib_info.sType = VK_STRUCTURE_TYPE_XLIB_SURFACE_CREATE_INFO_KHR;
+                xlib_info.pNext = NULL;
+                xlib_info.flags = 0;
+                xlib_info.dpy = NULL;  /* adrenotools wrapper ignores dpy */
+                xlib_info.window = anw_val;  /* ANativeWindow* as Window */
+
+                fprintf(stderr, "WayLandIE nulldrv: creating Xlib surface with ANativeWindow=0x%llx\\n",
+                        (unsigned long long)anw_val);
+
+                /* Cast the function pointer — the struct layout matches VkXlibSurfaceCreateInfoKHR */
+                typedef VkResult (*xlib_create_fn)(VkInstance, const void *, const void *, VkSurfaceKHR *);
+                xlib_create_fn fn = (xlib_create_fn)instance->p_vkCreateXlibSurfaceKHR;
+                res = fn( instance->host.instance, &xlib_info, NULL, surface );
+                if (res == VK_SUCCESS) return res;
+
+                fprintf(stderr, "WayLandIE nulldrv: Xlib surface failed res=%d, falling back to headless\\n", res);
+            }
+        }
+        else
+        {
+            fprintf(stderr, "WayLandIE nulldrv: WAYLANDIE_ANATIVE_WINDOW not set, falling back to headless\\n");
+        }
+    }
+    else
+    {
+        fprintf(stderr, "WayLandIE nulldrv: p_vkCreateXlibSurfaceKHR is NULL, falling back to headless\\n");
+    }
+
+    /* Fall back to headless surface */
+    {
+        VkHeadlessSurfaceCreateInfoEXT create_info = {.sType = VK_STRUCTURE_TYPE_HEADLESS_SURFACE_CREATE_INFO_EXT};
+        res = instance->p_vkCreateHeadlessSurfaceEXT( instance->host.instance, &create_info, NULL, surface );
+        if (res)
+        {
+            client_surface_release(*client);
+            *client = NULL;
+        }
+    }
+
+    return res;
+}"""
+
+    if old_surface not in src:
+        raise SystemExit("  ERROR: could not find nulldrv_vulkan_surface_create to patch")
+    src = src.replace(old_surface, new_surface, 1)
+
+    # 3. Add #include <stdio.h> and <stdlib.h> at the top of vulkan.c for fprintf/getenv/strtoull
+    if '#include <stdio.h>' not in src:
+        src = src.replace('#include "config.h"\n', '#include "config.h"\n#include <stdio.h>\n#include <stdlib.h>\n', 1)
+
+    with open(path, "w") as f:
+        f.write(src)
+    print("  nulldrv Xlib surface patch: PATCHED")
+NULLDRV_PATCH_EOF
+
 # === winevulkan: NO MORE MANUAL_UNIX_THUNKS or winevulkan_dmabuf.c ===
 # The runtime Vulkan layer (libvk_layer_waylandie_dmabuf.so) now handles
 # all swapchain/present interception via standard Vulkan layer interception.
