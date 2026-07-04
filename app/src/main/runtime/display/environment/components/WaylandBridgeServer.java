@@ -194,6 +194,14 @@ public class WaylandBridgeServer {
                     ? context.getCacheDir().getAbsolutePath()
                     : pkgDataDir + "/cache";
             String hookLibDir = "/system/lib64";
+            // libadrenotools.so is NOT in /system/lib64 — it's in the app's native lib dir.
+            // The native present code dlopens libadrenotools.so from hookLibDir.
+            if (context != null) {
+                String nativeLibDir = context.getApplicationInfo().nativeLibraryDir;
+                if (nativeLibDir != null && !nativeLibDir.isEmpty()) {
+                    hookLibDir = nativeLibDir;
+                }
+            }
 
             // Find the Turnip driver for AHB→Vulkan import.
             // The bridge's native present code needs a Vulkan driver to import
