@@ -284,19 +284,35 @@ typedef struct waylandie_VkLayerInstanceCreateInfo {
 static void *g_waylandie_layer_handle;
 static PFN_vkCreateInstance g_waylandie_layer_create_instance;
 
-/* Wrapper for vkCreateInstance: dlopen the layer, construct the chain
- * node with the HOST GIPA/GDPA, then call the layer's vkCreateInstance.
- * The layer's PATH 1 (chain walk) extracts the host GIPA and calls the
- * real vkCreateInstance via it. The layer receives WINE handles and
- * forwards them down — no handle-type mismatch. */
+/* Wrapper for vkCreateInstance: translate VK_KHR_win32_surface → VK_KHR_xlib_surface
+ * in the extension list, then call the ORIGINAL vk_funcs->p_vkCreateInstance
+ * (which is win32u_vkCreateInstance — the wrapper that properly initializes
+ * the vulkan_instance struct, enumerates physical devices, etc).
+ *
+ * CRITICAL: We must NOT bypass vk_funcs->p_vkCreateInstance. That function
+ * (win32u_vkCreateInstance in dlls/win32u/vulkan.c) does:
+ *   1. Calls the raw HOST vkCreateInstance to get host_instance
+ *   2. Creates a vulkan_instance struct
+ *   3. Sets vulkan_instance->host.instance = host_instance
+ *   4. Loads all p_vkXxx function pointers via GIPA
+ *   5. Calls init_physical_devices() to enumerate and wrap physical devices
+ *   6. Sets VkInstance_T->obj.unix_handle = (UINT_PTR)vulkan_instance
+ *
+ * If we bypass it (by calling the raw HOST vkCreateInstance directly via
+ * the layer), the vulkan_instance struct is never created, physical devices
+ * are never enumerated, and vkEnumeratePhysicalDevices crashes.
+ *
+ * The layer is loaded via dlopen for future use (swapchain/present hooks),
+ * but vkCreateInstance itself is handled by the original wrapper with
+ * translated extensions. */
 static VkResult waylandie_wrapped_create_instance(const VkInstanceCreateInfo *ci,
         const VkAllocationCallbacks *alloc, VkInstance *inst)
 {
-    /* Use fprintf(stderr, ...) directly — bypasses wine's ERR() debug channel
-     * system entirely. This guarantees output regardless of WINEDEBUG settings
-     * or debug channel compilation flags. */
     fprintf(stderr, "WayLandIE wrapper: ENTER wine_vkCreateInstance ci=%p\n", (const void*)ci);
 
+    /* dlopen the layer for future use (swapchain/present hooks via GIPA).
+     * The layer's vkCreateInstance is NOT called here — we let the original
+     * win32u_vkCreateInstance handle instance creation properly. */
     if (!g_waylandie_layer_handle)
     {
         g_waylandie_layer_handle = dlopen("libvk_layer_waylandie_dmabuf.so", RTLD_NOW);
@@ -306,8 +322,8 @@ static VkResult waylandie_wrapped_create_instance(const VkInstanceCreateInfo *ci
                 dlsym(g_waylandie_layer_handle, "vkGetInstanceProcAddr");
             if (layer_gipa)
                 g_waylandie_layer_create_instance = (PFN_vkCreateInstance)layer_gipa(NULL, "vkCreateInstance");
-            fprintf(stderr, "WayLandIE wrapper: dlopen=%p gipa=%p create_instance=%p\n",
-                    g_waylandie_layer_handle, (void*)layer_gipa, (void*)g_waylandie_layer_create_instance);
+            fprintf(stderr, "WayLandIE wrapper: dlopen=%p gipa=%p (layer loaded for future hooks)\n",
+                    g_waylandie_layer_handle, (void*)layer_gipa);
         }
         else
         {
@@ -315,29 +331,48 @@ static VkResult waylandie_wrapped_create_instance(const VkInstanceCreateInfo *ci
         }
     }
 
-    if (g_waylandie_layer_create_instance)
+    /* Translate VK_KHR_win32_surface → VK_KHR_xlib_surface in the extension
+     * list before calling vk_funcs->p_vkCreateInstance.
+     *
+     * The HOST driver (Turnip via adrenotools) does NOT support
+     * VK_KHR_win32_surface. It supports VK_KHR_xlib_surface. DXVK requests
+     * VK_KHR_win32_surface. We must translate it.
+     *
+     * vk_funcs->p_vkCreateInstance is win32u_vkCreateInstance which calls
+     * the raw HOST driver. The HOST driver sees the translated extension
+     * list and accepts it. */
+    VkInstanceCreateInfo translated_ci = *ci;
+    const char **translated_exts = NULL;
+    if (ci->enabledExtensionCount > 0 && ci->ppEnabledExtensionNames)
     {
-        waylandie_VkLayerInstanceLink link;
-        waylandie_VkLayerInstanceCreateInfo layer_info;
-        VkInstanceCreateInfo patched;
-
-        link.pfnNextGetInstanceProcAddr = vk_funcs->p_vkGetInstanceProcAddr;
-        link.pfnNextGetDeviceProcAddr = vk_funcs->p_vkGetDeviceProcAddr;
-
-        layer_info.sType = WAYLANDIE_VK_STRUCTURE_TYPE_LOADER_INSTANCE_CREATE_INFO;
-        layer_info.pNext = ci->pNext;
-        layer_info.function = WAYLANDIE_VK_LAYER_LINK_INFO;
-        layer_info.u.pLayerInfo = &link;
-
-        patched = *ci;
-        patched.pNext = &layer_info;
-
-        return g_waylandie_layer_create_instance(&patched, alloc, inst);
+        translated_exts = (const char **)calloc(ci->enabledExtensionCount, sizeof(const char *));
+        if (translated_exts)
+        {
+            for (uint32_t i = 0; i < ci->enabledExtensionCount; i++)
+            {
+                if (ci->ppEnabledExtensionNames[i] &&
+                    strcmp(ci->ppEnabledExtensionNames[i], "VK_KHR_win32_surface") == 0)
+                {
+                    translated_exts[i] = "VK_KHR_xlib_surface";
+                    fprintf(stderr, "WayLandIE wrapper: translated VK_KHR_win32_surface -> VK_KHR_xlib_surface\n");
+                }
+                else
+                {
+                    translated_exts[i] = ci->ppEnabledExtensionNames[i];
+                }
+            }
+            translated_ci.ppEnabledExtensionNames = translated_exts;
+        }
     }
 
-    /* Fallback: call host vkCreateInstance directly (no layer) */
-    fprintf(stderr, "WayLandIE wrapper: FALLBACK to host vkCreateInstance (no layer loaded)\n");
-    return vk_funcs->p_vkCreateInstance(ci, alloc, inst);
+    /* Call the ORIGINAL vk_funcs->p_vkCreateInstance (win32u_vkCreateInstance).
+     * This properly creates the vulkan_instance struct, enumerates physical
+     * devices, and sets up all dispatch tables. */
+    VkResult res = vk_funcs->p_vkCreateInstance(&translated_ci, alloc, inst);
+    fprintf(stderr, "WayLandIE wrapper: vkCreateInstance returned res=%d instance=%p\n",
+            res, (void *)(inst ? *inst : NULL));
+    if (translated_exts) free(translated_exts);
+    return res;
 }
 """
     if old_vk_funcs not in src:
