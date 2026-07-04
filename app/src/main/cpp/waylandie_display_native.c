@@ -33,6 +33,12 @@
 #include "ahb_vk_3d_shaders.h"
 #include "crash_handler.h"
 
+/* adrenotools is linked statically into this library (see CMakeLists.txt).
+ * We call adrenotools_open_libvulkan() directly instead of dlopen+dlsym.
+ * This fixes the "no-libadrenotools dlopen failed" error that broke every
+ * Wayland desktop frame — libadrenotools.so was never packaged in the APK. */
+#include <adrenotools/driver.h>
+
 /* ------------------------------------------------------------------
  * JNI_OnLoad — installs the native crash handler (sigaction + sigaltstack)
  * as soon as the library is loaded. The crash directory is obtained from
@@ -459,11 +465,9 @@ Java_com_winlator_cmod_runtime_display_environment_components_WaylandBridgeServe
 
     char status[1536] = {0};
     char loader_token[32] = "system";
-    char adrenotools_path[512] = {0};
     char loader_driver_dir[512] = {0};
     char driver_path[512] = {0};
     void *vulkan = NULL;
-    void *adrenotools = NULL;
     VkInstance instance = VK_NULL_HANDLE;
     VkDevice device = VK_NULL_HANDLE;
     VkExtensionProperties *extensions = NULL;
@@ -575,28 +579,9 @@ Java_com_winlator_cmod_runtime_display_environment_components_WaylandBridgeServe
             goto cleanup;
         }
 
-        snprintf(adrenotools_path, sizeof(adrenotools_path), "%s/libadrenotools.so", hook_lib_dir);
-        adrenotools = dlopen(adrenotools_path, RTLD_NOW | RTLD_LOCAL);
-        if (adrenotools == NULL) {
-            adrenotools = dlopen("libadrenotools.so", RTLD_NOW | RTLD_LOCAL);
-        }
-        if (adrenotools == NULL) {
-            const char *error = dlerror();
-            snprintf(status, sizeof(status),
-                    "probe=vulkan-dmabuf-import loader=adrenotools api=vkGetMemoryFdPropertiesKHR status=unsupported reason=no-libadrenotools hook-dir=%s dlerror=%s",
-                    hook_lib_dir,
-                    error == NULL ? "none" : error);
-            goto cleanup;
-        }
-        PFN_adrenotools_open_libvulkan adrenotools_open_libvulkan =
-                (PFN_adrenotools_open_libvulkan)dlsym(
-                        adrenotools,
-                        "adrenotools_open_libvulkan");
-        if (adrenotools_open_libvulkan == NULL) {
-            snprintf(status, sizeof(status),
-                    "probe=vulkan-dmabuf-import loader=adrenotools api=vkGetMemoryFdPropertiesKHR status=unsupported reason=missing-open-symbol");
-            goto cleanup;
-        }
+        /* adrenotools is statically linked — call directly (no dlopen/dlsym).
+         * The previous dlopen("libadrenotools.so") always failed because
+         * that .so was never packaged in the APK. */
         vulkan = adrenotools_open_libvulkan(
                 RTLD_NOW | RTLD_LOCAL,
                 ADRENOTOOLS_DRIVER_CUSTOM_FLAG,
@@ -1164,9 +1149,7 @@ cleanup:
     if (vulkan != NULL) {
         dlclose(vulkan);
     }
-    if (adrenotools != NULL) {
-        dlclose(adrenotools);
-    }
+    /* adrenotools is statically linked — no dlclose needed. */
     if (loader != NULL) {
         (*env)->ReleaseStringUTFChars(env, loader_string, loader);
     }
@@ -1543,14 +1526,12 @@ Java_com_winlator_cmod_runtime_display_environment_components_WaylandBridgeServe
             void **userMappingHandle);
 
     char status[1536] = {0};
-    char adrenotools_path[512] = {0};
     char loader_driver_dir[512] = {0};
     char driver_path[512] = {0};
     const char *tmp_dir = NULL;
     const char *hook_lib_dir = NULL;
     const char *driver_dir = NULL;
     const char *driver_name = NULL;
-    void *adrenotools = NULL;
     void *vulkan = NULL;
     VkInstance instance = VK_NULL_HANDLE;
     PFN_vkDestroyInstance vkDestroyInstance = NULL;
@@ -1598,30 +1579,7 @@ Java_com_winlator_cmod_runtime_display_environment_components_WaylandBridgeServe
         goto cleanup;
     }
 
-    snprintf(adrenotools_path, sizeof(adrenotools_path), "%s/libadrenotools.so", hook_lib_dir);
-    adrenotools = dlopen(adrenotools_path, RTLD_NOW | RTLD_LOCAL);
-    if (adrenotools == NULL) {
-        adrenotools = dlopen("libadrenotools.so", RTLD_NOW | RTLD_LOCAL);
-    }
-    if (adrenotools == NULL) {
-        const char *error = dlerror();
-        snprintf(status, sizeof(status),
-                "probe=adrenotools-loader status=unsupported reason=no-libadrenotools hook-dir=%s dlerror=%s",
-                hook_lib_dir,
-                error == NULL ? "none" : error);
-        goto cleanup;
-    }
-
-    PFN_adrenotools_open_libvulkan adrenotools_open_libvulkan =
-            (PFN_adrenotools_open_libvulkan)dlsym(
-                    adrenotools,
-                    "adrenotools_open_libvulkan");
-    if (adrenotools_open_libvulkan == NULL) {
-        snprintf(status, sizeof(status),
-                "probe=adrenotools-loader status=unsupported reason=missing-open-symbol");
-        goto cleanup;
-    }
-
+    /* adrenotools is statically linked — call directly (no dlopen/dlsym). */
     vulkan = adrenotools_open_libvulkan(
             RTLD_NOW | RTLD_LOCAL,
             ADRENOTOOLS_DRIVER_CUSTOM_FLAG,
@@ -1881,9 +1839,7 @@ cleanup:
     if (vulkan != NULL) {
         dlclose(vulkan);
     }
-    if (adrenotools != NULL) {
-        dlclose(adrenotools);
-    }
+    /* adrenotools is statically linked — no dlclose needed. */
     if (tmp_dir != NULL) {
         (*env)->ReleaseStringUTFChars(env, tmp_dir_string, tmp_dir);
     }
@@ -2561,34 +2517,11 @@ static int ahb_vk_load_global_dispatch_locked(char *status, size_t status_size) 
         return -1;
     }
 
-    char adrenotools_path[640];
-    snprintf(
-            adrenotools_path,
-            sizeof(adrenotools_path),
-            "%s/libadrenotools.so",
-            g_ahb_vk_renderer.hook_lib_dir);
-    vk->adrenotools_library = dlopen(adrenotools_path, RTLD_NOW | RTLD_LOCAL);
-    if (vk->adrenotools_library == NULL) {
-        vk->adrenotools_library = dlopen("libadrenotools.so", RTLD_NOW | RTLD_LOCAL);
-    }
-    if (vk->adrenotools_library == NULL) {
-        const char *error = dlerror();
-        snprintf(
-                status,
-                status_size,
-                "producer: ahb-vk unsupported no-libadrenotools %s",
-                error == NULL ? "dlopen-failed" : error);
-        return -1;
-    }
-    PFN_adrenotools_open_libvulkan adrenotools_open_libvulkan =
-            (PFN_adrenotools_open_libvulkan)dlsym(
-                    vk->adrenotools_library,
-                    "adrenotools_open_libvulkan");
-    if (adrenotools_open_libvulkan == NULL) {
-        snprintf(status, status_size, "producer: ahb-vk unsupported missing-adrenotools-open");
-        return -1;
-    }
-
+    /* adrenotools is statically linked into libwaylandie_display_native.so
+     * — call adrenotools_open_libvulkan() directly. No dlopen/dlsym needed.
+     * vk->adrenotools_library stays NULL; the cleanup path at line ~2917
+     * checks for NULL before dlclose(). */
+    vk->adrenotools_library = NULL;
     vk->library = adrenotools_open_libvulkan(
             RTLD_NOW | RTLD_LOCAL,
             ADRENOTOOLS_DRIVER_CUSTOM_FLAG,

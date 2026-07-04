@@ -238,6 +238,24 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/bionic-libs/lib/libwayland-server.a")
 
     find_library(log-lib log)
     find_library(android-lib android)
+    # Link adrenotools STATICALLY into waylandie_display_native.so.
+    #
+    # Analysis of Impact:
+    #   adrenotools is built as a STATIC library (default BUILD_SHARED_LIBS=OFF)
+    #   by add_subdirectory(adrenotools). Without this link, the only consumer
+    #   of adrenotools is libwinlator.so — the JNI side (waylandie_display_native.c)
+    #   had to dlopen("libadrenotools.so") at runtime, which always failed
+    #   because libadrenotools.so was never packaged in the APK.
+    #
+    #   Linking adrenotools into waylandie_display_native.so means the
+    #   adrenotools_open_libvulkan() symbol is resolved at link time and
+    #   the C source can call it directly (no dlopen/dlsym). The adrenotools
+    #   PUBLIC include directory (include/) is propagated transitively, so
+    #   #include <adrenotools/driver.h> resolves.
+    #
+    #   Transitive deps pulled in: linkernsbypass (STATIC, C++), android.
+    #   The C++ runtime is already linked because surface_control_cpp_shim.cpp
+    #   is a C++ source file in this target.
     target_link_libraries(waylandie_display_native
         ${log-lib}
         ${android-lib}
@@ -245,6 +263,7 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/bionic-libs/lib/libwayland-server.a")
         GLESv3
         vulkan
         android
+        adrenotools
     )
 
     # ------------------------------------------------------------------
