@@ -65,47 +65,20 @@ static VkResult wayland_vulkan_surface_create(HWND hwnd, BOOL raw, const struct 
     if (!(surface = wayland_client_surface_create(hwnd))) return VK_ERROR_OUT_OF_HOST_MEMORY;
 
 #ifdef __ANDROID__
-    /* On Android, create a HEADLESS surface as the VkSurfaceKHR token.
+    /* On Android, create an Xlib surface using ANativeWindow.
      *
-     * ARCHITECTURE (zero-copy dmabuf via Wayland bridge):
-     *   DXVK → vkCreateWin32SurfaceKHR → wayland_vulkan_surface_create (HERE)
-     *     → creates headless VkSurfaceKHR (just a token, not displayed)
-     *   DXVK → vkCreateSwapchainKHR (on headless surface)
-     *     → dmabuf layer intercepts → creates images with dmabuf export
-     *   DXVK → vkQueuePresentKHR
-     *     → dmabuf layer intercepts → exports dmabuf fd via vkGetMemoryFdKHR
-     *     → sends fd to Wayland bridge via zwp_linux_dmabuf_v1
-     *     → bridge imports dmabuf as AHB → presents via SurfaceControl
+     * TODO: This renders DIRECTLY to SurfaceFlinger via adrenotools, NOT through
+     * the Wayland bridge. For zero-copy dmabuf via the bridge, we need the dmabuf
+     * layer to intercept vkQueuePresentKHR. But the dmabuf layer is not yet in
+     * the dispatch chain (adrenotools blocks VK_LAYER_PATH).
      *
-     * The headless surface is NOT displayed directly. It exists only to give
-     * DXVK a valid VkSurfaceKHR so it can create a swapchain. The actual
-     * presentation goes through the dmabuf layer → bridge → SurfaceFlinger.
+     * For now, use Xlib surface so the game can at least render. The desktop
+     * renders via SHM→AHB through the bridge. Once the dmabuf layer is in the
+     * dispatch chain, we'll switch to a headless surface for the game path.
      *
-     * This requires VK_EXT_headless_surface to be enabled on the HOST instance.
-     * The nulldrv_map_instance_extensions / wayland_map_instance_extensions
-     * enables it when VK_KHR_win32_surface is requested. */
-    if (instance->p_vkCreateHeadlessSurfaceEXT)
-    {
-        VkHeadlessSurfaceCreateInfoEXT create_info;
-        create_info.sType = VK_STRUCTURE_TYPE_HEADLESS_SURFACE_CREATE_INFO_EXT;
-        create_info.pNext = NULL;
-        create_info.flags = 0;
-
-        res = instance->p_vkCreateHeadlessSurfaceEXT(instance->host.instance, &create_info, NULL, handle);
-        if (res == VK_SUCCESS)
-        {
-            set_client_surface(hwnd, surface);
-            *client = &surface->client;
-            TRACE("Created headless surface=0x%s for hwnd=%p (dmabuf bridge path)\n",
-                  wine_dbgstr_longlong(*handle), hwnd);
-            return VK_SUCCESS;
-        }
-        ERR("Failed to create headless Vulkan surface, res=%d — falling back to Xlib\n", res);
-    }
-
-    /* Fallback: Xlib surface with ANativeWindow (direct-to-SurfaceFlinger path,
-     * NOT through the Wayland bridge). This is used if headless surface creation
-     * fails or VK_EXT_headless_surface is not available. */
+     * The headless surface approach (commit 7fa3a2d) was reverted because it
+     * caused the game to fail to create a usable swapchain (headless surfaces
+     * have no present path). */
     {
         const char *anw_env = getenv("WAYLANDIE_ANATIVE_WINDOW");
         if (!g_anative_window && anw_env)
@@ -131,8 +104,7 @@ static VkResult wayland_vulkan_surface_create(HWND hwnd, BOOL raw, const struct 
 
         set_client_surface(hwnd, surface);
         *client = &surface->client;
-        TRACE("Created Xlib surface=0x%s for hwnd=%p (direct path, NOT bridge)\n",
-              wine_dbgstr_longlong(*handle), hwnd);
+        TRACE("Created Xlib surface=0x%s for hwnd=%p\n", wine_dbgstr_longlong(*handle), hwnd);
         return VK_SUCCESS;
     }
 #endif
@@ -186,11 +158,6 @@ static void wayland_map_instance_extensions(struct vulkan_instance_extensions *e
      * The adrenotools wrapper exposes xlib_surface, not android_surface. */
     if (extensions->has_VK_KHR_win32_surface) extensions->has_VK_KHR_xlib_surface = 1;
     if (extensions->has_VK_KHR_xlib_surface) extensions->has_VK_KHR_win32_surface = 1;
-    /* Enable VK_EXT_headless_surface for the dmabuf bridge path.
-     * wayland_vulkan_surface_create creates a headless surface as the
-     * VkSurfaceKHR token. The dmabuf layer intercepts vkQueuePresentKHR
-     * to export dmabuf fds and send them to the Wayland bridge. */
-    if (extensions->has_VK_KHR_win32_surface) extensions->has_VK_EXT_headless_surface = 1;
 #endif
 }
 
