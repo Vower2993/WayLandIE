@@ -194,10 +194,35 @@ public class WaylandBridgeServer {
                     ? context.getCacheDir().getAbsolutePath()
                     : pkgDataDir + "/cache";
             String hookLibDir = "/system/lib64";
+
+            // Find the Turnip driver for AHB→Vulkan import.
+            // The bridge's native present code needs a Vulkan driver to import
+            // dmabuf fds as VkImages via vkGetMemoryFdPropertiesKHR. We look
+            // for the Turnip driver in the adrenotools content directory.
             String driverDir = pkgDataDir + "/adrenotools-driver";
-            if (driverName == null || driverName.isEmpty()) {
-                // Don't hardcode a driver name — let the native code probe.
-                driverName = "";
+            String effectiveDriverName = driverName;
+            if (effectiveDriverName == null || effectiveDriverName.isEmpty()) {
+                // Probe for the Turnip driver in contents/adrenotools/*/
+                File adrenotoolsDir = new File(pkgDataDir, "contents/adrenotools");
+                if (adrenotoolsDir.isDirectory()) {
+                    File[] driverDirs = adrenotoolsDir.listFiles();
+                    if (driverDirs != null) {
+                        for (File d : driverDirs) {
+                            File freedreno = new File(d, "libvulkan_freedreno.so");
+                            if (freedreno.exists() && freedreno.length() > 1000) {
+                                driverDir = d.getAbsolutePath();
+                                effectiveDriverName = "libvulkan_freedreno.so";
+                                Log.i(TAG, "dmabuf-present: found Turnip driver at " + freedreno.getAbsolutePath());
+                                break;
+                            }
+                        }
+                    }
+                }
+                if (effectiveDriverName == null || effectiveDriverName.isEmpty()) {
+                    // Fallback: copy the Turnip driver to the expected location
+                    effectiveDriverName = "vulkan.waylandie.a8xx.so";
+                    Log.w(TAG, "dmabuf-present: Turnip driver not found, using default: " + effectiveDriverName);
+                }
             }
 
             // Call native present
@@ -210,7 +235,7 @@ public class WaylandBridgeServer {
                     srcWidth, srcHeight,
                     frameIndex++,
                     tmpDir, hookLibDir,
-                    driverDir, driverName);
+                    driverDir, effectiveDriverName);
 
             Log.i(TAG, "Present result: " + result);
 
