@@ -256,13 +256,22 @@ public class WaylandBridgeServer {
             }
 
             // Call native present
+            // targetWidth/targetHeight = the presentLayer's dimensions (screen size).
+            // The native code uses these for setCrop, which tells SurfaceFlinger
+            // to scale the source buffer to fill the presentLayer.
+            // CAUSE: The old code passed srcWidth/srcHeight as target, so the
+            // crop was the same as the source — no scaling, tiny 1024x128 region.
+            // EFFECT: Now we pass the presentLayer's width/height as target,
+            // so SurfaceFlinger scales the source buffer to fill the screen.
+            int targetW = presentLayer != null ? width : srcWidth;
+            int targetH = presentLayer != null ? height : srcHeight;
             String result = nativePresentAhbVkDmaBufFrame(
                     presentLayer,
                     dmabufFd,
                     srcWidth, srcHeight,
                     format, modifier, 1,
                     stride0, offset0, size,
-                    srcWidth, srcHeight,
+                    targetW, targetH,
                     frameIndex++,
                     tmpDir, hookLibDir,
                     driverDir, effectiveDriverName);
@@ -282,29 +291,52 @@ public class WaylandBridgeServer {
     }
 
     private void ensurePresentLayer(int w, int h) {
-        if (presentLayer != null && width == w && height == h) return;
-        if (presentLayer != null) {
-            presentLayer.release();
-            presentLayer = null;
-        }
+        /* Create ONE presentLayer at the hostView's screen size, not the
+         * source buffer size. The source buffers (1024x128 taskbar, 768x512
+         * windows) are scaled to fit by SurfaceFlinger via setCrop in the
+         * native present code.
+         *
+         * CAUSE: The old code recreated the presentLayer on every dimension
+         * change (101 creations for 7 frames), preventing SurfaceFlinger
+         * from ever compositing a stable layer.
+         *
+         * EFFECT: The presentLayer is created ONCE at the SurfaceView's
+         * dimensions and never recreated. All frames update the buffer on
+         * the same layer. SurfaceFlinger composites it stably.
+         *
+         * SIDE EFFECT: The desktop will appear stretched (source 1024x128
+         * → screen 2340x1080). This is acceptable for now — aspect-ratio
+         * correction can be added later.
+         *
+         * RISK: If the screen rotates, the presentLayer won't resize.
+         * Acceptable for now. */
+        if (presentLayer != null) return;  // Never recreate — one layer for the session
         if (hostView == null || hostView.getSurfaceControl() == null) {
             Log.w(TAG, "Cannot create presentLayer — hostView SurfaceControl is null");
             return;
+        }
+        /* Use the hostView's actual dimensions, not the source buffer size.
+         * Fall back to the source size if hostView dimensions are 0. */
+        int layerW = hostView.getWidth();
+        int layerH = hostView.getHeight();
+        if (layerW <= 0 || layerH <= 0) {
+            layerW = w;
+            layerH = h;
         }
         try {
             presentLayer = new SurfaceControl.Builder()
                 .setName("waylandie-present")
                 .setParent(hostView.getSurfaceControl())
-                .setBufferSize(w, h)
+                .setBufferSize(layerW, layerH)
                 .build();
-            width = w;
-            height = h;
+            width = layerW;
+            height = layerH;
             new SurfaceControl.Transaction()
                 .setLayer(presentLayer, 10)
                 .setVisibility(presentLayer, true)
                 .setPosition(presentLayer, 0, 0)
                 .apply();
-            Log.i(TAG, "Created presentLayer: " + w + "x" + h);
+            Log.i(TAG, "Created presentLayer: " + layerW + "x" + layerH + " (screen size, source=" + w + "x" + h + ")");
         } catch (Exception e) {
             Log.e(TAG, "Failed to create presentLayer", e);
         }
