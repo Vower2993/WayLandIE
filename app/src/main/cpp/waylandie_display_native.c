@@ -4388,7 +4388,7 @@ static int render_dmabuf_to_ahb_vk_slot(
         source->layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
         slot->layout = VK_IMAGE_LAYOUT_GENERAL;
         snprintf(status, status_size,
-                "producer: dmabuf-vk-native-present frame %lld gpu-blit-async loader adrenotools driver %s slot %d id %llu submit %lldus acquire-fence=%s source %dx%d target %dx%d drm 0x%x modifier 0x%llx zero-copy=gpu explicit-sync=surfacecontrol-acquire-fence",
+                "status=pass producer: dmabuf-vk-native-present frame %lld gpu-blit-async loader adrenotools driver %s slot %d id %llu submit %lldus acquire-fence=%s source %dx%d target %dx%d drm 0x%x modifier 0x%llx zero-copy=gpu explicit-sync=surfacecontrol-acquire-fence",
                 frame_index,
                 renderer->driver_name,
                 slot_index,
@@ -4420,7 +4420,7 @@ static int render_dmabuf_to_ahb_vk_slot(
     source->layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
     slot->layout = VK_IMAGE_LAYOUT_GENERAL;
     snprintf(status, status_size,
-            "producer: dmabuf-vk frame %lld gpu-blit loader adrenotools driver %s slot %d id %llu wait %lldus source %dx%d target %dx%d drm 0x%x modifier 0x%llx zero-copy=gpu",
+            "status=pass producer: dmabuf-vk frame %lld gpu-blit loader adrenotools driver %s slot %d id %llu wait %lldus source %dx%d target %dx%d drm 0x%x modifier 0x%llx zero-copy=gpu",
             frame_index,
             renderer->driver_name,
             slot_index,

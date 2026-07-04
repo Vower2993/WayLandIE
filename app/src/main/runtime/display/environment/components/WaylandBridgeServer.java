@@ -124,16 +124,38 @@ public class WaylandBridgeServer {
                 // LocalSocket ancillary data is available via getAncillaryFileDescriptors
                 java.io.FileDescriptor[] ancillary = client.getAncillaryFileDescriptors();
                 int dmabufFd = -1;
+                // CRITICAL: do NOT use try-with-resources for the pfd here.
+                // ParcelFileDescriptor.dup() creates a pfd that OWNS the
+                // duplicated fd. The OLD code used try-with-resources, which
+                // called pfd.close() at block exit — BEFORE handleCommand
+                // used the fd. This left dmabufFd as a dangling integer,
+                // causing EBADF (errno 9) in the native fstat()/dup() calls.
+                //
+                // Instead, we keep the pfd open through handleCommand, then
+                // close it AFTER the native present returns. The native code
+                // dups the fd internally if it needs to keep it, so closing
+                // the pfd here after the call is safe and prevents fd leaks.
+                android.os.ParcelFileDescriptor pfd = null;
                 if (ancillary != null && ancillary.length > 0) {
-                    try (android.os.ParcelFileDescriptor pfd = android.os.ParcelFileDescriptor.dup(ancillary[0])) {
+                    try {
+                        pfd = android.os.ParcelFileDescriptor.dup(ancillary[0]);
                         dmabufFd = pfd.getFd();
                     } catch (Exception e) {
                         Log.w(TAG, "Failed to get ancillary fd", e);
+                        if (pfd != null) {
+                            try { pfd.close(); } catch (Exception ignored) {}
+                            pfd = null;
+                        }
                     }
                     Log.i(TAG, "Received dmabuf fd=" + dmabufFd);
                 }
 
                 String response = handleCommand(command, dmabufFd);
+                // Close the pfd NOW — after handleCommand returned. The native
+                // present code has already dup'd the fd if it needs to keep it.
+                if (pfd != null) {
+                    try { pfd.close(); } catch (Exception ignored) {}
+                }
                 os.write((response + "\n").getBytes());
                 os.flush();
             }
