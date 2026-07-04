@@ -1258,7 +1258,7 @@ static int present_buffer_to_android(struct surface_state *surface, struct shm_b
     }
     /* If WAYLANDIE_ANDROID_VK_DRIVER is empty, send empty driver name.
      * The Java presenter will probe for the Turnip driver in
-     * contents/adrenotools/*/libvulkan_freedreno.so. */
+     * contents/adrenotools/{driver_id}/libvulkan_freedreno.so. */
     const char *target_window = state->android_windows && surface->android_window_id[0] != '\0'
             ? surface->android_window_id
             : "fullscreen";
