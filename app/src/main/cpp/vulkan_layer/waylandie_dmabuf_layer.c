@@ -1051,16 +1051,17 @@ static VkResult layer_create_instance(const VkInstanceCreateInfo *ci,
         }
     }
 
-    /* STRIP the VkLayerInstanceCreateInfo from the pNext chain before
-     * calling fp_create. The HOST driver does NOT understand
-     * VK_STRUCTURE_TYPE_LOADER_INSTANCE_CREATE_INFO (sType=24) — it's a
-     * loader-internal type. If we pass it through, the driver rejects
-     * vkCreateInstance with VK_ERROR_INITIALIZATION_FAILED.
+    /* STRIP the VkLayerInstanceCreateInfo from the pNext chain AND translate
+     * VK_KHR_win32_surface → VK_KHR_xlib_surface before calling fp_create.
      *
-     * In a normal Khronos layer chain, the loader's terminator strips
-     * this. But we call the HOST driver directly (via fp_create obtained
-     * from the chain's pfnNextGetInstanceProcAddr), so we must strip it. */
+     * Two issues:
+     * 1. The HOST driver does NOT understand VK_STRUCTURE_TYPE_LOADER_INSTANCE_CREATE_INFO
+     *    (sType=47) — it's a loader-internal type. We must strip it.
+     * 2. The HOST driver (Turnip via adrenotools) does NOT support VK_KHR_win32_surface.
+     *    It supports VK_KHR_xlib_surface. DXVK requests VK_KHR_win32_surface.
+     *    We must translate it in the extension list. */
     VkInstanceCreateInfo stripped_ci;
+    const char **translated_exts = NULL;
     if (li) {
         stripped_ci = *ci;
         stripped_ci.pNext = li->pNext;  /* Skip the layer_info, restore original pNext */
@@ -1068,7 +1069,28 @@ static VkResult layer_create_instance(const VkInstanceCreateInfo *ci,
         stripped_ci = *ci;  /* PATH 2: no layer_info in chain, pass as-is */
     }
 
+    /* Translate VK_KHR_win32_surface → VK_KHR_xlib_surface in the extension list.
+     * Allocate a new array (don't modify the original) and replace the string. */
+    if (stripped_ci.enabledExtensionCount > 0 && stripped_ci.ppEnabledExtensionNames) {
+        translated_exts = (const char **)calloc(stripped_ci.enabledExtensionCount, sizeof(const char *));
+        if (translated_exts) {
+            for (uint32_t i = 0; i < stripped_ci.enabledExtensionCount; i++) {
+                if (stripped_ci.ppEnabledExtensionNames[i] &&
+                    strcmp(stripped_ci.ppEnabledExtensionNames[i], "VK_KHR_win32_surface") == 0) {
+                    translated_exts[i] = "VK_KHR_xlib_surface";
+                    fprintf(stderr, "WayLandIE layer: translated VK_KHR_win32_surface → VK_KHR_xlib_surface\n");
+                } else {
+                    translated_exts[i] = stripped_ci.ppEnabledExtensionNames[i];
+                }
+            }
+            stripped_ci.ppEnabledExtensionNames = translated_exts;
+        }
+    }
+
     VkResult res = fp_create(&stripped_ci, alloc, inst);
+    fprintf(stderr, "WayLandIE layer: vkCreateInstance returned res=%d instance=%p\n",
+            res, (void *)(inst ? *inst : VK_NULL_HANDLE));
+    if (translated_exts) free(translated_exts);
     LOGI("layer_create_instance: vkCreateInstance returned res=%d instance=%p",
          res, (void *)(inst ? *inst : VK_NULL_HANDLE));
     if (res != VK_SUCCESS) return res;
