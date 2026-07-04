@@ -460,30 +460,14 @@ else:
     struct vulkan_instance *instance = vulkan_instance_from_handle(client_instance);
     unsigned int i;
 
-    /* WayLandIE diagnostic: write to a dedicated file to avoid logcat buffer overflow */
+    /* WayLandIE: NULL guard FIRST — before any other code.
+     * Use ERR() (goes to stderr, captured by wine debug log) instead of fopen
+     * (which may fail silently if the path doesn't exist). */
+    if (!instance)
     {
-        FILE *df = fopen("/data/user/0/com.tencent.ig/files/imagefs/home/xuser-1/.wine/waylandie_diag.log", "a");
-        if (df)
-        {
-            fprintf(df, "=== wine_vkEnumeratePhysicalDevices ===\\n");
-            fprintf(df, "client_instance=%p instance=%p count=%p devices=%p\\n",
-                    (void *)client_instance, (void *)instance, (void *)count, (void *)client_physical_devices);
-            if (instance)
-            {
-                fprintf(df, "instance->physical_device_count=%u instance->physical_devices=%p\\n",
-                        instance->physical_device_count, (void *)instance->physical_devices);
-                fprintf(df, "instance->host.instance=%p\\n", (void *)instance->host.instance);
-            }
-            else
-            {
-                fprintf(df, "ERROR: instance is NULL! vulkan_instance_from_handle returned NULL\\n");
-                fprintf(df, "  client_instance value = %p\\n", (void *)client_instance);
-                fprintf(df, "  This means client->unix_handle is 0 or invalid.\\n");
-                fclose(df);
-                return VK_ERROR_INITIALIZATION_FAILED;
-            }
-            fclose(df);
-        }
+        ERR("WayLandIE: vkEnumeratePhysicalDevices instance is NULL! client_instance=%p\\n", (void *)client_instance);
+        if (count) *count = 0;
+        return VK_ERROR_INITIALIZATION_FAILED;
     }
 
     if (!client_physical_devices)
@@ -494,15 +478,9 @@ else:
 
     if (!instance->physical_devices)
     {
-        FILE *df = fopen("/data/user/0/com.tencent.ig/files/imagefs/home/xuser-1/.wine/waylandie_diag.log", "a");
-        if (df)
-        {
-            fprintf(df, "ERROR: instance->physical_devices is NULL but physical_device_count=%u!\\n",
-                    instance->physical_device_count);
-            fprintf(df, "  This means init_physical_devices never set instance->physical_devices.\\n");
-            fprintf(df, "  init_physical_devices may have returned early with VK_ERROR_OUT_OF_POOL_MEMORY.\\n");
-            fclose(df);
-        }
+        ERR("WayLandIE: vkEnumeratePhysicalDevices physical_devices is NULL! count=%u instance=%p\\n",
+            instance->physical_device_count, (void *)instance);
+        if (count) *count = 0;
         return VK_ERROR_INITIALIZATION_FAILED;
     }
 
@@ -510,17 +488,6 @@ else:
     for (i = 0; i < *count; i++)
     {
         client_physical_devices[i] = instance->physical_devices[i].client.physical_device;
-    }
-
-    {
-        FILE *df = fopen("/data/user/0/com.tencent.ig/files/imagefs/home/xuser-1/.wine/waylandie_diag.log", "a");
-        if (df)
-        {
-            fprintf(df, "SUCCESS: returning %u devices\\n", *count);
-            for (i = 0; i < *count; i++)
-                fprintf(df, "  device[%u] = %p\\n", i, (void *)client_physical_devices[i]);
-            fclose(df);
-        }
     }
 
     TRACE("Returning %u devices.\\n", *count);
@@ -562,37 +529,21 @@ failed:
     new_set = """    instance->physical_device_count = physical_device_count;
     instance->physical_devices = physical_devices;
 
-    /* WayLandIE diagnostic: write to a dedicated file to avoid logcat buffer overflow */
+    /* WayLandIE diagnostic: use ERR() so it appears in wine debug log */
+    ERR("WayLandIE: init_physical_devices SUCCESS count=%u physical_devices=%p instance=%p host_instance=%p\\n",
+        physical_device_count, (void *)physical_devices, (void *)instance, (void *)instance->host.instance);
+    for (i = 0; i < physical_device_count; i++)
     {
-        FILE *df = fopen("/data/user/0/com.tencent.ig/files/imagefs/home/xuser-1/.wine/waylandie_diag.log", "a");
-        if (df)
-        {
-            fprintf(df, "=== init_physical_devices SUCCESS ===\\n");
-            fprintf(df, "count=%u physical_devices=%p instance=%p\\n",
-                    physical_device_count, (void *)physical_devices, (void *)instance);
-            fprintf(df, "instance->host.instance=%p\\n", (void *)instance->host.instance);
-            for (i = 0; i < physical_device_count; i++)
-            {
-                fprintf(df, "  device[%u]: host=%p client=%p client.physical_device=%p\\n",
-                        i, (void *)host_physical_devices[i],
-                        (void *)&client_instance->physical_device[i],
-                        (void *)physical_devices[i].client.physical_device);
-            }
-            fclose(df);
-        }
+        ERR("WayLandIE: init_physical_devices device[%u] host=%p client=%p client.physical_device=%p\\n",
+            i, (void *)host_physical_devices[i],
+            (void *)&client_instance->physical_device[i],
+            (void *)physical_devices[i].client.physical_device);
     }
 
 failed:
     free( host_physical_devices );
     if (res)
-    {
-        FILE *df = fopen("/data/user/0/com.tencent.ig/files/imagefs/home/xuser-1/.wine/waylandie_diag.log", "a");
-        if (df)
-        {
-            fprintf(df, "=== init_physical_devices FAILED res=%d ===\\n", res);
-            fclose(df);
-        }
-    }
+        ERR("WayLandIE: init_physical_devices FAILED res=%d\\n", res);
     return res;
 }"""
 
