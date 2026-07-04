@@ -1345,6 +1345,244 @@ static VkBool32 VKAPI_CALL layer_get_win32_presentation_support(
     return VK_TRUE;
 }
 
+/* ------------------------------------------------------------------ */
+/* VK_EXT_map_memory_placed pNext stripping                           *
+ *                                                                    *
+ * Analysis of Impact (Protocol #4 — THINK BEFORE YOU BUILD):         *
+ *   init_physical_device() in dlls/win32u/vulkan.c:560-595 enters    *
+ *   the `if (zero_bits && has_VK_EXT_map_memory_placed &&            *
+ *   has_VK_KHR_map_memory2)` block ONLY for WOW64 processes          *
+ *   (FEX-emulated x86_64 on ARM64). This block calls:                 *
+ *     1. p_vkGetPhysicalDeviceFeatures2KHR with pNext =              *
+ *        VkPhysicalDeviceMapMemoryPlacedFeaturesEXT                  *
+ *     2. p_vkGetPhysicalDeviceProperties2 with pNext =               *
+ *        VkPhysicalDeviceMapMemoryPlacedPropertiesEXT                *
+ *                                                                    *
+ *   For native ARM64 wineboot (00d4), zero_bits=0 → block skipped   *
+ *   → init_physical_device succeeds. For FEX/ROTR (0150),            *
+ *   zero_bits!=0 → block entered → hard crash mid-listing-loop.      *
+ *                                                                    *
+ *   The wine trace shows the crash mid-TRACE for extension #119      *
+ *   because stderr is UNBUFFERED (setbuf(stderr,NULL) in             *
+ *   dlls/ntdll/unix/debug.c:426) — the partial write("  - VK_EXT_lo")
+ *   is a real mid-syscall kill, not a buffer artifact. The crash     *
+ *   propagates backward from the HOST driver call through the        *
+ *   unbuffered stderr path.                                         *
+ *                                                                    *
+ *   Root cause: winevulkan (proton_11.0) defines                    *
+ *   VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAP_MEMORY_PLACED_FEATURES_EXT *
+ *   = 1000273000 (vk.xml extension #273). Mesa Turnip Gen8 V27       *
+ *   also advertises VK_EXT_map_memory_placed, but the struct         *
+ *   negotiation between wine's Unix side and Turnip via             *
+ *   adrenotools' CreateInfoWrapper may corrupt memory in the         *
+ *   FEX-emulated address space.                                     *
+ *                                                                    *
+ *   Fix: intercept the three *_Properties2 / *_Features2 functions   *
+ *   in our layer, strip the map_placed structs from pNext, then     *
+ *   forward to the HOST driver. VK_EXT_map_memory_placed is only    *
+ *   used for WOW64 memory mapping (placed memory for 32-bit          *
+ *   compatibility) — we don't need it for Wayland dmabuf display.   *
+ *   Stripping it is safe: winevulkan's physical_device->map_placed_ *
+ *   align stays 0, and use_external_memory() falls back to the      *
+ *   non-placed path.                                                *
+ * ------------------------------------------------------------------ */
+
+/* VK_EXT_map_memory_placed sType values (from vk.xml extension #273) */
+#define WAYLANDIE_STYPE_MAP_MEMORY_PLACED_FEATURES   ((VkStructureType)1000273000)
+#define WAYLANDIE_STYPE_MAP_MEMORY_PLACED_PROPERTIES ((VkStructureType)1000273001)
+
+/* Walk the pNext chain and unlink any node whose sType matches one of the
+ * map_memory_placed struct types. Returns the (possibly new) head of the
+ * pNext chain. The unlinked nodes are NOT freed — they're stack-allocated
+ * by init_physical_device and will be reclaimed on function return. */
+static void *waylandie_strip_map_placed_from_pnext(void *pNext_head)
+{
+    VkBaseOutStructure *prev = NULL;
+    VkBaseOutStructure *node = (VkBaseOutStructure *)pNext_head;
+    while (node)
+    {
+        VkBaseOutStructure *next = node->pNext;
+        if (node->sType == WAYLANDIE_STYPE_MAP_MEMORY_PLACED_FEATURES ||
+            node->sType == WAYLANDIE_STYPE_MAP_MEMORY_PLACED_PROPERTIES)
+        {
+            /* Unlink this node: prev->pNext = next (skip node) */
+            if (prev) prev->pNext = next;
+            else pNext_head = next;
+            /* node is now orphaned — don't touch it, don't free it */
+        }
+        else
+        {
+            prev = node;
+        }
+        node = next;
+    }
+    return pNext_head;
+}
+
+/* Resolve a down-chain instance function pointer for forwarding.
+ *
+ * When called from vkGetPhysicalDeviceXxx hooks, we receive a VkPhysicalDevice
+ * handle, not a VkInstance. The layer does not maintain a phys_dev→instance
+ * map. However, in our use case there is exactly ONE VkInstance (DXVK creates
+ * a single instance), so we can safely use the first instance_data in the
+ * global list. The GIPA function pointer is the same loader GIPA for all
+ * instances, and the returned function pointer is valid for any physical
+ * device belonging to that instance.
+ *
+ * If `inst` is non-NULL and is a valid VkInstance, we use find_instance.
+ * Otherwise (e.g., VkPhysicalDevice passed), we fall back to the first
+ * instance in the global list. */
+static PFN_vkVoidFunction waylandie_resolve_host_func(VkInstance inst, const char *name)
+{
+    instance_data *data = NULL;
+    if (inst) {
+        data = find_instance(inst);
+    }
+    if (!data) {
+        /* Fallback: use the first (and typically only) instance */
+        pthread_mutex_lock(&g_lock);
+        data = g_instances;
+        pthread_mutex_unlock(&g_lock);
+    }
+    if (!data || !data->vtable.get_instance_proc_addr) return NULL;
+    return data->vtable.get_instance_proc_addr(data->instance, name);
+}
+
+static VKAPI_ATTR void VKAPI_CALL
+layer_get_physical_device_features2_khr(VkPhysicalDevice physicalDevice,
+                                        VkPhysicalDeviceFeatures2 *pFeatures)
+{
+    fprintf(stderr, "WayLandIE layer: ENTER vkGetPhysicalDeviceFeatures2KHR phys=%p features=%p (stripping map_placed)\n",
+            (void *)physicalDevice, (void *)pFeatures);
+
+    if (!pFeatures) {
+        fprintf(stderr, "WayLandIE layer: vkGetPhysicalDeviceFeatures2KHR — NULL pFeatures\n");
+        return;
+    }
+
+    /* Save the original pNext, strip map_placed, then restore after the call */
+    void *orig_pNext = pFeatures->pNext;
+    pFeatures->pNext = waylandie_strip_map_placed_from_pnext(pFeatures->pNext);
+
+    /* Pass NULL as instance — waylandie_resolve_host_func falls back to the
+     * first (only) instance in the global list. */
+    PFN_vkGetPhysicalDeviceFeatures2KHR fp = (PFN_vkGetPhysicalDeviceFeatures2KHR)
+        waylandie_resolve_host_func(NULL, "vkGetPhysicalDeviceFeatures2KHR");
+
+    if (fp) {
+        fp(physicalDevice, pFeatures);
+    } else {
+        fprintf(stderr, "WayLandIE layer: vkGetPhysicalDeviceFeatures2KHR — HOST func not resolvable\n");
+    }
+
+    /* Restore original pNext (the orphaned map_placed node is still valid,
+     * it's just not in the chain anymore) */
+    pFeatures->pNext = orig_pNext;
+
+    fprintf(stderr, "WayLandIE layer: EXIT vkGetPhysicalDeviceFeatures2KHR\n");
+}
+
+static VKAPI_ATTR void VKAPI_CALL
+layer_get_physical_device_properties2(VkPhysicalDevice physicalDevice,
+                                      VkPhysicalDeviceProperties2 *pProperties)
+{
+    fprintf(stderr, "WayLandIE layer: ENTER vkGetPhysicalDeviceProperties2 phys=%p props=%p (stripping map_placed)\n",
+            (void *)physicalDevice, (void *)pProperties);
+
+    if (!pProperties) {
+        fprintf(stderr, "WayLandIE layer: vkGetPhysicalDeviceProperties2 — NULL pProperties\n");
+        return;
+    }
+
+    void *orig_pNext = pProperties->pNext;
+    pProperties->pNext = waylandie_strip_map_placed_from_pnext(pProperties->pNext);
+
+    PFN_vkGetPhysicalDeviceProperties2 fp = (PFN_vkGetPhysicalDeviceProperties2)
+        waylandie_resolve_host_func(NULL, "vkGetPhysicalDeviceProperties2");
+
+    if (fp) {
+        fp(physicalDevice, pProperties);
+    } else {
+        fprintf(stderr, "WayLandIE layer: vkGetPhysicalDeviceProperties2 — HOST func not resolvable\n");
+    }
+
+    pProperties->pNext = orig_pNext;
+
+    fprintf(stderr, "WayLandIE layer: EXIT vkGetPhysicalDeviceProperties2\n");
+}
+
+static VKAPI_ATTR void VKAPI_CALL
+layer_get_physical_device_properties2_khr(VkPhysicalDevice physicalDevice,
+                                          VkPhysicalDeviceProperties2 *pProperties)
+{
+    fprintf(stderr, "WayLandIE layer: ENTER vkGetPhysicalDeviceProperties2KHR phys=%p props=%p (stripping map_placed)\n",
+            (void *)physicalDevice, (void *)pProperties);
+
+    if (!pProperties) {
+        fprintf(stderr, "WayLandIE layer: vkGetPhysicalDeviceProperties2KHR — NULL pProperties\n");
+        return;
+    }
+
+    void *orig_pNext = pProperties->pNext;
+    pProperties->pNext = waylandie_strip_map_placed_from_pnext(pProperties->pNext);
+
+    PFN_vkGetPhysicalDeviceProperties2KHR fp = (PFN_vkGetPhysicalDeviceProperties2KHR)
+        waylandie_resolve_host_func(NULL, "vkGetPhysicalDeviceProperties2KHR");
+
+    if (fp) {
+        fp(physicalDevice, pProperties);
+    } else {
+        fprintf(stderr, "WayLandIE layer: vkGetPhysicalDeviceProperties2KHR — HOST func not resolvable\n");
+    }
+
+    pProperties->pNext = orig_pNext;
+
+    fprintf(stderr, "WayLandIE layer: EXIT vkGetPhysicalDeviceProperties2KHR\n");
+}
+
+/* Also intercept vkEnumerateDeviceExtensionProperties to verify the count
+ * and pre-touch the properties buffer (avoids lazy-allocation page-fault
+ * OOM kills during init_physical_device's listing loop). */
+static VKAPI_ATTR VkResult VKAPI_CALL
+layer_enumerate_device_extension_properties(VkPhysicalDevice physicalDevice,
+                                             const char *pLayerName,
+                                             uint32_t *pPropertyCount,
+                                             VkExtensionProperties *pProperties)
+{
+    PFN_vkEnumerateDeviceExtensionProperties fp = (PFN_vkEnumerateDeviceExtensionProperties)
+        waylandie_resolve_host_func(NULL, "vkEnumerateDeviceExtensionProperties");
+
+    if (!fp) {
+        fprintf(stderr, "WayLandIE layer: vkEnumerateDeviceExtensionProperties — HOST func not resolvable\n");
+        if (pPropertyCount) *pPropertyCount = 0;
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+
+    VkResult res = fp(physicalDevice, pLayerName, pPropertyCount, pProperties);
+
+    /* When pProperties is non-NULL (second call), pre-touch all pages of
+     * the buffer to force physical allocation. This avoids page-fault-
+     * triggered OOM kills during the listing loop in init_physical_device. */
+    if (res == VK_SUCCESS && pProperties && pPropertyCount && *pPropertyCount > 0) {
+        size_t total = (size_t)(*pPropertyCount) * sizeof(VkExtensionProperties);
+        /* Touch every page (4096 bytes) to force physical allocation */
+        volatile char *touch = (volatile char *)pProperties;
+        for (size_t i = 0; i < total; i += 4096) {
+            touch[i] = touch[i]; /* read-write to force page-in */
+        }
+        /* Touch the last byte too (in case total isn't page-aligned) */
+        if (total > 0) touch[total - 1] = touch[total - 1];
+
+        fprintf(stderr, "WayLandIE layer: vkEnumerateDeviceExtensionProperties count=%u total=%zu bytes (pre-touched)\n",
+                *pPropertyCount, total);
+    } else if (pPropertyCount) {
+        fprintf(stderr, "WayLandIE layer: vkEnumerateDeviceExtensionProperties count=%u res=%d (size query or empty)\n",
+                *pPropertyCount, res);
+    }
+
+    return res;
+}
+
 static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
 layer_get_instance_proc_addr(VkInstance inst, const char *name) {
     if (!name) return NULL;
@@ -1360,6 +1598,13 @@ layer_get_instance_proc_addr(VkInstance inst, const char *name) {
      * returns these custom implementations. */
     if (!strcmp(name, "vkCreateWin32SurfaceKHR")) return (PFN_vkVoidFunction)layer_create_win32_surface;
     if (!strcmp(name, "vkGetPhysicalDeviceWin32PresentationSupportKHR")) return (PFN_vkVoidFunction)layer_get_win32_presentation_support;
+    /* VK_EXT_map_memory_placed pNext stripping — prevents init_physical_device
+     * crash in the `if (zero_bits && ...)` block for FEX-emulated processes. */
+    if (!strcmp(name, "vkGetPhysicalDeviceFeatures2KHR")) return (PFN_vkVoidFunction)layer_get_physical_device_features2_khr;
+    if (!strcmp(name, "vkGetPhysicalDeviceProperties2")) return (PFN_vkVoidFunction)layer_get_physical_device_properties2;
+    if (!strcmp(name, "vkGetPhysicalDeviceProperties2KHR")) return (PFN_vkVoidFunction)layer_get_physical_device_properties2_khr;
+    /* Pre-touch the extension properties buffer to avoid page-fault OOM */
+    if (!strcmp(name, "vkEnumerateDeviceExtensionProperties")) return (PFN_vkVoidFunction)layer_enumerate_device_extension_properties;
     if (!strcmp(name, "vkCreateSwapchainKHR")) return (PFN_vkVoidFunction)layer_create_swapchain;
     if (!strcmp(name, "vkDestroySwapchainKHR")) return (PFN_vkVoidFunction)layer_destroy_swapchain;
     if (!strcmp(name, "vkGetSwapchainImagesKHR")) return (PFN_vkVoidFunction)layer_get_swapchain_images;
