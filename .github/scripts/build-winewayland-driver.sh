@@ -1499,6 +1499,7 @@ make -j$(nproc) -k \
   dlls/winevulkan/aarch64-windows/winevulkan.dll \
   dlls/winevulkan/arm64ec-windows/winevulkan.dll \
   dlls/winevulkan/winevulkan.so \
+  dlls/win32u/win32u.so \
   2>&1 | tail -300 || true
 
 # CRITICAL: Verify -ldl is in the ACTUAL link command by rebuilding winevulkan.so verbosely.
@@ -1650,6 +1651,39 @@ if [ "$VULKAN_SO_SIZE" -lt 1000 ]; then
   make -j1 dlls/winevulkan/winevulkan.so V=1 2>&1 | tail -50 || true
 else
   echo "winevulkan.so collected: $VULKAN_SO_SIZE bytes"
+fi
+
+# === Collect win32u.so (Unix side) ===
+# CRITICAL: win32u.so must be built from the SAME source as winevulkan.so
+# to guarantee struct layout match. The struct vulkan_instance (defined in
+# vulkan_driver.h) has a bitfield (vulkan_instance_extensions) whose size
+# depends on ALL_VK_INSTANCE_EXTS (generated from vk.xml by make_vulkan).
+# If the pre-built win32u.so from the Proton archive was compiled with a
+# different vk.xml, the bitfield size differs → physical_device_count is
+# read at the wrong offset → garbage value (e.g. 2.1 billion) → DXVK hangs
+# trying to allocate 2.1 billion VkPhysicalDevice handles.
+#
+# Building win32u.so from the same source as winevulkan.so guarantees the
+# struct layouts match exactly.
+echo "=== Collecting win32u.so (Unix side) ==="
+WIN32U_SO=""
+for f in \
+  "/tmp/proton-wine/dlls/win32u/win32u.so" \
+  "/tmp/proton-wine/dlls/win32u/win32u.dll.so"; do
+  if [ -f "$f" ] && [ "$(stat -c%s "$f")" -gt 1000 ]; then
+    echo "Found win32u ELF: $f ($(stat -c%s "$f") bytes)"
+    cp "$f" "$PROTON_OUT/lib/wine/aarch64-unix/win32u.so"
+    WIN32U_SO="$f"
+    break
+  fi
+done
+WIN32U_SO_SIZE=$(stat -c%s "$PROTON_OUT/lib/wine/aarch64-unix/win32u.so" 2>/dev/null || echo 0)
+if [ "$WIN32U_SO_SIZE" -lt 1000 ]; then
+  echo "WARNING: win32u.so not built — struct layout mismatch will cause garbage physical_device_count"
+  echo "=== Running verbose make for win32u.so to see errors ==="
+  make -j1 dlls/win32u/win32u.so V=1 2>&1 | tail -50 || true
+else
+  echo "win32u.so collected: $WIN32U_SO_SIZE bytes"
 fi
 
 # Verify the new ntdll has the FEX-required exports

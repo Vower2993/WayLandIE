@@ -100,6 +100,13 @@ public final class WaylandDriverInstaller {
             // Copy source-built winevulkan.so (Unix-side) — built with VK_USE_PLATFORM_WIN32_KHR
             // so vkCreateWin32SurfaceKHR is in the dispatch table.
             copyIfExists(prefix, "lib/wine/aarch64-unix/winevulkan.so", wineAarch64Unix);
+            // Copy source-built win32u.so (Unix-side) — CRITICAL: must be from the same
+            // source as winevulkan.so to guarantee struct layout match.
+            // The struct vulkan_instance has a bitfield (vulkan_instance_extensions)
+            // whose size depends on ALL_VK_INSTANCE_EXTS (generated from vk.xml).
+            // If win32u.so is from a different source version, physical_device_count
+            // is read at the wrong offset → garbage value → DXVK hangs.
+            copyIfExists(prefix, "lib/wine/aarch64-unix/win32u.so", wineAarch64Unix);
             // Copy source-built winevulkan.dll (PE side) — built from the same source
             // with the same flags as winevulkan.so, guaranteeing PE/Unix enum match.
             copyIfExists(prefix, "lib/wine/aarch64-windows/winevulkan.dll", wineAarch64Windows);
