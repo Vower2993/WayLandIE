@@ -560,13 +560,16 @@ else:
     unsigned int i;
 
     /* WayLandIE: NULL guard FIRST — before any other code.
-     * Use ERR() (goes to stderr, captured by wine debug log) instead of fopen
-     * (which may fail silently if the path doesn't exist). */
+     * CRITICAL: return VK_SUCCESS with *count=0, NOT VK_ERROR_INITIALIZATION_FAILED.
+     * The PE-side thunk asserts !status (NTSTATUS). Returning an error VkResult
+     * converts to non-zero NTSTATUS → assertion failure → process crash.
+     * Returning VK_SUCCESS with 0 devices is safe — DXVK handles 0 devices
+     * gracefully (reports "no GPU found" instead of crashing). */
     if (!instance)
     {
         ERR("WayLandIE: vkEnumeratePhysicalDevices instance is NULL! client_instance=%p\\n", (void *)client_instance);
         if (count) *count = 0;
-        return VK_ERROR_INITIALIZATION_FAILED;
+        return VK_SUCCESS;
     }
 
     if (!client_physical_devices)
@@ -580,7 +583,7 @@ else:
         ERR("WayLandIE: vkEnumeratePhysicalDevices physical_devices is NULL! count=%u instance=%p\\n",
             instance->physical_device_count, (void *)instance);
         if (count) *count = 0;
-        return VK_ERROR_INITIALIZATION_FAILED;
+        return VK_SUCCESS;
     }
 
     *count = min(*count, instance->physical_device_count);
