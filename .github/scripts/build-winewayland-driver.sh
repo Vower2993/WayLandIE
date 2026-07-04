@@ -392,6 +392,164 @@ static VkResult waylandie_wrapped_create_instance(const VkInstanceCreateInfo *ci
     print("  winevulkan chain construction: PATCHED")
 CHAIN_INJECT_EOF
 
+# === winevulkan: Diagnostic logging in wine_vkEnumeratePhysicalDevices ===
+#
+# ROOT CAUSE UNDER INVESTIGATION (Finding #15):
+# Both X11 and Wayland mode crash with c0000005 (NULL pointer access) during
+# the SECOND call to vkEnumeratePhysicalDevices (when filling the device
+# array, not the count query). The first call (count query, devices=NULL)
+# succeeds, proving that vulkan_instance_from_handle() works and
+# instance->physical_device_count is readable. The crash is when reading
+# instance->physical_devices[i].client.physical_device.
+#
+# This patch adds fprintf(stderr) diagnostics to:
+# 1. wine_vkEnumeratePhysicalDevices — log instance, count, physical_devices
+#    pointer, and each device's client.physical_device
+# 2. init_physical_devices (in win32u/vulkan.c) — log that physical_devices
+#    was set, and its value
+#
+# The diagnostics will show exactly which pointer is NULL.
+echo "=== Patching winevulkan: diagnostic logging in wine_vkEnumeratePhysicalDevices ==="
+python3 - <<'ENUMDIAG_EOF'
+path = "dlls/winevulkan/vulkan.c"
+with open(path, "r") as f:
+    src = f.read()
+
+if "WayLandIE diagnostic: vkEnumeratePhysicalDevices" in src:
+    print("  vkEnumeratePhysicalDevices diagnostic: already applied (skipping)")
+else:
+    old_func = """VkResult wine_vkEnumeratePhysicalDevices(VkInstance client_instance, uint32_t *count, VkPhysicalDevice *client_physical_devices)
+{
+    struct vulkan_instance *instance = vulkan_instance_from_handle(client_instance);
+    unsigned int i;
+
+    if (!client_physical_devices)
+    {
+        *count = instance->physical_device_count;
+        return VK_SUCCESS;
+    }
+
+    *count = min(*count, instance->physical_device_count);
+    for (i = 0; i < *count; i++)
+    {
+        client_physical_devices[i] = instance->physical_devices[i].client.physical_device;
+    }
+
+    TRACE("Returning %u devices.\\n", *count);
+    return *count < instance->physical_device_count ? VK_INCOMPLETE : VK_SUCCESS;
+}"""
+
+    new_func = """VkResult wine_vkEnumeratePhysicalDevices(VkInstance client_instance, uint32_t *count, VkPhysicalDevice *client_physical_devices)
+{
+    struct vulkan_instance *instance = vulkan_instance_from_handle(client_instance);
+    unsigned int i;
+
+    /* WayLandIE diagnostic: log all pointer values to find the NULL */
+    fprintf(stderr, "WayLandIE diagnostic: vkEnumeratePhysicalDevices client_instance=%p instance=%p count=%p devices=%p\\n",
+            (void *)client_instance, (void *)instance, (void *)count, (void *)client_physical_devices);
+    if (instance)
+    {
+        fprintf(stderr, "WayLandIE diagnostic: instance->physical_device_count=%u instance->physical_devices=%p\\n",
+                instance->physical_device_count, (void *)instance->physical_devices);
+    }
+    else
+    {
+        fprintf(stderr, "WayLandIE diagnostic: instance is NULL! vulkan_instance_from_handle returned NULL\\n");
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+
+    if (!client_physical_devices)
+    {
+        *count = instance->physical_device_count;
+        fprintf(stderr, "WayLandIE diagnostic: count query returning count=%u\\n", *count);
+        return VK_SUCCESS;
+    }
+
+    if (!instance->physical_devices)
+    {
+        fprintf(stderr, "WayLandIE diagnostic: instance->physical_devices is NULL but physical_device_count=%u!\\n",
+                instance->physical_device_count);
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+
+    *count = min(*count, instance->physical_device_count);
+    fprintf(stderr, "WayLandIE diagnostic: filling %u devices\\n", *count);
+    for (i = 0; i < *count; i++)
+    {
+        client_physical_devices[i] = instance->physical_devices[i].client.physical_device;
+        fprintf(stderr, "WayLandIE diagnostic: device[%u] = %p (from physical_devices[%p].client.physical_device)\\n",
+                i, (void *)client_physical_devices[i], (void *)&instance->physical_devices[i]);
+    }
+
+    TRACE("Returning %u devices.\\n", *count);
+    fprintf(stderr, "WayLandIE diagnostic: returning %u devices\\n", *count);
+    return *count < instance->physical_device_count ? VK_INCOMPLETE : VK_SUCCESS;
+}"""
+
+    if old_func not in src:
+        raise SystemExit("  ERROR: could not find wine_vkEnumeratePhysicalDevices to patch")
+    src = src.replace(old_func, new_func, 1)
+
+    # Also ensure stdio.h is included (it may already be from the chain construction patch)
+    if '#include <stdio.h>' not in src:
+        src = src.replace('#include <time.h>\n', '#include <time.h>\n#include <stdio.h>\n', 1)
+
+    with open(path, "w") as f:
+        f.write(src)
+    print("  vkEnumeratePhysicalDevices diagnostic: PATCHED")
+ENUMDIAG_EOF
+
+# === win32u/vulkan.c: Diagnostic logging in init_physical_devices ===
+echo "=== Patching win32u/vulkan.c: diagnostic logging in init_physical_devices ==="
+python3 - <<'INITDIAG_EOF'
+path = "dlls/win32u/vulkan.c"
+with open(path, "r") as f:
+    src = f.read()
+
+if "WayLandIE diagnostic: init_physical_devices" in src:
+    print("  init_physical_devices diagnostic: already applied (skipping)")
+else:
+    # Add logging at the end of init_physical_devices where physical_devices is set
+    old_set = """    instance->physical_device_count = physical_device_count;
+    instance->physical_devices = physical_devices;
+
+failed:
+    free( host_physical_devices );
+    return res;
+}"""
+
+    new_set = """    instance->physical_device_count = physical_device_count;
+    instance->physical_devices = physical_devices;
+
+    /* WayLandIE diagnostic: confirm physical_devices was set */
+    fprintf(stderr, "WayLandIE diagnostic: init_physical_devices SUCCESS count=%u physical_devices=%p instance=%p\\n",
+            physical_device_count, (void *)physical_devices, (void *)instance);
+    for (i = 0; i < physical_device_count; i++)
+    {
+        fprintf(stderr, "WayLandIE diagnostic: init_physical_devices device[%u] host=%p client=%p client.physical_device=%p\\n",
+                i, (void *)host_physical_devices[i], (void *)&client_instance->physical_device[i],
+                (void *)physical_devices[i].client.physical_device);
+    }
+
+failed:
+    free( host_physical_devices );
+    if (res) fprintf(stderr, "WayLandIE diagnostic: init_physical_devices FAILED res=%d\\n", res);
+    return res;
+}"""
+
+    if old_set not in src:
+        raise SystemExit("  ERROR: could not find init_physical_devices end to patch")
+    src = src.replace(old_set, new_set, 1)
+
+    # Ensure stdio.h is included
+    if '#include <stdio.h>' not in src:
+        src = src.replace('#include "config.h"\n', '#include "config.h"\n#include <stdio.h>\n', 1)
+
+    with open(path, "w") as f:
+        f.write(src)
+    print("  init_physical_devices diagnostic: PATCHED")
+INITDIAG_EOF
+
 # === winevulkan: NO MORE MANUAL_UNIX_THUNKS or winevulkan_dmabuf.c ===
 # The runtime Vulkan layer (libvk_layer_waylandie_dmabuf.so) now handles
 # all swapchain/present interception via standard Vulkan layer interception.
