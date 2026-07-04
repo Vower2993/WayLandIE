@@ -187,8 +187,11 @@ public final class WaylandDriverInstaller {
             // "VK_EXT_surface_maintenance1"  (28 chars) → "VK_EXT_surface_maintenance0" (28 chars)
             // "VK_EXT_swapchain_maintenance1" (29 chars) → "VK_EXT_swapchain_maintenance0" (29 chars)
             // Both are same-length replacements — no overflow.
-            File win32uUnix = new File(wineAarch64Unix, "win32u.dll.so");
-            File win32uPrefix = new File(prefix, "lib/wine/aarch64-unix/win32u.dll.so");
+            //
+            // NOTE: The Unix companion is named win32u.so (UNIXLIB = win32u.so
+            // in Makefile.in), NOT win32u.dll.so.
+            File win32uUnix = new File(wineAarch64Unix, "win32u.so");
+            File win32uPrefix = new File(prefix, "lib/wine/aarch64-unix/win32u.so");
             patchExtensionString(win32uUnix, "VK_EXT_surface_maintenance1", "VK_EXT_surface_maintenance0");
             patchExtensionString(win32uPrefix, "VK_EXT_surface_maintenance1", "VK_EXT_surface_maintenance0");
             patchExtensionString(win32uUnix, "VK_EXT_swapchain_maintenance1", "VK_EXT_swapchain_maintenance0");
