@@ -556,18 +556,36 @@ else:
 
     new_func = """VkResult wine_vkEnumeratePhysicalDevices(VkInstance client_instance, uint32_t *count, VkPhysicalDevice *client_physical_devices)
 {
-    struct vulkan_instance *instance = vulkan_instance_from_handle(client_instance);
-    unsigned int i;
+    struct vulkan_instance *instance;
 
-    /* WayLandIE: NULL guard FIRST — before any other code.
-     * CRITICAL: return VK_SUCCESS with *count=0, NOT VK_ERROR_INITIALIZATION_FAILED.
-     * The PE-side thunk asserts !status (NTSTATUS). Returning an error VkResult
-     * converts to non-zero NTSTATUS → assertion failure → process crash.
-     * Returning VK_SUCCESS with 0 devices is safe — DXVK handles 0 devices
-     * gracefully (reports "no GPU found" instead of crashing). */
+    /* WayLandIE: Diagnostic logging BEFORE any dereference.
+     * Use fprintf(stderr) because it's unbuffered and works even if the
+     * process crashes immediately after. */
+    fprintf(stderr, "WayLandIE: ENTER vkEnumeratePhysicalDevices client_instance=%p count=%p devices=%p\\n",
+            (void *)client_instance, (void *)count, (void *)client_physical_devices);
+
+    if (!client_instance)
+    {
+        fprintf(stderr, "WayLandIE: vkEnumeratePhysicalDevices client_instance is NULL!\\n");
+        if (count) *count = 0;
+        return VK_SUCCESS;
+    }
+
+    instance = vulkan_instance_from_handle(client_instance);
+
+    fprintf(stderr, "WayLandIE: vkEnumeratePhysicalDevices instance=%p physical_device_count=%u physical_devices=%p\\n",
+            (void *)instance, instance ? instance->physical_device_count : 0,
+            (void *)(instance ? instance->physical_devices : NULL));
+
+    /* WayLandIE: NULL guard — return VK_SUCCESS with *count=0.
+     * CRITICAL: The PE-side thunk asserts !status (NTSTATUS). The thunk
+     * always returns STATUS_SUCCESS, so the assertion can only fire if
+     * the Unix side SEGFAULTS. Returning VK_SUCCESS ensures the function
+     * returns normally (no segfault) even if instance/physical_devices
+     * is NULL. */
     if (!instance)
     {
-        ERR("WayLandIE: vkEnumeratePhysicalDevices instance is NULL! client_instance=%p\\n", (void *)client_instance);
+        fprintf(stderr, "WayLandIE: vkEnumeratePhysicalDevices instance is NULL!\\n");
         if (count) *count = 0;
         return VK_SUCCESS;
     }
@@ -575,13 +593,14 @@ else:
     if (!client_physical_devices)
     {
         *count = instance->physical_device_count;
+        fprintf(stderr, "WayLandIE: vkEnumeratePhysicalDevices count query → %u\\n", *count);
         return VK_SUCCESS;
     }
 
     if (!instance->physical_devices)
     {
-        ERR("WayLandIE: vkEnumeratePhysicalDevices physical_devices is NULL! count=%u instance=%p\\n",
-            instance->physical_device_count, (void *)instance);
+        fprintf(stderr, "WayLandIE: vkEnumeratePhysicalDevices physical_devices is NULL! count=%u\\n",
+                instance->physical_device_count);
         if (count) *count = 0;
         return VK_SUCCESS;
     }
