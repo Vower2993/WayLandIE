@@ -331,39 +331,27 @@ static VkResult waylandie_wrapped_create_instance(const VkInstanceCreateInfo *ci
         }
     }
 
-    /* Translate VK_KHR_win32_surface → VK_KHR_xlib_surface in the extension
-     * list before calling vk_funcs->p_vkCreateInstance.
+    /* DO NOT translate VK_KHR_win32_surface → VK_KHR_xlib_surface here.
      *
-     * The HOST driver (Turnip via adrenotools) does NOT support
-     * VK_KHR_win32_surface. It supports VK_KHR_xlib_surface. DXVK requests
-     * VK_KHR_win32_surface. We must translate it.
+     * The winewayland driver's wayland_map_instance_extensions() (in
+     * winewayland-drv/vulkan.c) ALREADY handles this mapping:
+     *   if (extensions->has_VK_KHR_win32_surface) extensions->has_VK_KHR_xlib_surface = 1;
      *
-     * vk_funcs->p_vkCreateInstance is win32u_vkCreateInstance which calls
-     * the raw HOST driver. The HOST driver sees the translated extension
-     * list and accepts it. */
+     * convert_instance_create_info() in win32u/vulkan.c reads these flags
+     * to decide which HOST extensions to enable. If we translate the extension
+     * name in the create_info BEFORE convert_instance_create_info runs, the
+     * PE-side is_instance_extension_supported() sees VK_KHR_xlib_surface
+     * (not VK_KHR_win32_surface), so has_VK_KHR_win32_surface is NOT set.
+     * This breaks the check at line 502:
+     *   if (instance->obj.extensions.has_VK_KHR_win32_surface && ...)
+     *       instance->obj.extensions.has_VK_EXT_surface_maintenance1 = 1;
+     * which then doesn't enable VK_EXT_surface_maintenance1, causing the HOST
+     * driver to reject the instance with VK_ERROR_EXTENSION_NOT_PRESENT (-7).
+     *
+     * The wrapper should pass the create_info as-is to vk_funcs->p_vkCreateInstance.
+     * The winewayland driver handles the extension mapping internally. */
     VkInstanceCreateInfo translated_ci = *ci;
-    const char **translated_exts = NULL;
-    if (ci->enabledExtensionCount > 0 && ci->ppEnabledExtensionNames)
-    {
-        translated_exts = (const char **)calloc(ci->enabledExtensionCount, sizeof(const char *));
-        if (translated_exts)
-        {
-            for (uint32_t i = 0; i < ci->enabledExtensionCount; i++)
-            {
-                if (ci->ppEnabledExtensionNames[i] &&
-                    strcmp(ci->ppEnabledExtensionNames[i], "VK_KHR_win32_surface") == 0)
-                {
-                    translated_exts[i] = "VK_KHR_xlib_surface";
-                    fprintf(stderr, "WayLandIE wrapper: translated VK_KHR_win32_surface -> VK_KHR_xlib_surface\n");
-                }
-                else
-                {
-                    translated_exts[i] = ci->ppEnabledExtensionNames[i];
-                }
-            }
-            translated_ci.ppEnabledExtensionNames = translated_exts;
-        }
-    }
+    /* No extension translation — pass through as-is */
 
     /* Call the ORIGINAL vk_funcs->p_vkCreateInstance (win32u_vkCreateInstance).
      * This properly creates the vulkan_instance struct, enumerates physical
@@ -372,7 +360,6 @@ static VkResult waylandie_wrapped_create_instance(const VkInstanceCreateInfo *ci
     VkResult res = vk_funcs->p_vkCreateInstance(&translated_ci, alloc, inst);
     fprintf(stderr, "WayLandIE wrapper: vkCreateInstance returned res=%d instance=%p\n",
             res, (void *)(inst ? *inst : NULL));
-    if (translated_exts) free(translated_exts);
     return res;
 }
 """
