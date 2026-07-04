@@ -293,6 +293,7 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/bionic-libs/lib/libwayland-server.a")
 
     target_compile_definitions(waylandie_bridge_exe PRIVATE
         WAYLANDIE_NO_XTEST
+        WAYLANDIE_HAS_AHARDWAREBUFFER
         _WAYLAND_SERVER_NOPLUGINS
         _GNU_SOURCE
         __ANDROID_MIN_SDK_VERSION__=31
@@ -305,8 +306,10 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/bionic-libs/lib/libwayland-server.a")
     )
 
     find_library(log-lib-exe log)
+    find_library(android-lib-exe android)
     target_link_libraries(waylandie_bridge_exe
         ${log-lib-exe}
+        ${android-lib-exe}
         -Wl,--whole-archive
         ${CMAKE_CURRENT_SOURCE_DIR}/bionic-libs/lib/libwayland-server.a
         ${CMAKE_CURRENT_SOURCE_DIR}/bionic-libs/lib/libffi.a
