@@ -6564,9 +6564,25 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
             // Disable explorer.exe in Wayland mode — wineboot auto-launches it
             // as the shell, but it crashes (nodrv_CreateWindow) and triggers
             // LdrShutdownProcess, killing the wine session before the game loads.
-            if (!wlOverrides.contains("explorer.exe")) {
-                wlOverrides += (wlOverrides.isEmpty() ? "" : ";") + "explorer.exe=";
-            }
+            //
+            // UPDATE: explorer.exe is REQUIRED for graphics driver loading.
+            // load_desktop_driver() in dlls/win32u/driver.c reads the
+            // __wine_display_device_guid window property (set by explorer)
+            // and the GraphicsDriver registry value (set by explorer) to
+            // load winewayland.drv. Without explorer, no driver loads,
+            // null_user_driver is used, and nodrv_CreateWindow fires.
+            //
+            // The original crash was c0000135 (DLL_NOT_FOUND) — explorer
+            // couldn't find a DLL. The fix is to ensure winewayland.so's
+            // dependencies (libwayland-client.so) are in LD_LIBRARY_PATH,
+            // NOT to disable explorer.
+            //
+            // RE-ENABLING explorer.exe. If it crashes again, the crash is
+            // the real bug to fix — disabling explorer just masks it and
+            // breaks the entire graphics driver loading chain.
+            // if (!wlOverrides.contains("explorer.exe")) {
+            //     wlOverrides += (wlOverrides.isEmpty() ? "" : ";") + "explorer.exe=";
+            // }
             // Do NOT add winex11.drv= — let it load as fallback
             envVars.put("WINEDLLOVERRIDES", wlOverrides);
             Log.i("XServerDisplayActivity", "Wayland WINEDLLOVERRIDES: " + wlOverrides);
@@ -6581,11 +6597,12 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
             envVars.put("WAYLANDIE_BRIDGE_SOCKET", "waylandie.display.bridge.v1");
 
             // === GLOBAL DIAGNOSTIC TRACING — full stack visibility ===
-            // Force Wine to trace vulkan, winewayland, and x11 subsystems so we
-            // see every surface creation attempt, display connection, and failure.
-            // These channels are cheap (not +relay) and route to stderr/stdout
-            // which is captured in wine_limbo_*.txt logs.
-            envVars.put("WINEDEBUG", "+vulkan,+winewayland,+x11");
+            // Force Wine to trace vulkan, waylanddrv, x11, module loading, and
+            // loader internals so we see every surface creation, display connection,
+            // DLL load, and driver init.
+            // NOTE: the winewayland driver's debug channel is "waylanddrv" (not
+            // "winewayland") — see WINE_DEFAULT_DEBUG_CHANNEL in dlls/winewayland.drv/*.c
+            envVars.put("WINEDEBUG", "+vulkan,+waylanddrv,+x11,+module,+loaddll,+loader");
 
             // DXVK telemetry: log extension probing and pipeline compilation stalls
             envVars.put("DXVK_LOG_LEVEL", "info");
