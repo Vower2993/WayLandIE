@@ -434,13 +434,15 @@ static VkResult waylandie_wrapped_create_instance(const VkInstanceCreateInfo *ci
             client_instance->extensions.has_VK_KHR_xlib_surface = 1;
             fprintf(stderr, "WayLandIE wrapper: BITFIELD translated has_VK_KHR_win32_surface → has_VK_KHR_xlib_surface\n");
         }
-        /* Force-disable surface_maintenance1 + swapchain_maintenance1.
-         * The Turnip driver doesn't support them. The auto-enable at
+        /* Force-disable surface_maintenance1.
+         * The Turnip driver doesn't support it. The auto-enable at
          * line 502 checks has_VK_KHR_win32_surface (now 0), so it won't
-         * fire. But belt-and-suspenders: clear the bits directly too. */
+         * fire. But belt-and-suspenders: clear the bit directly too.
+         * NOTE: VK_EXT_swapchain_maintenance1 is a DEVICE extension, not
+         * an instance extension — it's not in vulkan_instance_extensions.
+         * It will be handled at vkCreateDevice time if needed. */
         client_instance->extensions.has_VK_EXT_surface_maintenance1 = 0;
-        client_instance->extensions.has_VK_EXT_swapchain_maintenance1 = 0;
-        fprintf(stderr, "WayLandIE wrapper: BITFIELD cleared surface_maintenance1 + swapchain_maintenance1\n");
+        fprintf(stderr, "WayLandIE wrapper: BITFIELD cleared surface_maintenance1\n");
     }
 
     /* Call the ORIGINAL vk_funcs->p_vkCreateInstance (win32u_vkCreateInstance).
