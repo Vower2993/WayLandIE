@@ -557,6 +557,7 @@ else:
     new_func = """VkResult wine_vkEnumeratePhysicalDevices(VkInstance client_instance, uint32_t *count, VkPhysicalDevice *client_physical_devices)
 {
     struct vulkan_instance *instance;
+    unsigned int i;
 
     /* WayLandIE: Diagnostic logging BEFORE any dereference.
      * Use fprintf(stderr) because it's unbuffered and works even if the
