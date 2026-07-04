@@ -851,6 +851,21 @@ static void append_bridge_token(char *out, size_t out_size, const char *text) {
 }
 
 static int response_is_pass(const char *response, size_t response_len) {
+    /* Strip trailing whitespace/newline so the end-check works even when
+     * the Java side appends "\n" to the response (which it always does
+     * via os.write((response + "\n").getBytes())). Without this, both
+     * checks below fail for a "...status=pass\n" response:
+     *   1. strstr(response, " status=pass ") needs a trailing SPACE —
+     *      but the response has "status=pass\n" (newline, not space)
+     *   2. memcmp at response+response_len-11 compares "tatus=pass\n"
+     *      (shifted by 1 because the \n is included in response_len) */
+    while (response_len > 0
+            && (response[response_len - 1] == '\n'
+                    || response[response_len - 1] == '\r'
+                    || response[response_len - 1] == ' '
+                    || response[response_len - 1] == '\t')) {
+        response_len--;
+    }
     return strstr(response, " status=pass ") != NULL
             || (response_len >= strlen("status=pass")
                     && memcmp(response + response_len - strlen("status=pass"),

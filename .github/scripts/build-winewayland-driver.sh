@@ -338,20 +338,47 @@ static VkResult waylandie_wrapped_create_instance(const VkInstanceCreateInfo *ci
      *   if (extensions->has_VK_KHR_win32_surface) extensions->has_VK_KHR_xlib_surface = 1;
      *
      * convert_instance_create_info() in win32u/vulkan.c reads these flags
-     * to decide which HOST extensions to enable. If we translate the extension
-     * name in the create_info BEFORE convert_instance_create_info runs, the
-     * PE-side is_instance_extension_supported() sees VK_KHR_xlib_surface
-     * (not VK_KHR_win32_surface), so has_VK_KHR_win32_surface is NOT set.
-     * This breaks the check at line 502:
-     *   if (instance->obj.extensions.has_VK_KHR_win32_surface && ...)
-     *       instance->obj.extensions.has_VK_EXT_surface_maintenance1 = 1;
-     * which then doesn't enable VK_EXT_surface_maintenance1, causing the HOST
-     * driver to reject the instance with VK_ERROR_EXTENSION_NOT_PRESENT (-7).
+     * to decide which HOST extensions to enable.
      *
-     * The wrapper should pass the create_info as-is to vk_funcs->p_vkCreateInstance.
-     * The winewayland driver handles the extension mapping internally. */
+     * HOWEVER: winevulkan auto-enables VK_EXT_surface_maintenance1 when
+     * has_VK_KHR_win32_surface is set. The Turnip driver does NOT support
+     * VK_EXT_surface_maintenance1, causing vkCreateInstance to return -7
+     * (VK_ERROR_EXTENSION_NOT_PRESENT). DXVK requests this extension but
+     * it's optional — DXVK can function without it.
+     *
+     * Fix: strip VK_EXT_surface_maintenance1 from the client extension list
+     * before passing to vk_funcs->p_vkCreateInstance. This prevents
+     * winevulkan from setting has_VK_EXT_surface_maintenance1 from the
+     * client request. The auto-enable check in win32u/vulkan.c may still
+     * set it, but we also patch that out separately (see win32u patch
+     * below). Belt and suspenders.
+     *
+     * We also strip VK_EXT_swapchain_maintenance1 because it depends on
+     * VK_EXT_surface_maintenance1 and the Turnip driver may reject it too. */
     VkInstanceCreateInfo translated_ci = *ci;
-    /* No extension translation — pass through as-is */
+
+    /* Strip unsupported surface/swapchain maintenance extensions.
+     * Allocate a new extension array (don't modify the original). */
+    const char **stripped_exts = NULL;
+    if (ci->enabledExtensionCount > 0 && ci->ppEnabledExtensionNames) {
+        stripped_exts = (const char **)calloc(ci->enabledExtensionCount, sizeof(const char *));
+        if (stripped_exts) {
+            uint32_t out_count = 0;
+            for (uint32_t i = 0; i < ci->enabledExtensionCount; i++) {
+                const char *ext = ci->ppEnabledExtensionNames[i];
+                if (ext && (strcmp(ext, "VK_EXT_surface_maintenance1") == 0
+                            || strcmp(ext, "VK_EXT_swapchain_maintenance1") == 0)) {
+                    fprintf(stderr, "WayLandIE wrapper: stripping unsupported extension '%s'\n", ext);
+                } else {
+                    stripped_exts[out_count++] = ext;
+                }
+            }
+            translated_ci.enabledExtensionCount = out_count;
+            translated_ci.ppEnabledExtensionNames = stripped_exts;
+            fprintf(stderr, "WayLandIE wrapper: %u → %u extensions (stripped maintenance1)\n",
+                    ci->enabledExtensionCount, out_count);
+        }
+    }
 
     /* Call the ORIGINAL vk_funcs->p_vkCreateInstance (win32u_vkCreateInstance).
      * This properly creates the vulkan_instance struct, enumerates physical
@@ -360,6 +387,7 @@ static VkResult waylandie_wrapped_create_instance(const VkInstanceCreateInfo *ci
     VkResult res = vk_funcs->p_vkCreateInstance(&translated_ci, alloc, inst);
     fprintf(stderr, "WayLandIE wrapper: vkCreateInstance returned res=%d instance=%p\n",
             res, (void *)(inst ? *inst : NULL));
+    if (stripped_exts) free(stripped_exts);
     return res;
 }
 """
