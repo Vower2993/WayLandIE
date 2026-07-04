@@ -6596,13 +6596,19 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
             envVars.put("WAYLANDIE_DMABUF_LAYER_ENABLE", "1");
             envVars.put("WAYLANDIE_BRIDGE_SOCKET", "waylandie.display.bridge.v1");
 
-            // === GLOBAL DIAGNOSTIC TRACING — full stack visibility ===
-            // Force Wine to trace vulkan, waylanddrv, x11, module loading, and
-            // loader internals so we see every surface creation, display connection,
-            // DLL load, and driver init.
-            // NOTE: the winewayland driver's debug channel is "waylanddrv" (not
-            // "winewayland") — see WINE_DEFAULT_DEBUG_CHANNEL in dlls/winewayland.drv/*.c
-            envVars.put("WINEDEBUG", "+vulkan,+waylanddrv,+x11,+module,+loaddll,+loader");
+            // === GLOBAL DIAGNOSTIC TRACING ===
+            // Reduce WINEDEBUG to ONLY waylanddrv — the +vulkan channel floods the
+            // 80KB logcat buffer with init_physical_device extension listing lines,
+            // drowning out the WayLandIE diagnostic fprintf(stderr) output that we
+            // need to see. The fprintf(stderr) lines (from our patches) bypass
+            // WINEDEBUG and always appear, but we need waylanddrv to see if
+            // winewayland.drv connects to the bridge compositor.
+            //
+            // NOTE: fprintf(stderr) output is UNBUFFERED (setbuf(stderr,NULL) in
+            // dlls/ntdll/unix/debug.c) so it always appears in the log, regardless
+            // of WINEDEBUG settings. But the 80KB logcat buffer cap can still
+            // truncate it if there's too much other output.
+            envVars.put("WINEDEBUG", "+waylanddrv");
 
             // DXVK telemetry: log extension probing and pipeline compilation stalls
             envVars.put("DXVK_LOG_LEVEL", "info");
