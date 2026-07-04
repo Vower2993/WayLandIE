@@ -357,8 +357,24 @@ static VkResult waylandie_wrapped_create_instance(const VkInstanceCreateInfo *ci
      * VK_EXT_surface_maintenance1 and the Turnip driver may reject it too. */
     VkInstanceCreateInfo translated_ci = *ci;
 
-    /* Strip unsupported surface/swapchain maintenance extensions.
-     * Allocate a new extension array (don't modify the original). */
+    /* Strip unsupported surface/swapchain maintenance extensions AND
+     * translate VK_KHR_win32_surface → VK_KHR_xlib_surface.
+     *
+     * The translation is needed because:
+     * 1. DXVK requests VK_KHR_win32_surface (its natural behavior)
+     * 2. winewayland.drv's wayland_map_instance_extensions would translate
+     *    win32_surface → xlib_surface at the flag level, BUT winewayland.drv
+     *    is NOT loaded for game processes (nodrv_CreateWindow error in logs)
+     * 3. Without the driver, win32u.so uses nulldrv which maps win32_surface
+     *    → headless_surface (not xlib_surface) → HOST rejects with -7
+     *
+     * By translating the extension NAME in the create_info, the bitfield
+     * gets has_VK_KHR_xlib_surface set (not has_VK_KHR_win32_surface), and
+     * convert_instance_create_info outputs VK_KHR_xlib_surface to the HOST.
+     * The Turnip driver (via adrenotools) supports VK_KHR_xlib_surface.
+     *
+     * We ALSO strip VK_EXT_surface_maintenance1 and VK_EXT_swapchain_maintenance1
+     * because the Turnip driver doesn't support them. */
     const char **stripped_exts = NULL;
     if (ci->enabledExtensionCount > 0 && ci->ppEnabledExtensionNames) {
         stripped_exts = (const char **)calloc(ci->enabledExtensionCount, sizeof(const char *));
@@ -366,16 +382,20 @@ static VkResult waylandie_wrapped_create_instance(const VkInstanceCreateInfo *ci
             uint32_t out_count = 0;
             for (uint32_t i = 0; i < ci->enabledExtensionCount; i++) {
                 const char *ext = ci->ppEnabledExtensionNames[i];
-                if (ext && (strcmp(ext, "VK_EXT_surface_maintenance1") == 0
-                            || strcmp(ext, "VK_EXT_swapchain_maintenance1") == 0)) {
+                if (!ext) continue;
+                if (strcmp(ext, "VK_EXT_surface_maintenance1") == 0
+                        || strcmp(ext, "VK_EXT_swapchain_maintenance1") == 0) {
                     fprintf(stderr, "WayLandIE wrapper: stripping unsupported extension '%s'\n", ext);
+                } else if (strcmp(ext, "VK_KHR_win32_surface") == 0) {
+                    stripped_exts[out_count++] = "VK_KHR_xlib_surface";
+                    fprintf(stderr, "WayLandIE wrapper: translated VK_KHR_win32_surface → VK_KHR_xlib_surface\n");
                 } else {
                     stripped_exts[out_count++] = ext;
                 }
             }
             translated_ci.enabledExtensionCount = out_count;
             translated_ci.ppEnabledExtensionNames = stripped_exts;
-            fprintf(stderr, "WayLandIE wrapper: %u → %u extensions (stripped maintenance1)\n",
+            fprintf(stderr, "WayLandIE wrapper: %u → %u extensions (stripped maintenance1 + translated win32_surface)\n",
                     ci->enabledExtensionCount, out_count);
         }
     }
