@@ -384,6 +384,12 @@ static VkResult waylandie_wrapped_create_instance(const VkInstanceCreateInfo *ci
      * This properly creates the vulkan_instance struct, enumerates physical
      * devices, and sets up all dispatch tables. */
     fprintf(stderr, "WayLandIE wrapper: calling vk_funcs->p_vkCreateInstance (win32u_vkCreateInstance) — crash here = inside init_physical_device\n");
+    fprintf(stderr, "WayLandIE wrapper: passing %u extensions to HOST:\n",
+            translated_ci.enabledExtensionCount);
+    for (uint32_t i = 0; i < translated_ci.enabledExtensionCount; i++) {
+        fprintf(stderr, "WayLandIE wrapper:   [%u] %s\n", i,
+                translated_ci.ppEnabledExtensionNames ? translated_ci.ppEnabledExtensionNames[i] : "(null)");
+    }
     VkResult res = vk_funcs->p_vkCreateInstance(&translated_ci, alloc, inst);
     fprintf(stderr, "WayLandIE wrapper: vkCreateInstance returned res=%d instance=%p\n",
             res, (void *)(inst ? *inst : NULL));
