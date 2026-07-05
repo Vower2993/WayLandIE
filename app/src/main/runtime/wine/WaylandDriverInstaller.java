@@ -105,6 +105,12 @@ public final class WaylandDriverInstaller {
             if (arm64ecDir.isDirectory()) {
                 copyIfExists(prefix, "lib/wine/aarch64-windows/libarm64ecfex.dll", arm64ecDir);
                 copyIfExists(prefix, "lib/wine/aarch64-windows/ntdll.dll", arm64ecDir);
+                // Copy winewayland.drv to arm64ec-windows too — it's a hybrid ARM64X DLL
+                // that contains both aarch64 and arm64ec code. Wine's loader picks the
+                // right code path at runtime. Without this, explorer.exe (which runs as
+                // arm64ec via FEX) can't find winewayland.drv → nodrv_CreateWindow →
+                // "The explorer process failed to start" → no desktop → wfm.exe exits.
+                copyIfExists(prefix, "lib/wine/aarch64-windows/winewayland.drv", arm64ecDir);
                 // NOTE: winevulkan.dll NOT copied to arm64ec — stock Proton version used
             } else {
                 Log.i(TAG, "ensureDriverInstalled: arm64ec-windows dir not present — skipping arm64ec copies");
