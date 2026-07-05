@@ -300,8 +300,26 @@ DESTDIR="$BIONIC_LIBS" ninja -C build install 2>&1 | tail -5
 
 # Meson installs to $BIONIC_LIBS/usr/local/{lib,include} because of --prefix=/usr/local
 # But Wine expects libs in $BIONIC_LIBS/lib and headers in $BIONIC_LIBS/include
-# Copy them to the expected locations
-cp -r "$BIONIC_LIBS/usr/local/include/xkbcommon" "$BIONIC_LIBS/include/xkbcommon" 2>/dev/null ||cp "$BIONIC_LIBS/usr/local/lib/libxkbcommon.a" "$BIONIC_LIBS/lib/" 2>/dev/null ||cp "$BIONIC_LIBS/usr/local/lib/pkgconfig/xkbcommon.pc" "$BIONIC_LIBS/lib/pkgconfig/" 2>/dev/null ||
+# Copy them to the expected locations.
+#
+# CRITICAL FIX: Each cp must run independently. The previous code used || chaining
+# which meant: if the FIRST cp succeeded, the other two were NEVER executed.
+# This caused libxkbcommon.a to be missing from $BIONIC_LIBS/lib/, which made
+# winewayland.so fail to link with "unable to find library -lxkbcommon".
+# Without winewayland.so, Wine can't load winewayland.drv → nodrv_CreateWindow
+# → blank dark screen for both desktop and games.
+mkdir -p "$BIONIC_LIBS/lib/pkgconfig" "$BIONIC_LIBS/include/xkbcommon"
+cp -r "$BIONIC_LIBS/usr/local/include/xkbcommon/"* "$BIONIC_LIBS/include/xkbcommon/" 2>/dev/null && echo "  Copied xkbcommon headers"
+cp "$BIONIC_LIBS/usr/local/lib/libxkbcommon.a" "$BIONIC_LIBS/lib/" 2>/dev/null && echo "  Copied libxkbcommon.a"
+cp "$BIONIC_LIBS/usr/local/lib/pkgconfig/xkbcommon.pc" "$BIONIC_LIBS/lib/pkgconfig/" 2>/dev/null && echo "  Copied xkbcommon.pc"
+# Verify libxkbcommon.a was copied — FATAL if missing
+if [ ! -f "$BIONIC_LIBS/lib/libxkbcommon.a" ] || [ "$(stat -c%s "$BIONIC_LIBS/lib/libxkbcommon.a")" -lt 1000 ]; then
+    echo "FATAL: libxkbcommon.a missing from $BIONIC_LIBS/lib/ after copy"
+    echo "  Source: $BIONIC_LIBS/usr/local/lib/libxkbcommon.a"
+    ls -la "$BIONIC_LIBS/usr/local/lib/" 2>/dev/null | grep xkb || echo "  (no xkb files in usr/local/lib)"
+    exit 1
+fi
+echo "  ✓ libxkbcommon.a: $(stat -c%s "$BIONIC_LIBS/lib/libxkbcommon.a") bytes"
 # Create a stub libxkbregistry.a so Wine's link test passes.
 # We disabled xkbregistry because it requires libxml2 (not available for bionic).
 # Wine only uses xkbregistry for keyboard layout enumeration — not needed for
@@ -780,9 +798,11 @@ if [ "$DRV_SIZE" -lt 1000 ]; then
 fi
 
 if [ "$SO_SIZE" -lt 1000 ]; then
-  echo "FATAL: winewayland.so missing or too small"
+  echo "FATAL: winewayland.so missing or too small — winewayland.drv CANNOT load without it"
   echo "=== winewayland.so build output (last 80 lines) ==="
-  make -j$(nproc) dlls/winewayland.drv/winewayland.so V=1 2>&1 | tail -80 ||  exit 1
+  make -j$(nproc) dlls/winewayland.drv/winewayland.so V=1 2>&1 | tail -80
+  echo "=== FATAL: aborting build — winewayland.so is required for Wayland mode ==="
+  exit 1
 fi
 
 
