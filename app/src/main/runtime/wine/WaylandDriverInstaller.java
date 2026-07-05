@@ -100,20 +100,22 @@ public final class WaylandDriverInstaller {
             // NOTE: winevulkan.so and win32u.so are NOT replaced — we use stock Proton versions
             // to avoid struct layout mismatches. Only winewayland.so is source-built.
             // NOTE: winevulkan.dll is NOT replaced — stock Proton version + binary patch only
-            // arm64ec-windows dir may not exist in all Proton builds — only copy if dir exists
+            // arm64ec-windows dir may not exist in all Proton builds — CREATE it if needed.
+            // Without winewayland.drv in arm64ec-windows/, explorer.exe (arm64ec via FEX)
+            // can't find the driver → nodrv_CreateWindow → no desktop → wfm.exe exits.
             File arm64ecDir = new File(winePath, "lib/wine/arm64ec-windows");
+            if (!arm64ecDir.isDirectory()) {
+                arm64ecDir.mkdirs();
+                Log.i(TAG, "ensureDriverInstalled: created arm64ec-windows dir at " + arm64ecDir);
+            }
             if (arm64ecDir.isDirectory()) {
                 copyIfExists(prefix, "lib/wine/aarch64-windows/libarm64ecfex.dll", arm64ecDir);
                 copyIfExists(prefix, "lib/wine/aarch64-windows/ntdll.dll", arm64ecDir);
-                // Copy winewayland.drv to arm64ec-windows too — it's a hybrid ARM64X DLL
+                // Copy winewayland.drv to arm64ec-windows — it's a hybrid ARM64X DLL
                 // that contains both aarch64 and arm64ec code. Wine's loader picks the
-                // right code path at runtime. Without this, explorer.exe (which runs as
-                // arm64ec via FEX) can't find winewayland.drv → nodrv_CreateWindow →
-                // "The explorer process failed to start" → no desktop → wfm.exe exits.
+                // right code path at runtime.
                 copyIfExists(prefix, "lib/wine/aarch64-windows/winewayland.drv", arm64ecDir);
                 // NOTE: winevulkan.dll NOT copied to arm64ec — stock Proton version used
-            } else {
-                Log.i(TAG, "ensureDriverInstalled: arm64ec-windows dir not present — skipping arm64ec copies");
             }
 
             // Binary-patch winevulkan.dll to replace VK_KHR_wayland_surface → VK_KHR_xlib_surface.
