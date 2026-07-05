@@ -107,13 +107,6 @@ if [ -d "$WLD_SRC" ]; then
     if [ -f "$WDRV_MAIN" ]; then
         # Add fprintf after each major step in DllMain
         # Insert logging at the top of the file (after includes)
-        sed -i '1a #include <stdio.h>' "$WDRV_MAIN"
-
-        # Log DLL_PROCESS_ATTACH entry
-        sed -i '/DLL_PROCESS_ATTACH/,/case/{/case/i\    fprintf(stderr, "WayLandIE-DIAG: DllMain DLL_PROCESS_ATTACH pid=%d\\n", (int)getpid());' "$WDRV_MAIN"
-
-        # Log wayland_process_init call result
-        sed -i '/wayland_process_init/,/return/{/return/i\        fprintf(stderr, "WayLandIE-DIAG: wayland_process_init returned %d\\n", wayland_process_init());' "$WDRV_MAIN" 2>/dev/null || true
 
         # Simpler approach: just add a wrapper around wayland_process_init
         python3 -c "
@@ -121,6 +114,10 @@ import re
 path = '$WDRV_MAIN'
 with open(path) as f:
     src = f.read()
+
+# Add stdio.h include
+if '#include <stdio.h>' not in src:
+    src = src.replace('#include "config.h"', '#include "config.h"\n#include <stdio.h>', 1)
 
 # Add logging before and after wayland_process_init() call
 src = src.replace(
