@@ -132,6 +132,7 @@ if 'USER_LOCK_DIAG' in content:
 else:
     # Add diagnostic infrastructure after config.h include
     diag_header = r'''#include "config.h"
+#include <stdio.h>
 #include <execinfo.h>
 #include <dlfcn.h>
 
@@ -194,14 +195,20 @@ static void user_lock_diag_backtrace(const char *context)
     else:
         print("  WARNING: could not find wayland_buffer_queue_get_free_buffer")
 
-    # Instrument any wl_display_dispatch* calls
-    content = content.replace(
-        'wl_display_dispatch_queue_pending(',
-        'USER_LOCK_DIAG_CHECK("wl_display_dispatch_queue_pending PRE"); wl_display_dispatch_queue_pending(')
-    content = content.replace(
-        'wl_display_dispatch_queue(',
-        'USER_LOCK_DIAG_CHECK("wl_display_dispatch_queue PRE"); wl_display_dispatch_queue(')
-    print("  Instrumented wl_display_dispatch* calls")
+    # Instrument any wl_display_dispatch* calls — safe mode (only indented lines)
+    lines = content.split('\n')
+    new_lines = []
+    for line in lines:
+        stripped = line.lstrip()
+        indent = line[:len(line)-len(stripped)]
+        if stripped.startswith('wl_display_dispatch_queue_pending(') and indent:
+            new_lines.append(f'{indent}USER_LOCK_DIAG_CHECK("wl_display_dispatch_queue_pending PRE"); {stripped}')
+        elif stripped.startswith('wl_display_dispatch_queue(') and indent:
+            new_lines.append(f'{indent}USER_LOCK_DIAG_CHECK("wl_display_dispatch_queue PRE"); {stripped}')
+        else:
+            new_lines.append(line)
+    content = '\n'.join(new_lines)
+    print("  Instrumented wl_display_dispatch* calls (safe mode)")
 
 with open('dlls/winewayland.drv/window_surface.c', 'w') as f:
     f.write(content)
@@ -220,6 +227,7 @@ if 'USER_LOCK_DIAG' not in content:
     content = content.replace(
         '#include "config.h"',
         '''#include "config.h"
+#include <stdio.h>
 #include <execinfo.h>
 #include <dlfcn.h>
 extern unsigned int user_lock_thread;
@@ -233,10 +241,24 @@ static void user_lock_diag_bt(const char *ctx)
 }
 #define ULDC(ctx) do { if (user_lock_thread != 0) user_lock_diag_bt(ctx); } while(0)''',
         1)
-    # Instrument dispatch calls
-    content = content.replace('wl_display_dispatch_queue_pending(', 'ULDC("read_events dispatch_pending"); wl_display_dispatch_queue_pending(')
-    content = content.replace('wl_display_dispatch_queue(', 'ULDC("read_events dispatch_queue"); wl_display_dispatch_queue(')
-    print("  Instrumented waylanddrv_main.c")
+    # Instrument dispatch calls — only in function bodies, not declarations
+    import re
+    # Only replace wl_display_dispatch_queue_pending( that appear after a statement (not in declarations)
+    # Simple approach: replace "    wl_display_dispatch" (indented = inside function body)
+    lines = content.split('\n')
+    new_lines = []
+    for line in lines:
+        stripped = line.lstrip()
+        indent = line[:len(line)-len(stripped)]
+        # Only instrument if it's inside a function body (has indentation) and is a statement
+        if stripped.startswith('wl_display_dispatch_queue_pending(') and indent:
+            new_lines.append(f'{indent}ULDC("read_events dispatch_pending"); {stripped}')
+        elif stripped.startswith('wl_display_dispatch_queue(') and indent:
+            new_lines.append(f'{indent}ULDC("read_events dispatch_queue"); {stripped}')
+        else:
+            new_lines.append(line)
+    content = '\n'.join(new_lines)
+    print("  Instrumented waylanddrv_main.c (safe mode)")
 
 with open('dlls/winewayland.drv/waylanddrv_main.c', 'w') as f:
     f.write(content)
