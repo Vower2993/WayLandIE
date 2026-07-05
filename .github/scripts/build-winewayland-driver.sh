@@ -209,11 +209,42 @@ if re.search(pattern, c, re.DOTALL):
         f.write(c)
     print("  Patch applied: wl_display_dispatch_queue_pending removed")
 else:
-    print("  ERROR: could not find wl_display_dispatch_queue_pending pattern")
-    # Show what's there for debugging
-    for i, line in enumerate(c.split('\n')):
-        if 'dispatch_queue_pending' in line or 'wl_event_queue' in line:
-            print(f"    line {i+1}: {line.rstrip()}")
+    print("  WARNING: could not find wl_display_dispatch_queue_pending in window_surface.c")
+
+# Also patch wayland_surface.c: make wayland_shm_buffer_unref NOT call
+# NtGdiDeleteObjectApp (which re-enters win32u and triggers user_check_not_lock).
+# Instead, just leak the damage_region HRGN — it's a small GDI object and
+# leaking it is better than crashing. The region is recreated on each flush.
+print("  Patching wayland_surface.c: neutralize NtGdiDeleteObjectApp")
+try:
+    with open('dlls/winewayland.drv/wayland_surface.c', 'r') as f:
+        surface_c = f.read()
+
+    # Count before
+    before = surface_c.count('NtGdiDeleteObjectApp')
+
+    # Simple replacement: NtGdiDeleteObjectApp(x) -> (void)(x)
+    # This evaluates the argument (no side effects skipped) but doesn't call win32u
+    import re
+    surface_c = re.sub(
+        r'NtGdiDeleteObjectApp\s*\(',
+        '/* LEAK: was NtGdiDeleteObjectApp */ (void)(',
+        surface_c)
+
+    after = surface_c.count('NtGdiDeleteObjectApp')
+    print(f"  NtGdiDeleteObjectApp calls: {before} before, {after} after patch")
+
+    if before > 0 and after < before:
+        with open('dlls/winewayland.drv/wayland_surface.c', 'w') as f:
+            f.write(surface_c)
+        print("  Patch applied: NtGdiDeleteObjectApp neutralized in wayland_surface.c")
+    else:
+        print("  WARNING: NtGdiDeleteObjectApp patch did not apply")
+
+except FileNotFoundError:
+    print("  WARNING: wayland_surface.c not found")
+except Exception as e:
+    print(f"  ERROR patching wayland_surface.c: {e}")
 PYDISP
 
     echo "  dmabuf sources + XKB fix + USER-lock re-entrancy fix applied"
