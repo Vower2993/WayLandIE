@@ -647,7 +647,7 @@ public final class WaylandDriverInstaller {
             // fails because a desktop already exists.
             // Early processes (services.exe, wineboot) that start before the bridge
             // is ready will fall to nulldrv (safe — they don't render).
-            String graphicsValue = "\"GraphicsDriver\"=\"wayland,x11\"";
+            String graphicsValue = "\"GraphicsDriver\"=\"wayland\"";
 
             // Remove old GraphicsDriver entries that point to winex11.drv
             // (but keep any that the user might have set to other drivers).
@@ -696,7 +696,7 @@ public final class WaylandDriverInstaller {
             if (userReg.exists()) {
                 String userRegContent = new String(java.nio.file.Files.readAllBytes(userReg.toPath()));
                 String driversKey = "[Software\\\\Wine\\\\Drivers]";
-                String graphicsUserValue = "\"Graphics\"=\"wayland,x11\"";
+                String graphicsUserValue = "\"Graphics\"=\"wayland\"";
 
                 // Remove old Graphics= entries under Wine\Drivers
                 int drvIdx = userRegContent.indexOf(driversKey);
@@ -715,7 +715,7 @@ public final class WaylandDriverInstaller {
                     userRegContent += "\n" + driversKey + "\n" + graphicsUserValue + "\n";
                 }
                 java.nio.file.Files.write(userReg.toPath(), userRegContent.getBytes());
-                Log.i(TAG, "Set user.reg: [Software\\Wine\\Drivers] Graphics=wayland,x11");
+                Log.i(TAG, "Set user.reg: Graphics=wayland");
             }
         } catch (Exception e) {
             Log.w(TAG, "Failed to set GraphicsDriver: " + e.getMessage());
