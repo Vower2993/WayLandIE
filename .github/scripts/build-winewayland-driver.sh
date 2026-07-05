@@ -600,7 +600,7 @@ make -j$(nproc) -k \
   dlls/winewayland.drv/arm64ec-windows/winewayland.drv \
   dlls/ntdll/aarch64-windows/ntdll.dll \
   dlls/ntdll/arm64ec-windows/ntdll.dll \
-  2>&1 | tail -300 ||
+  2>&1 | tail -300 || true
 
 
 echo "=== Searching for built artifacts ==="
