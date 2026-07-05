@@ -166,7 +166,7 @@ jobs:
         cache-cleanup: 'on-success'
 
     - name: Decode keystore and build
-      timeout-minutes: 15
+      timeout-minutes: 45
       env:
         KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
         KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
