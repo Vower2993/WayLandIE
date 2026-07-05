@@ -332,19 +332,10 @@ void XShapeCombineRectangles(Display *d, Window dest, int dest_kind, int x_off, 
 
 
 
-/* wlroots xwayland stubs - declared with C linkage to match the call sites
- * in wlserver.cpp which include wlr/xwayland/server.h via wlr_begin.hpp
- * (which wraps everything in extern "C"). Forward-declare the structs. */
-struct wl_display;
-struct wlr_xwayland_server;
-struct wlr_xwayland_server_options;
-extern "C" {
-struct wlr_xwayland_server *wlr_xwayland_server_create(struct wl_display *display, struct wlr_xwayland_server_options *options) {
-    (void)display; (void)options;
-    return NULL;
-}
-void wlr_xwayland_server_destroy(struct wlr_xwayland_server *server) { (void)server; }
-}
+/* wlroots xwayland — now built with -Dxwayland=enabled, so the real
+ * wlr_xwayland_server_create/destroy are linked from libwlroots-0.19.a.
+ * The previous stubs are removed. The real functions will fork+exec
+ * the Xwayland binary (path set via WLR_XWAYLAND env var). */
 
 /* Additional stubs after second link attempt */
 extern "C" {

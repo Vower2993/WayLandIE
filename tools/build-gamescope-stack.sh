@@ -286,7 +286,7 @@ meson setup _build \
     -Dbackends= \
     -Dallocators= \
     -Dsession=disabled \
-    -Dxwayland=disabled \
+    -Dxwayland=enabled \
     -Dxcb-errors=disabled \
     -Dcolor-management=disabled \
     -Dlibliftoff=disabled \
