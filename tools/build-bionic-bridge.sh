@@ -104,9 +104,27 @@ if [ ! -x "$HOST_SCANNER" ]; then
     mkdir -p "$WORK_DIR"
     cd "$WORK_DIR"
     if [ ! -d "wayland-host-$WAYLAND_VERSION" ]; then
-        git clone --depth 1 --branch "$WAYLAND_VERSION" \
-            https://github.com/nicholasgasior/wayland.git \
-            "wayland-host-$WAYLAND_VERSION" 2>&1 | tail -3
+        # Primary: download release tarball from GitLab (most reliable for CI).
+        # Fallback: git clone from GitLab if tarball download fails.
+        # NOTE: Do NOT use github.com/nicholasgasior/wayland — that repo does
+        # NOT exist (404 → git prompts for username → CI fails with exit 128).
+        # The official wayland source lives on GitLab freedesktop.
+        TARBALL="wayland-$WAYLAND_VERSION.tar.gz"
+        mkdir -p "wayland-host-$WAYLAND_VERSION"
+        if wget -q --tries=3 --timeout=30 \
+                "https://gitlab.freedesktop.org/wayland/wayland/-/archive/$WAYLAND_VERSION/wayland-$WAYLAND_VERSION.tar.gz" \
+                -O "$TARBALL" && [ -s "$TARBALL" ]; then
+            echo "  Downloaded wayland $WAYLAND_VERSION tarball from GitLab"
+            # --strip-components=1 strips the top-level dir from the tarball
+            # (GitLab names it wayland-<version>-<hash> or just wayland-<version>)
+            tar xf "$TARBALL" --strip-components=1 -C "wayland-host-$WAYLAND_VERSION"
+        else
+            echo "  Tarball download failed, falling back to git clone from GitLab…"
+            rm -rf "wayland-host-$WAYLAND_VERSION"
+            git clone --depth 1 --branch "$WAYLAND_VERSION" \
+                https://gitlab.freedesktop.org/wayland/wayland.git \
+                "wayland-host-$WAYLAND_VERSION" 2>&1 | tail -3
+        fi
     fi
     cd "wayland-host-$WAYLAND_VERSION"
     # Native build — no cross-file. Build ONLY the scanner (libraries=false
@@ -205,12 +223,28 @@ echo ""
 echo "=== [2/2] Building libwayland $WAYLAND_VERSION (bionic, server-only, static) ==="
 
 if [ ! -d "wayland-$WAYLAND_VERSION" ]; then
-    echo "  Cloning wayland $WAYLAND_VERSION source…"
-    # GitLab tarball download is unreliable from some CI networks; use git clone
-    # which falls back through mirrors more gracefully.
-    git clone --depth 1 --branch "$WAYLAND_VERSION" \
-        https://github.com/nicholasgasior/wayland.git \
-        "wayland-$WAYLAND_VERSION" 2>&1 | tail -5
+    echo "  Downloading wayland $WAYLAND_VERSION source…"
+    # Primary: download release tarball from GitLab (most reliable for CI).
+    # Fallback: git clone from GitLab if tarball download fails.
+    # NOTE: Do NOT use github.com/nicholasgasior/wayland — that repo does
+    # NOT exist (404 → git prompts for username → CI fails with exit 128).
+    # The official wayland source lives on GitLab freedesktop.
+    TARBALL="wayland-$WAYLAND_VERSION.tar.gz"
+    mkdir -p "wayland-$WAYLAND_VERSION"
+    if wget -q --tries=3 --timeout=30 \
+            "https://gitlab.freedesktop.org/wayland/wayland/-/archive/$WAYLAND_VERSION/wayland-$WAYLAND_VERSION.tar.gz" \
+            -O "$TARBALL" && [ -s "$TARBALL" ]; then
+        echo "  Downloaded wayland $WAYLAND_VERSION tarball from GitLab"
+        # --strip-components=1 strips the top-level dir from the tarball
+        # (GitLab names it wayland-<version>-<hash> or just wayland-<version>)
+        tar xf "$TARBALL" --strip-components=1 -C "wayland-$WAYLAND_VERSION"
+    else
+        echo "  Tarball download failed, falling back to git clone from GitLab…"
+        rm -rf "wayland-$WAYLAND_VERSION"
+        git clone --depth 1 --branch "$WAYLAND_VERSION" \
+            https://gitlab.freedesktop.org/wayland/wayland.git \
+            "wayland-$WAYLAND_VERSION" 2>&1 | tail -5
+    fi
 fi
 
 cd "wayland-$WAYLAND_VERSION"

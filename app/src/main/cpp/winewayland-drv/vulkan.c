@@ -49,6 +49,47 @@ WINE_DEFAULT_DEBUG_CHANNEL(vulkan);
  * vkCreateXlibSurfaceKHR accepts a Display* + Window, but the adrenotools
  * wrapper ignores those and uses its internal ANativeWindow. We pass the
  * ANativeWindow as the "window" parameter (casted to Window which is unsigned long).
+ *
+ * === GAME PRESENTATION PATHS (Android) ===
+ *
+ * There are two paths for game (Vulkan/DXVK) frame presentation on Android:
+ *
+ * PATH A — DIRECT RENDERING (default, WAYLANDIE_GAME_VIA_BRIDGE unset or 0):
+ *   Game → vkCreateXlibSurfaceKHR(ANativeWindow) → adrenotools →
+ *   vkCreateAndroidSurfaceKHR → SurfaceFlinger.
+ *
+ *   Game frames go DIRECTLY to SurfaceFlinger via the SurfaceView's
+ *   ANativeWindow. The Wayland bridge is completely bypassed for game
+ *   frames. The bridge ONLY handles desktop SHM frames (explorer.exe).
+ *
+ *   This is the current working path. It works because adrenotools'
+ *   xlib_surface → android_surface translation gives the game a real
+ *   present path to SurfaceFlinger.
+ *
+ * PATH B — VIA BRIDGE (WAYLANDIE_GAME_VIA_BRIDGE=1):
+ *   Game → vkCreateWaylandSurfaceKHR(wl_surface) → Turnip swapchain →
+ *   vkQueuePresentKHR → wl_surface_commit(dmabuf) → bridge's
+ *   linux-dmabuf handler → present_buffer_to_android() → SurfaceControl
+ *   → SurfaceFlinger.
+ *
+ *   Game frames flow through the Wayland bridge as zero-copy dmabuf
+ *   buffers. No CPU memcpy, no AHB conversion. The bridge's
+ *   linux-dmabuf-v1 implementation (waylandie-wayland-bridge.c) receives
+ *   the dmabuf and forwards it to SurfaceFlinger via SurfaceControl,
+ *   exactly like it does for desktop SHM→AHB frames.
+ *
+ *   REQUIRES: The HOST driver (Turnip via adrenotools) must support
+ *   VK_KHR_wayland_surface. If it doesn't, vkCreateWaylandSurfaceKHR
+ *   fails and we fall back to PATH A (direct rendering).
+ *
+ *   REQUIRES: process_wayland.wl_display must be connected to the
+ *   bridge (set WAYLAND_DISPLAY=wayland-0, which GuestProgramLauncherComponent
+ *   does). The bridge's wl_compositor creates the wl_surface that
+ *   vkCreateWaylandSurfaceKHR binds to the swapchain.
+ *
+ *   This is the "zero-copy buffer" path for games. Once the desktop
+ *   freeze issue is resolved, this flag can be enabled to test game
+ *   presentation through the Wayland display compositor.
  */
 static ANativeWindow *g_anative_window = NULL;
 
@@ -65,20 +106,68 @@ static VkResult wayland_vulkan_surface_create(HWND hwnd, BOOL raw, const struct 
     if (!(surface = wayland_client_surface_create(hwnd))) return VK_ERROR_OUT_OF_HOST_MEMORY;
 
 #ifdef __ANDROID__
-    /* On Android, create an Xlib surface using ANativeWindow.
+    /* On Android, choose between direct rendering (Xlib) and bridge routing
+     * (Wayland) based on the WAYLANDIE_GAME_VIA_BRIDGE env var.
      *
-     * TODO: This renders DIRECTLY to SurfaceFlinger via adrenotools, NOT through
-     * the Wayland bridge. For zero-copy dmabuf via the bridge, we need the dmabuf
-     * layer to intercept vkQueuePresentKHR. But the dmabuf layer is not yet in
-     * the dispatch chain (adrenotools blocks VK_LAYER_PATH).
+     * See the long comment above g_anative_window for the full architecture
+     * description of both paths.
      *
-     * For now, use Xlib surface so the game can at least render. The desktop
-     * renders via SHM→AHB through the bridge. Once the dmabuf layer is in the
-     * dispatch chain, we'll switch to a headless surface for the game path.
-     *
-     * The headless surface approach (commit 7fa3a2d) was reverted because it
-     * caused the game to fail to create a usable swapchain (headless surfaces
-     * have no present path). */
+     * Bridge path is attempted FIRST when the flag is set. If it fails (e.g.
+     * HOST driver doesn't support VK_KHR_wayland_surface, or wl_display is
+     * not connected), we fall back to the Xlib direct-rendering path so the
+     * game can still render. */
+    {
+        const char *bridge_env = getenv("WAYLANDIE_GAME_VIA_BRIDGE");
+        int game_via_bridge = (bridge_env && bridge_env[0] == '1');
+
+        if (game_via_bridge)
+        {
+            /* PATH B: Route game frames through the Wayland bridge via
+             * zero-copy dmabuf. The bridge's linux-dmabuf-v1 handler
+             * (waylandie-wayland-bridge.c) receives the dmabuf from
+             * vkQueuePresentKHR and forwards it to SurfaceFlinger via
+             * SurfaceControl — same path as desktop SHM→AHB frames. */
+            if (process_wayland.wl_display && surface->wl_surface &&
+                instance->p_vkCreateWaylandSurfaceKHR)
+            {
+                VkWaylandSurfaceCreateInfoKHR create_info_host;
+                create_info_host.sType = VK_STRUCTURE_TYPE_WAYLAND_SURFACE_CREATE_INFO_KHR;
+                create_info_host.pNext = NULL;
+                create_info_host.flags = 0;
+                create_info_host.display = process_wayland.wl_display;
+                create_info_host.surface = surface->wl_surface;
+
+                res = instance->p_vkCreateWaylandSurfaceKHR(
+                    instance->host.instance, &create_info_host, NULL, handle);
+                if (res == VK_SUCCESS)
+                {
+                    set_client_surface(hwnd, surface);
+                    *client = &surface->client;
+                    ERR("Bridge path: created Wayland surface=0x%s for hwnd=%p "
+                        "(game frames via bridge dmabuf)\n",
+                        wine_dbgstr_longlong(*handle), hwnd);
+                    return VK_SUCCESS;
+                }
+                ERR("Bridge path failed (vkCreateWaylandSurfaceKHR res=%d), "
+                    "falling back to Xlib direct rendering\n", res);
+                /* Fall through to Xlib path — surface is still valid,
+                 * we just didn't use the wl_surface. */
+            }
+            else
+            {
+                ERR("Bridge path requested but prerequisites not met "
+                    "(wl_display=%p wl_surface=%p vkCreateWaylandSurfaceKHR=%p), "
+                    "falling back to Xlib direct rendering\n",
+                    (void *)process_wayland.wl_display,
+                    (void *)(surface ? surface->wl_surface : NULL),
+                    (void *)(instance ? instance->p_vkCreateWaylandSurfaceKHR : NULL));
+                /* Fall through to Xlib path */
+            }
+        }
+    }
+
+    /* PATH A (default + fallback): Direct rendering via Xlib surface →
+     * adrenotools → SurfaceFlinger. Game frames bypass the Wayland bridge. */
     {
         const char *anw_env = getenv("WAYLANDIE_ANATIVE_WINDOW");
         if (!g_anative_window && anw_env)
@@ -104,7 +193,8 @@ static VkResult wayland_vulkan_surface_create(HWND hwnd, BOOL raw, const struct 
 
         set_client_surface(hwnd, surface);
         *client = &surface->client;
-        TRACE("Created Xlib surface=0x%s for hwnd=%p\n", wine_dbgstr_longlong(*handle), hwnd);
+        TRACE("Created Xlib surface=0x%s for hwnd=%p (direct rendering)\n",
+              wine_dbgstr_longlong(*handle), hwnd);
         return VK_SUCCESS;
     }
 #endif
