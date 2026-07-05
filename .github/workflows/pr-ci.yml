@@ -220,6 +220,14 @@ jobs:
         mkdir -p "$upload_dir"
         cp ${{ matrix.flavor.apkPath }} "$upload_dir/WinNative-Debug-${{ matrix.flavor.name }}-${{ steps.label.outputs.name }}.apk"
 
+    - name: Inspect APK native libs
+      run: |
+        echo "=== APK lib/ contents ==="
+        unzip -l ${{ matrix.flavor.apkPath }} | grep "lib/arm64-v8a/" | sort
+        echo ""
+        echo "=== Checking for critical libs ==="
+        unzip -l ${{ matrix.flavor.apkPath }} | grep -E "libc\+\+_shared|libgamescope|libwaylandie" || echo "WARNING: critical libs NOT found in APK!"
+
     - name: Upload APK
       uses: actions/upload-artifact@v7
       with:
