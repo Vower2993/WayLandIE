@@ -6597,22 +6597,27 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
             envVars.put("WINEDLLOVERRIDES", wlOverrides);
             Log.i("XServerDisplayActivity", "Wayland WINEDLLOVERRIDES: " + wlOverrides);
 
-            // NOTE: DISPLAY is NOT cleared here. It stays as ":0" (set by
-            // GuestProgramLauncherComponent.java:907). This is intentional:
+            // CRITICAL: Clear DISPLAY so winex11.drv can't create a desktop.
             //
-            // CAUSE: The original problem was Graphics="wayland,x11" which
-            // caused Wine to try winex11.drv FIRST (DISPLAY=:0 + Xvfb running)
-            // → creates desktop → winewayland.drv fails (desktop exists) → crash.
+            // CAUSE: With Graphics="wayland,x11" + DISPLAY=:0, early Wine processes
+            // (services.exe, wineboot) try winewayland.drv FIRST. If the bridge
+            // isn't ready yet, they fall back to winex11.drv which connects to
+            // Xvfb on :0 and creates a desktop. When explorer.exe starts later
+            // and winewayland.drv succeeds, create_desktop() fails because
+            // winex11.drv already created one → get_desktop_window failed → crash.
             //
-            // FIX: Change Graphics to "wayland" ONLY (no x11 fallback) in
-            // WaylandDriverInstaller.java. This prevents winex11.drv from
-            // loading even though DISPLAY=:0 is set. Early processes (services.exe,
-            // wineboot) that start before the bridge is ready will fall to nulldrv
-            // (safe — they don't render). explorer.exe loads winewayland.drv when
-            // the bridge is ready → creates desktop → no conflict.
+            // FIX: Clear DISPLAY. Now the fallback chain is:
+            //   1. Try winewayland.drv → if bridge not ready, fails
+            //   2. Fall back to winex11.drv → DISPLAY="" → can't connect → nulldrv
+            //   3. nulldrv: safe, no desktop created, no conflict
+            // explorer.exe starts later → winewayland.drv succeeds → creates desktop
             //
-            // DISPLAY=:0 is harmless — no X11 driver reads it because Graphics="wayland".
-            // It's kept for compatibility with any Wine code that checks DISPLAY existence.
+            // Previous attempt (Graphics="wayland" only, no x11 fallback) caused
+            // 500 processes to each try winewayland.drv independently with no
+            // fallback → all failed → nulldrv → get_desktop_window failed → OOM.
+            // The x11 fallback is needed so early processes get nulldrv (not
+            // crash) when the bridge isn't ready.
+            envVars.put("DISPLAY", "");
 
             // Enable the WaylandIE dmabuf forwarding in winevulkan.so.
             // Our custom thunks (winevulkan_dmabuf.c, compiled into winevulkan.so)
