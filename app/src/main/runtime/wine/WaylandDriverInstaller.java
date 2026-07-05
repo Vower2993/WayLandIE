@@ -671,9 +671,13 @@ public final class WaylandDriverInstaller {
             String reg = new String(java.nio.file.Files.readAllBytes(systemReg.toPath()));
             // Wine constructs the driver filename as: wine + <GraphicsDriver value> + .drv
             // So GraphicsDriver=wayland → winewayland.drv (correct)
-            // GraphicsDriver=wayland,x11 → try winewayland.drv first, then winex11.drv
-            // This allows fallback when Wayland isn't ready (rundll32, services.exe)
-            String graphicsValue = "\"GraphicsDriver\"=\"wayland,x11\"";
+            // GraphicsDriver=wayland ONLY (not "wayland,x11") — prevents winex11.drv
+            // from loading even though DISPLAY=:0 is set. This avoids the desktop
+            // conflict where winex11.drv creates a desktop first, then winewayland.drv
+            // fails because a desktop already exists.
+            // Early processes (services.exe, wineboot) that start before the bridge
+            // is ready will fall to nulldrv (safe — they don't render).
+            String graphicsValue = "\"GraphicsDriver\"=\"wayland\"";
 
             // Remove old GraphicsDriver entries that point to winex11.drv
             // (but keep any that the user might have set to other drivers).
@@ -715,14 +719,14 @@ public final class WaylandDriverInstaller {
             }
 
             java.nio.file.Files.write(systemReg.toPath(), result.toString().getBytes());
-            Log.i(TAG, "Set system.reg: GraphicsDriver=wayland,x11 (all Video keys)");
+            Log.i(TAG, "Set system.reg: GraphicsDriver=wayland (all Video keys)");
 
-            // Also set fallback in user.reg: [Software\\Wine\\Drivers] "Graphics"="wayland,x11"
+            // Also set in user.reg: [Software\\Wine\\Drivers] "Graphics"="wayland"
             File userReg = new File(prefix, "user.reg");
             if (userReg.exists()) {
                 String userRegContent = new String(java.nio.file.Files.readAllBytes(userReg.toPath()));
                 String driversKey = "[Software\\\\Wine\\\\Drivers]";
-                String graphicsUserValue = "\"Graphics\"=\"wayland,x11\"";
+                String graphicsUserValue = "\"Graphics\"=\"wayland\"";
 
                 // Remove old Graphics= entries under Wine\Drivers
                 int drvIdx = userRegContent.indexOf(driversKey);
