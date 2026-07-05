@@ -100,14 +100,22 @@ public final class WaylandDriverInstaller {
             // NOTE: winevulkan.so and win32u.so are NOT replaced — we use stock Proton versions
             // to avoid struct layout mismatches. Only winewayland.so is source-built.
             // NOTE: winevulkan.dll is NOT replaced — stock Proton version + binary patch only
-            // arm64ec-windows dir may not exist in all Proton builds — only copy if dir exists
+            // arm64ec-windows dir may not exist in all Proton builds — CREATE it if needed.
+            // Without winewayland.drv in arm64ec-windows/, explorer.exe (arm64ec via FEX)
+            // can't find the driver → nodrv_CreateWindow → no desktop → wfm.exe exits.
             File arm64ecDir = new File(winePath, "lib/wine/arm64ec-windows");
+            if (!arm64ecDir.isDirectory()) {
+                arm64ecDir.mkdirs();
+                Log.i(TAG, "ensureDriverInstalled: created arm64ec-windows dir at " + arm64ecDir);
+            }
             if (arm64ecDir.isDirectory()) {
                 copyIfExists(prefix, "lib/wine/aarch64-windows/libarm64ecfex.dll", arm64ecDir);
                 copyIfExists(prefix, "lib/wine/aarch64-windows/ntdll.dll", arm64ecDir);
+                // Copy winewayland.drv to arm64ec-windows — it's a hybrid ARM64X DLL
+                // that contains both aarch64 and arm64ec code. Wine's loader picks the
+                // right code path at runtime.
+                copyIfExists(prefix, "lib/wine/aarch64-windows/winewayland.drv", arm64ecDir);
                 // NOTE: winevulkan.dll NOT copied to arm64ec — stock Proton version used
-            } else {
-                Log.i(TAG, "ensureDriverInstalled: arm64ec-windows dir not present — skipping arm64ec copies");
             }
 
             // Binary-patch winevulkan.dll to replace VK_KHR_wayland_surface → VK_KHR_xlib_surface.
@@ -639,7 +647,7 @@ public final class WaylandDriverInstaller {
             // fails because a desktop already exists.
             // Early processes (services.exe, wineboot) that start before the bridge
             // is ready will fall to nulldrv (safe — they don't render).
-            String graphicsValue = "\"GraphicsDriver\"=\"wayland,x11\"";
+            String graphicsValue = "\"GraphicsDriver\"=\"wayland\"";
 
             // Remove old GraphicsDriver entries that point to winex11.drv
             // (but keep any that the user might have set to other drivers).
@@ -688,7 +696,7 @@ public final class WaylandDriverInstaller {
             if (userReg.exists()) {
                 String userRegContent = new String(java.nio.file.Files.readAllBytes(userReg.toPath()));
                 String driversKey = "[Software\\\\Wine\\\\Drivers]";
-                String graphicsUserValue = "\"Graphics\"=\"wayland,x11\"";
+                String graphicsUserValue = "\"Graphics\"=\"wayland\"";
 
                 // Remove old Graphics= entries under Wine\Drivers
                 int drvIdx = userRegContent.indexOf(driversKey);
@@ -707,7 +715,7 @@ public final class WaylandDriverInstaller {
                     userRegContent += "\n" + driversKey + "\n" + graphicsUserValue + "\n";
                 }
                 java.nio.file.Files.write(userReg.toPath(), userRegContent.getBytes());
-                Log.i(TAG, "Set user.reg: [Software\\Wine\\Drivers] Graphics=wayland,x11");
+                Log.i(TAG, "Set user.reg: Graphics=wayland");
             }
         } catch (Exception e) {
             Log.w(TAG, "Failed to set GraphicsDriver: " + e.getMessage());

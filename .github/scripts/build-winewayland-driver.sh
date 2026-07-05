@@ -587,8 +587,14 @@ echo "  FreeType bionic static lib: $FT_DIR/lib/libfreetype.a ($(stat -c%s $FT_D
 
 # FreeType: Wine uses WINE_CHECK_SONAME (not AC_CHECK_LIB) which tries to
 # dlopen the .so at runtime. In cross-compile, it can't run the binary, so
-# it relies on --with-freetype-lib. But we use a static .a, so we just
-# make the .so available via LDFLAGS.
+# it checks the cache var ac_cv_lib_soname_freetype. Set it to the .so path.
+export ac_cv_lib_soname_freetype=libfreetype.so.6
+export ac_cv_header_ft2build_h=yes
+export FREETYPE_CFLAGS="-I$FT_DIR/include/freetype2"
+export FREETYPE_LIBS="-L$FT_DIR/lib -lfreetype"
+# Create a .so symlink to the .a so WINE_CHECK_SONAME finds it
+ln -sf libfreetype.a "$FT_DIR/lib/libfreetype.so" 2>/dev/null || true
+
 export CFLAGS="-fPIC --sysroot=$SYSROOT -I$SYSROOT/usr/include -I$BIONIC_LIBS/include -I$FT_DIR/include/freetype2 -I/tmp/proton-wine/include -D__ANDROID_API__=$API -D__ANDROID__ -Wno-int-conversion"
 export CXXFLAGS="$CFLAGS"
 export LDFLAGS="--sysroot=$SYSROOT -L$BIONIC_LIBS/lib -L$FT_DIR/lib -landroid-sysvshm -lffi"
@@ -596,8 +602,23 @@ export PKG_CONFIG_PATH="$BIONIC_LIBS/lib/pkgconfig:$FT_DIR/lib/pkgconfig"
 export PKG_CONFIG_LIBDIR="$BIONIC_LIBS/lib/pkgconfig:$FT_DIR/lib/pkgconfig"
 unset PKG_CONFIG_SYSROOT_DIR
 
-# Cross-compile env vars — configure can't run test binaries, so we
-# pre-set the results of common checks
+# Pre-seed all the link-test cache vars (avoid the broken pkg-config path in configure.ac)
+export ac_cv_lib_wayland_client_wl_display_connect=yes
+export ac_cv_lib_wayland_server_wl_display_init_shm=yes
+export ac_cv_lib_wayland_egl_wl_egl_window_create=yes
+export ac_cv_lib_xkbcommon_xkb_context_new=yes
+export ac_cv_lib_xkbregistry_rxkb_context_new=yes
+export ac_cv_header_wayland_client_h=yes
+export ac_cv_header_wayland_egl_h=yes
+export ac_cv_header_xkbcommon_xkbcommon_h=yes
+export ac_cv_header_xkbcommon_xkbregistry_h=yes
+
+# Direct env-var settings (configure.ac honors these via WINE_PACKAGE_FLAGS)
+export XKBCOMMON_CFLAGS="-I$BIONIC_LIBS/include"
+export XKBCOMMON_LIBS="-L$BIONIC_LIBS/lib -lxkbcommon"
+export XKBREGISTRY_CFLAGS="-I$BIONIC_LIBS/include"
+export XKBREGISTRY_LIBS="-L$BIONIC_LIBS/lib -lxkbregistry"
+export ac_cv_header_linux_input_h=yes
 export ac_cv_prog_wayland_scanner=$(which wayland-scanner)
 export ac_cv_func_shm_open=yes
 export ac_cv_search_shm_open="none required"
@@ -612,6 +633,20 @@ export WAYLAND_SERVER_CFLAGS="-I$BIONIC_LIBS/include -D__ANDROID__ -DHAVE_SHM_UT
 export WAYLAND_SERVER_LIBS="-L$BIONIC_LIBS/lib -lwayland-server -lffi -landroid-sysvshm"
 export WAYLAND_EGL_CFLAGS="-I$BIONIC_LIBS/include"
 export WAYLAND_EGL_LIBS="-L$BIONIC_LIBS/lib -lwayland-egl"
+
+# xkbcommon — needed by winewayland.so for keyboard layout handling
+export XKB_CFLAGS="-I$BIONIC_LIBS/include"
+export XKB_LIBS="-L$BIONIC_LIBS/lib -lxkbcommon"
+
+export WAYLAND_SCANNER="$(which wayland-scanner)"
+
+# Pre-seed Vulkan soname cache so vulkan_update_surfaces gets compiled
+export ac_cv_lib_soname_vulkan=libvulkan.so
+export ac_cv_lib_vulkan_vkGetInstanceProcAddr=yes
+
+# Pre-seed EGL soname cache so framebuffer_surface functions are compiled
+export ac_cv_lib_soname_EGL=libEGL.so
+export ac_cv_lib_EGL_eglGetProcAddress=yes
 
 ./configure \
   --host=aarch64-linux-android \
