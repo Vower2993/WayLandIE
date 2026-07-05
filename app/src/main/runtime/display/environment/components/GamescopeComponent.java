@@ -143,14 +143,26 @@ public class GamescopeComponent extends EnvironmentComponent {
 
         Log.i(TAG, "XDG_RUNTIME_DIR: " + runtimeDir.getAbsolutePath());
 
-        // Verify the bridge socket (wayland-0) is alive — gamescope needs it as a parent
+        // Wait for the bridge socket (wayland-0) to appear.
+        // WaylandBridgeComponent.start() returns immediately after launching the
+        // bridge subprocess, but the subprocess takes ~300ms to bind the socket.
+        // We must poll — checking once will lose the race every time.
+        // (This mirrors the 3s wait pattern in WaylandBridgeComponent itself.)
         File bridgeSocket = new File(runtimeDir, "wayland-0");
+        Log.i(TAG, "Waiting for bridge socket wayland-0 at " + bridgeSocket.getAbsolutePath());
+        int bridgeWaitMs = 0;
+        while (!bridgeSocket.exists() && bridgeWaitMs < 10000) {
+            try { Thread.sleep(100); } catch (InterruptedException ignored) {}
+            bridgeWaitMs += 100;
+        }
         if (!bridgeSocket.exists()) {
-            Log.e(TAG, "Bridge socket wayland-0 not found. WaylandBridgeComponent must start first!");
-            writeDiagnostic(context, "BRIDGE_SOCKET_NOT_FOUND: " + bridgeSocket);
+            Log.e(TAG, "Bridge socket wayland-0 not found after " + bridgeWaitMs
+                + "ms wait. WaylandBridgeComponent may have failed to start!");
+            writeDiagnostic(context, "BRIDGE_SOCKET_NOT_FOUND after " + bridgeWaitMs
+                + "ms: " + bridgeSocket);
             return;
         }
-        Log.i(TAG, "Bridge socket wayland-0 present: " + bridgeSocket.exists());
+        Log.i(TAG, "Bridge socket wayland-0 ready after " + bridgeWaitMs + "ms");
 
         // Create the placeholder child script. Gamescope REQUIRES a command after `--`;
         // if we pass nothing, gamescope exits immediately with "No command specified".
@@ -261,17 +273,24 @@ public class GamescopeComponent extends EnvironmentComponent {
                 }
             }, "Gamescope-OutputReader").start();
 
-            // Wait briefly for the gamescope-0 socket to appear
+            // Wait for the gamescope-0 socket to appear.
+            // gamescope needs to: connect to wayland-0 (bridge), init wlroots,
+            // init Vulkan renderer, bind its own socket. This can take 2-10s
+            // depending on shader compilation. Wait up to 15s before giving up.
             File gamescopeSocket = new File(runtimeDir, GAMESCOPE_WAYLAND_DISPLAY);
             int waitMs = 0;
-            while (!gamescopeSocket.exists() && waitMs < 5000) {
-                try { Thread.sleep(50); } catch (InterruptedException ignored) {}
-                waitMs += 50;
+            while (!gamescopeSocket.exists() && waitMs < 15000) {
+                try { Thread.sleep(100); } catch (InterruptedException ignored) {}
+                waitMs += 100;
+                if (waitMs % 2000 == 0) {
+                    Log.i(TAG, "Still waiting for gamescope-0 socket... (" + waitMs + "ms)");
+                }
             }
             if (gamescopeSocket.exists()) {
-                Log.i(TAG, "Gamescope internal Wayland socket ready: " + gamescopeSocket);
+                Log.i(TAG, "Gamescope internal Wayland socket ready after " + waitMs + "ms: " + gamescopeSocket);
             } else {
-                Log.w(TAG, "Gamescope socket did not appear within 5s — Wine may fail to connect");
+                Log.w(TAG, "Gamescope socket did not appear within 15s — Wine may fail to connect. "
+                    + "Check gamescope-output.log for crash details.");
             }
 
             // Watcher thread that detects gamescope crashes
