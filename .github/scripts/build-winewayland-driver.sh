@@ -95,6 +95,40 @@ if [ -d "$WLD_SRC" ]; then
     sed -i '/^[[:space:]]*dllmain\.c \\$/a \\tlinux-dmabuf-unstable-v1.xml \\\n\twayland_dmabuf.c \\' \
         dlls/winewayland.drv/Makefile.in
 
+    # 8. CRITICAL FIX: Patch window_surface.c to avoid USER-lock re-entrancy crash.
+    #
+    # ROOT CAUSE: Wine 11.0's win32u has a USER-lock leak bug (fixed in Wine 11.10
+    # via the NtUserGetClassInfoEx error-path fix). When winewayland.drv's
+    # flush_window_surfaces() calls wl_display_dispatch_queue_pending() to process
+    # buffer_release events, it ALSO processes window configuration events
+    # (xdg_surface::configure) that trigger WAYLAND_WindowPosChanged → user_lock().
+    # If the USER lock is already held (leaked), this re-entrant call hits
+    # user_check_not_lock() → assertion "0" failed → Wine crashes.
+    #
+    # This is Wayland-specific because X11 mode doesn't dispatch X11 events
+    # during flush_window_surfaces — it uses a separate event thread.
+    #
+    # FIX: Remove the wl_display_dispatch_queue_pending() call from
+    # wayland_buffer_queue_get_free_buffer(). The dedicated event thread
+    # (waylanddrv_unix_read_events) will process buffer_release events
+    # asynchronously, so buffers will still be freed — just not synchronously
+    # during flush_window_surfaces. This breaks the re-entrancy cycle.
+    #
+    # The crash sequence was:
+    #   flush_window_surfaces (USER lock held)
+    #     → wayland_buffer_queue_get_free_buffer
+    #       → wl_display_dispatch_queue (processes ALL pending events)
+    #         → xdg_surface::configure event
+    #           → WAYLAND_WindowPosChanged → user_lock() → CRASH
+    if grep -q "wl_display_dispatch_queue_pending" dlls/winewayland.drv/window_surface.c; then
+        echo "  Patching window_surface.c to remove re-entrant Wayland event dispatch"
+        # Replace wl_display_dispatch_queue_pending with a no-op (just poll, don't dispatch)
+        # This prevents window config events from being processed during flush_window_surfaces
+        sed -i 's/wl_display_dispatch_queue_pending([^)]*)/0/g' \
+            dlls/winewayland.drv/window_surface.c
+        echo "  Patched: wl_display_dispatch_queue_pending → 0 (no-op)"
+    fi
+
     echo "  dmabuf sources applied"
 else
     echo "  WARNING: $WLD_SRC not found — building without dmabuf support"
