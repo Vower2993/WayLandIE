@@ -105,7 +105,7 @@ class ShortcutSettingsComposeDialog private constructor(
     private var gestureProfileManager: GestureProfileManager = GestureProfileManager(context)
     private var contentsManager: ContentsManager = ContentsManager(context)
     private var isArm64EC = false
-    private var displayModeValues: List<String> = listOf("x11", "wayland")
+    private var displayModeValues: List<String> = listOf("x11", "wayland", "gamescope")
 
 
     // Preset ID lists (parallel to display name lists)
