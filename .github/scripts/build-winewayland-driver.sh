@@ -872,13 +872,20 @@ grep -E "^(WAYLAND|XKB)" /tmp/proton-wine/config.status | head -20 || true
 
 echo "=== [8/9] Build winewayland targets ==="
 
+# Save full output to a file, then show last 500 lines + all error lines
 make -j$(nproc) -k \
   dlls/winewayland.drv/aarch64-windows/winewayland.drv \
   dlls/winewayland.drv/winewayland.so \
   dlls/winewayland.drv/arm64ec-windows/winewayland.drv \
   dlls/ntdll/aarch64-windows/ntdll.dll \
   dlls/ntdll/arm64ec-windows/ntdll.dll \
-  2>&1 | tail -300 || true
+  > /tmp/winewayland-make.log 2>&1 || true
+
+echo "=== Last 300 lines of make output ==="
+tail -300 /tmp/winewayland-make.log
+echo "=== All error: lines from make output ==="
+grep -i "error:" /tmp/winewayland-make.log | head -50
+echo "=== End make output ==="
 
 
 echo "=== Searching for built artifacts ==="
