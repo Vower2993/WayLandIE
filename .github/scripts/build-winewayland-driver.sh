@@ -101,27 +101,88 @@ if [ -d "$WLD_SRC" ]; then
     # can't patch — we don't build it from source). The assertion means the
     # current thread holds the USER lock when it shouldn't.
     #
-    # Since we CAN'T patch sysparams.c (stock win32u.so), we instrument
-    # winewayland.drv's window_surface.c instead. The user_lock_thread global
-    # is exported by win32u.so, so we can READ it from winewayland.so to detect
-    # when the USER lock is held during Wayland event dispatch.
+    # CRASH TRACE (from wine_wfm log):
+    #   wayland_buffer_queue_get_free_buffer
+    #     → buffer_release
+    #       → wayland_shm_buffer_unref
+    #         → wayland_shm_buffer_copy_data
+    #           → copy_pixel_region
+    #             → user_check_not_lock CRASH
     #
-    # The diagnostic logs:
-    #   1. Every call to flush_window_surfaces — whether USER lock is held
-    #   2. Every call to wl_display_dispatch_queue_pending — whether USER lock is held
-    #   3. Every Wayland event callback (xdg_configure, buffer_release, etc.)
-    #      — whether USER lock is held at that point
-    #   4. A full backtrace when the USER lock IS held during any of the above
+    # The diagnostic writes to a DEDICATED FILE (not stderr) because Wine's
+    # log capture doesn't show raw fprintf(stderr,...) output. The file is:
+    #   /data/user/0/com.tencent.ig/files/wayland-user-lock-diag.log
     #
-    # This will pinpoint the EXACT code path that holds the lock and triggers
-    # the re-entrant call.
+    # We use Wine's ERR() macro (captured in wine_wfm*.txt) AND file output
+    # for redundancy.
 
     echo "  === Applying DEEP DIAGNOSTIC instrumentation to winewayland.drv ==="
 
-    # Patch window_surface.c: add USER-lock detection + backtrace
-    if grep -q "flush_window_surfaces" dlls/winewayland.drv/window_surface.c; then
-        echo "  Adding USER-lock diagnostics to window_surface.c"
-        python3 << 'PYEOF'
+    # Create a shared diagnostic header that both files can use
+    cat > /tmp/user_lock_diag.h << 'DIAGEOF'
+#ifndef USER_LOCK_DIAG_H
+#define USER_LOCK_DIAG_H
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+#include <execinfo.h>
+#include <dlfcn.h>
+#include "wine/debug.h"
+
+/* user_lock_thread is a global in win32u.so (stock Proton). When non-zero,
+ * it contains the thread ID that holds the USER lock. */
+extern unsigned int user_lock_thread;
+extern unsigned int user_lock_rec;
+
+static void user_lock_diag_log(const char *context)
+{
+    char path[256];
+    snprintf(path, sizeof(path), "/data/user/0/com.tencent.ig/files/wayland-user-lock-diag.log");
+    FILE *f = fopen(path, "a");
+    if (!f) f = fopen("/sdcard/wayland-user-lock-diag.log", "a");
+    if (!f) f = fopen("/tmp/wayland-user-lock-diag.log", "a");
+
+    void *bt[32];
+    int n = backtrace(bt, 32);
+
+    char msg[512];
+    snprintf(msg, sizeof(msg), "USER_LOCK_DIAG: %s — lock held! thread=%u rec=%u",
+             context, user_lock_thread, user_lock_rec);
+
+    /* Write to file */
+    if (f) {
+        fprintf(f, "\n=== %s ===\n", msg);
+        fprintf(f, "Backtrace (%d frames):\n", n);
+        for (int i = 0; i < n; i++) {
+            Dl_info info;
+            if (dladdr(bt[i], &info) && info.dli_sname)
+                fprintf(f, "  [%d] %p %s+%ld (%s)\n", i, bt[i],
+                        info.dli_sname, (long)((char*)bt[i]-(char*)info.dli_saddr),
+                        info.dli_fname ? info.dli_fname : "?");
+            else
+                fprintf(f, "  [%d] %p (no symbol)\n", i, bt[i]);
+        }
+        fprintf(f, "=== END ===\n\n");
+        fclose(f);
+    }
+
+    /* Also use Wine's ERR() so it appears in wine_wfm*.txt log */
+    ERR("%s\n", msg);
+}
+
+#define USER_LOCK_DIAG_CHECK(context) do { \
+    if (user_lock_thread != 0) { \
+        user_lock_diag_log(context); \
+    } \
+} while(0)
+#endif
+DIAGEOF
+
+    cp /tmp/user_lock_diag.h dlls/winewayland.drv/user_lock_diag.h
+
+    # Patch window_surface.c — instrument ALL functions from the crash trace
+    echo "  Patching window_surface.c with diagnostic checks"
+    python3 << 'PYEOF'
 import re
 
 with open('dlls/winewayland.drv/window_surface.c', 'r') as f:
@@ -130,140 +191,95 @@ with open('dlls/winewayland.drv/window_surface.c', 'r') as f:
 if 'USER_LOCK_DIAG' in content:
     print("  USER_LOCK_DIAG already present, skipping")
 else:
-    # Add diagnostic infrastructure after config.h include
-    diag_header = r'''#include "config.h"
-#include <stdio.h>
-#include <execinfo.h>
-#include <dlfcn.h>
+    # Add diagnostic include after config.h
+    content = content.replace('#include "config.h"',
+                              '#include "config.h"\n#include "user_lock_diag.h"', 1)
 
-/* USER_LOCK_DIAG: Deep diagnostic to catch USER-lock re-entrancy.
- *
- * user_lock_thread is a global in win32u.so (stock Proton). When non-zero,
- * it contains the thread ID that holds the USER lock. We read it to detect
- * when winewayland.drv calls into Wayland event dispatch while the USER
- * lock is held — the exact condition that triggers user_check_not_lock().
- */
-extern unsigned int user_lock_thread;
-extern unsigned int user_lock_rec;
+    # Instrument ALL functions that appear in the crash trace.
+    # The crash trace shows: wayland_buffer_queue_get_free_buffer, buffer_release,
+    # wayland_shm_buffer_unref, wayland_shm_buffer_copy_data, wayland_window_surface_flush
+    # We instrument the ENTRY of each function with a USER-lock check.
 
-static void user_lock_diag_backtrace(const char *context)
-{
-    void *bt[32];
-    int n = backtrace(bt, 32);
-    fprintf(stderr, "\n=== USER_LOCK_DIAG: %s — USER lock HELD ===\n", context);
-    fprintf(stderr, "  holder_thread=%u rec=%u\n", user_lock_thread, user_lock_rec);
-    fprintf(stderr, "  Backtrace:\n");
-    for (int i = 0; i < n; i++)
-    {
-        Dl_info info;
-        if (dladdr(bt[i], &info) && info.dli_sname)
-            fprintf(stderr, "  [%d] %p %s+%ld (%s)\n", i,
-                    bt[i], info.dli_sname,
-                    (long)((char*)bt[i] - (char*)info.dli_saddr),
-                    info.dli_fname ? info.dli_fname : "?");
-        else
-            fprintf(stderr, "  [%d] %p (no symbol)\n", i, bt[i]);
-    }
-    fprintf(stderr, "=== END USER_LOCK_DIAG ===\n\n");
-    fflush(stderr);
-}
+    functions_to_instrument = [
+        'wayland_buffer_queue_get_free_buffer',
+        'wayland_shm_buffer_copy_data',
+        'wayland_window_surface_flush',
+        'wayland_surface_attach_shm',
+        'wayland_surface_reconfigure',
+        'wayland_surface_commit',
+    ]
 
-#define USER_LOCK_DIAG_CHECK(context) do { \
-    if (user_lock_thread != 0) { \
-        user_lock_diag_backtrace(context); \
-    } \
-} while(0)
-'''
+    for func_name in functions_to_instrument:
+        # Match function definitions: static <type> func_name(<args>) {
+        pattern = rf'(static\s+\S+\s+{re.escape(func_name)}\s*\([^)]*\)\s*\{{)'
+        match = re.search(pattern, content)
+        if match:
+            check_line = f'\n    USER_LOCK_DIAG_CHECK("{func_name} ENTRY");'
+            content = content[:match.end()] + check_line + content[match.end():]
+            print(f"  Instrumented {func_name}")
+        else:
+            print(f"  WARNING: could not find {func_name}")
 
-    content = content.replace('#include "config.h"', diag_header, 1)
-
-    # Instrument flush_window_surfaces — add check at entry
-    pattern = r'(static\s+(?:void\s+)?flush_window_surfaces\s*\([^)]*\)\s*\{)'
-    match = re.search(pattern, content)
-    if match:
-        content = content[:match.end()] + '\n    USER_LOCK_DIAG_CHECK("flush_window_surfaces ENTRY");' + content[match.end():]
-        print("  Instrumented flush_window_surfaces entry")
-    else:
-        print("  WARNING: could not find flush_window_surfaces")
-
-    # Instrument wayland_buffer_queue_get_free_buffer — add check at entry
-    pattern2 = r'(static\s+(?:struct\s+)?wayland_buffer\s*\*\s*wayland_buffer_queue_get_free_buffer\s*\([^)]*\)\s*\{)'
-    match2 = re.search(pattern2, content)
-    if match2:
-        content = content[:match2.end()] + '\n    USER_LOCK_DIAG_CHECK("wayland_buffer_queue_get_free_buffer ENTRY");' + content[match2.end():]
-        print("  Instrumented wayland_buffer_queue_get_free_buffer entry")
-    else:
-        print("  WARNING: could not find wayland_buffer_queue_get_free_buffer")
-
-    # Instrument any wl_display_dispatch* calls — safe mode (only indented lines)
+    # Also instrument ALL wl_display_dispatch* calls (safe mode)
     lines = content.split('\n')
     new_lines = []
+    instrumented_count = 0
     for line in lines:
         stripped = line.lstrip()
         indent = line[:len(line)-len(stripped)]
         if stripped.startswith('wl_display_dispatch_queue_pending(') and indent:
             new_lines.append(f'{indent}USER_LOCK_DIAG_CHECK("wl_display_dispatch_queue_pending PRE"); {stripped}')
+            instrumented_count += 1
         elif stripped.startswith('wl_display_dispatch_queue(') and indent:
             new_lines.append(f'{indent}USER_LOCK_DIAG_CHECK("wl_display_dispatch_queue PRE"); {stripped}')
+            instrumented_count += 1
         else:
             new_lines.append(line)
     content = '\n'.join(new_lines)
-    print("  Instrumented wl_display_dispatch* calls (safe mode)")
+    print(f"  Instrumented {instrumented_count} wl_display_dispatch* calls")
 
 with open('dlls/winewayland.drv/window_surface.c', 'w') as f:
     f.write(content)
 print("  window_surface.c diagnostic patch complete")
 PYEOF
-    fi
 
-    # Also patch waylanddrv_main.c to instrument the event thread
-    if grep -q "waylanddrv_unix_read_events\|wl_display_dispatch" dlls/winewayland.drv/waylanddrv_main.c 2>/dev/null; then
-        echo "  Adding diagnostics to waylanddrv_main.c (event thread)"
+    # Also patch waylanddrv_main.c — the event thread
+    if [ -f dlls/winewayland.drv/waylanddrv_main.c ]; then
+        echo "  Patching waylanddrv_main.c (event thread)"
         python3 << 'PYEOF3'
 with open('dlls/winewayland.drv/waylanddrv_main.c', 'r') as f:
     content = f.read()
 
 if 'USER_LOCK_DIAG' not in content:
-    content = content.replace(
-        '#include "config.h"',
-        '''#include "config.h"
-#include <stdio.h>
-#include <execinfo.h>
-#include <dlfcn.h>
-extern unsigned int user_lock_thread;
-extern unsigned int user_lock_rec;
-static void user_lock_diag_bt(const char *ctx)
-{
-    void *bt[32]; int n = backtrace(bt, 32);
-    fprintf(stderr, "\\nUSER_LOCK_DIAG: %s — lock held! thread=%u rec=%u\\n", ctx, user_lock_thread, user_lock_rec);
-    for (int i = 0; i < n; i++) { Dl_info info; if (dladdr(bt[i], &info) && info.dli_sname) fprintf(stderr, "  [%d] %s+%ld\\n", i, info.dli_sname, (long)((char*)bt[i]-(char*)info.dli_saddr)); }
-    fflush(stderr);
-}
-#define ULDC(ctx) do { if (user_lock_thread != 0) user_lock_diag_bt(ctx); } while(0)''',
-        1)
-    # Instrument dispatch calls — only in function bodies, not declarations
-    import re
-    # Only replace wl_display_dispatch_queue_pending( that appear after a statement (not in declarations)
-    # Simple approach: replace "    wl_display_dispatch" (indented = inside function body)
+    content = content.replace('#include "config.h"',
+                              '#include "config.h"\n#include "user_lock_diag.h"', 1)
+
+    # Instrument dispatch calls in the event thread
     lines = content.split('\n')
     new_lines = []
+    instrumented = 0
     for line in lines:
         stripped = line.lstrip()
         indent = line[:len(line)-len(stripped)]
-        # Only instrument if it's inside a function body (has indentation) and is a statement
         if stripped.startswith('wl_display_dispatch_queue_pending(') and indent:
-            new_lines.append(f'{indent}ULDC("read_events dispatch_pending"); {stripped}')
+            new_lines.append(f'{indent}USER_LOCK_DIAG_CHECK("main dispatch_pending"); {stripped}')
+            instrumented += 1
         elif stripped.startswith('wl_display_dispatch_queue(') and indent:
-            new_lines.append(f'{indent}ULDC("read_events dispatch_queue"); {stripped}')
+            new_lines.append(f'{indent}USER_LOCK_DIAG_CHECK("main dispatch_queue"); {stripped}')
+            instrumented += 1
         else:
             new_lines.append(line)
     content = '\n'.join(new_lines)
-    print("  Instrumented waylanddrv_main.c (safe mode)")
+    print(f"  Instrumented {instrumented} dispatch calls in waylanddrv_main.c")
 
 with open('dlls/winewayland.drv/waylanddrv_main.c', 'w') as f:
     f.write(content)
 PYEOF3
     fi
+
+    # Add user_lock_diag.h to the Makefile sources
+    sed -i '/^[[:space:]]*dllmain\.c \\/i \\tuser_lock_diag.h \\' \
+        dlls/winewayland.drv/Makefile.in 2>/dev/null || true
 
     echo "  dmabuf sources + diagnostics applied"
 else
