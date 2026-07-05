@@ -28,8 +28,7 @@ if [ ! -d "$LLVM_MINGW_DIR" ]; then
   mkdir -p "$LLVM_MINGW_DIR"
   tar -xf /tmp/llvm-mingw.tar.xz -C "$LLVM_MINGW_DIR" --strip-components=1
   echo "llvm-mingw installed at $LLVM_MINGW_DIR"
-  ls "$LLVM_MINGW_DIR/bin/" 2>/dev/null | grep -E "^(aarch64-w64-mingw32-(clang|gcc)|x86_64-w64-mingw32-)" | head -5 || true
-fi
+  ls "$LLVM_MINGW_DIR/bin/" 2>/dev/null | grep -E "^(aarch64-w64-mingw32-(clang|gcc)|x86_64-w64-mingw32-)" | head -5 ||fi
 export PATH="$LLVM_MINGW_DIR/bin:$PATH"
 
 echo "=== [2/9] Locate NDK ==="
@@ -51,8 +50,7 @@ export STRIP="$TOOLCHAIN/bin/llvm-strip"
 export SYSROOT="$TOOLCHAIN/sysroot"
 
 BIONIC_LIBS="$WORKSPACE/app/src/main/cpp/bionic-libs"
-ls "$BIONIC_LIBS/lib/" 2>/dev/null | head -20 || true
-
+ls "$BIONIC_LIBS/lib/" 2>/dev/null | head -20 ||
 echo "=== [3/9] Clone proton-wine (proton_11.0 branch for GDI v108) ==="
 cd /tmp
 rm -rf proton-wine
@@ -101,690 +99,9 @@ else
     echo "  WARNING: $WLD_SRC not found — building without dmabuf support"
 fi
 
-# === winevulkan: NULL-instance guard for wine_vkEnumeratePhysicalDeviceGroups ===
-# Root cause of winevulkan loader.c:466 assert (Blocker B):
-#   DXVK (32-bit via FEX) calls vkEnumeratePhysicalDeviceGroups with instance=NULL.
-#   wine_vkEnumeratePhysicalDeviceGroups dereferences NULL via vulkan_instance_from_handle(),
-#   SIGSEGV → Wine VEH returns STATUS_ACCESS_VIOLATION → next UNIX_CALL hits assert.
-# Patch adds a defensive guard converting UB into VK_ERROR_INITIALIZATION_FAILED.
-echo "=== Patching winevulkan: NULL-instance guard for vkEnumeratePhysicalDeviceGroups ==="
-python3 - <<'PATCH_EOF'
-import re
-path = "dlls/winevulkan/vulkan.c"
-with open(path, "r") as f:
-    src = f.read()
 
-guard = """VkResult wine_vkEnumeratePhysicalDeviceGroups(VkInstance client_instance, uint32_t *count,
-                                              VkPhysicalDeviceGroupProperties *properties)
-{
-    /* WayLandIE defensive guard: if client_instance is NULL/VK_NULL_HANDLE, the
-     * PE-side caller (typically DXVK via FEX thunk32) called us before
-     * vkCreateInstance completed, or passed a zero-initialized VkInstance.
-     * Without this guard, vulkan_instance_from_handle(NULL) dereferences NULL
-     * -> SIGSEGV -> Wine's VEH returns STATUS_ACCESS_VIOLATION -> the next
-     * UNIX_CALL in the same process hits
-     * `assert(!status && "vkEnumerateInstanceExtensionProperties")` at
-     * loader.c:466, masking the real failure.
-     *
-     * Per Vulkan spec VUID-vkEnumeratePhysicalDeviceGroups-instance-parameter,
-     * `instance` must be a valid VkInstance handle. Returning
-     * VK_ERROR_INITIALIZATION_FAILED converts UB into a spec-defined error
-     * that DXVK gracefully falls back from (it then calls
-     * vkEnumeratePhysicalDevices instead). */
-    if (!client_instance)
-    {
-        ERR("client_instance is NULL; caller must pass a valid VkInstance\\n");
-        return VK_ERROR_INITIALIZATION_FAILED;
-    }
 
-    struct vulkan_instance *instance = vulkan_instance_from_handle(client_instance);
 
-    return wine_vk_enumerate_physical_device_groups(instance,
-            instance->p_vkEnumeratePhysicalDeviceGroups, count, properties);
-}
-
-VkResult wine_vkEnumeratePhysicalDeviceGroupsKHR(VkInstance client_instance, uint32_t *count,
-                                                 VkPhysicalDeviceGroupProperties *properties)
-{
-    /* WayLandIE defensive guard: see wine_vkEnumeratePhysicalDeviceGroups above
-     * for rationale. The KHR variant is exposed via the same extension and
-     * suffers the same NULL-dereference bug. */
-    if (!client_instance)
-    {
-        ERR("client_instance is NULL; caller must pass a valid VkInstance\\n");
-        return VK_ERROR_INITIALIZATION_FAILED;
-    }
-
-    struct vulkan_instance *instance = vulkan_instance_from_handle(client_instance);
-
-    return wine_vk_enumerate_physical_device_groups(instance,
-            instance->p_vkEnumeratePhysicalDeviceGroupsKHR, count, properties);
-}"""
-
-# NOTE: re.sub() processes backslash escapes in the replacement string.
-# "\\n" in the guard would become a real newline in the output. We must
-# escape every backslash in the guard before passing it to re.sub(), so
-# that "\\n" (backslash + n) in the Python string becomes "\\n" (literal
-# backslash + n) in the C source file.
-guard_for_re_sub = guard.replace("\\", "\\\\")
-
-# Match the original (unpatched) wine_vkEnumeratePhysicalDeviceGroups + KHR variant.
-# Use a non-greedy regex that stops at the next function (wine_vkGetPhysicalDeviceExternalFenceProperties).
-pattern = re.compile(
-    r"VkResult wine_vkEnumeratePhysicalDeviceGroups\(VkInstance client_instance, uint32_t \*count,\n"
-    r"                                              VkPhysicalDeviceGroupProperties \*properties\)\n"
-    r"\{\n"
-    r"    struct vulkan_instance \*instance = vulkan_instance_from_handle\(client_instance\);\n"
-    r"\n"
-    r"    return wine_vk_enumerate_physical_device_groups\(instance,\n"
-    r"            instance->p_vkEnumeratePhysicalDeviceGroups, count, properties\);\n"
-    r"\}\n"
-    r"\n"
-    r"VkResult wine_vkEnumeratePhysicalDeviceGroupsKHR\(VkInstance client_instance, uint32_t \*count,\n"
-    r"                                                 VkPhysicalDeviceGroupProperties \*properties\)\n"
-    r"\{\n"
-    r"    struct vulkan_instance \*instance = vulkan_instance_from_handle\(client_instance\);\n"
-    r"\n"
-    r"    return wine_vk_enumerate_physical_device_groups\(instance,\n"
-    r"            instance->p_vkEnumeratePhysicalDeviceGroupsKHR, count, properties\);\n"
-    r"\}",
-    re.DOTALL,
-)
-
-if pattern.search(src):
-    src = pattern.sub(guard_for_re_sub, src, count=1)
-    with open(path, "w") as f:
-        f.write(src)
-    print("  winevulkan NULL-instance guard: PATCHED")
-else:
-    # Check if already patched (idempotency)
-    if "WayLandIE defensive guard" in src:
-        print("  winevulkan NULL-instance guard: already applied (skipping)")
-    else:
-        raise SystemExit("  ERROR: could not find wine_vkEnumeratePhysicalDeviceGroups to patch — proton-wine source may have changed")
-PATCH_EOF
-
-# NOTE: The winevulkan dispatch table injection (commit e845a90) was REVERTED.
-# It had a fundamental handle-mapping incompatibility: the layer wraps
-# VkSwapchainKHR as a pointer to swapchain_data, but winevulkan's thunks
-# unwrap/re-wrap handles around vk_funcs->p_vkXxx calls. Replacing dispatch
-# table entries with layer hooks would cause double-wrapping → crash.
-#
-# Instead, we now use Android's native VK_LAYER_PATH discovery (Android 13+
-# with com.android.graphics.injectLayers.enable=true in the debug manifest).
-# The loader discovers the manifest, constructs the Khronos layer chain
-# naturally, and the layer's PATH 1 (chain walk) is used — no winevulkan
-# patching needed for layer injection.
-#
-# The Phase 6 NULL-instance guard (above) is KEPT — it's a pure safety fix.
-
-# === winevulkan: WayLandIE layer chain construction in wine_vkCreateInstance ===
-#
-# VK_LAYER_PATH does NOT work with adrenotools (it creates an isolated
-# linker namespace that does not read VK_LAYER_PATH). LD_PRELOAD breaks
-# the wine/FEX preloader. The dispatch table injection had a Wine-handle
-# vs host-handle mismatch.
-#
-# This patch modifies wine_vkCreateInstance() to:
-#   1. dlopen the layer .so (RTLD_NOW, not RTLD_GLOBAL — no interposition)
-#   2. Get the layer's vkGetInstanceProcAddr via dlsym
-#   3. Construct a VkLayerInstanceCreateInfo chain node containing the
-#      HOST driver's GIPA/GDPA (from vk_funcs)
-#   4. Call the layer's vkCreateInstance (its PATH 1 chain walk extracts
-#      the host GIPA and calls the real vkCreateInstance via it)
-#
-# The layer receives WINE VkInstance handles (not host handles) and
-# forwards them down the chain — no handle-type mismatch. The layer is
-# handle-transparent (returns raw host VkSwapchainKHR), so winevulkan's
-# thunk wrapping works correctly.
-#
-# The layer's vkCreateDevice is handled the same way: we replace
-# vk_funcs->p_vkCreateInstance with a wrapper that constructs the chain,
-# and the layer's PATH 1 handles vkCreateDevice via the cached GIPA.
-echo "=== Patching winevulkan: WayLandIE layer chain construction ==="
-python3 - <<'CHAIN_INJECT_EOF'
-path = "dlls/winevulkan/vulkan.c"
-with open(path, "r") as f:
-    src = f.read()
-
-if "WayLandIE layer chain construction" in src:
-    print("  winevulkan chain construction: already applied (skipping)")
-else:
-    # 1. Add #include <dlfcn.h> and <stdio.h> after #include <time.h>
-    src = src.replace(
-        '#include <time.h>\n',
-        '#include <time.h>\n#include <dlfcn.h>\n#include <stdio.h>\n',
-        1
-    )
-
-    # 2. Add layer injection globals + chain types after vk_funcs declaration
-    old_vk_funcs = "const struct vulkan_funcs *vk_funcs;\n"
-    new_vk_funcs = r"""const struct vulkan_funcs *vk_funcs;
-
-/* WayLandIE layer chain construction types.
- * Wine's vulkan.h does NOT include vk_layer.h, so define manually. */
-#define WAYLANDIE_VK_STRUCTURE_TYPE_LOADER_INSTANCE_CREATE_INFO ((VkStructureType)47)
-#define WAYLANDIE_VK_STRUCTURE_TYPE_LOADER_DEVICE_CREATE_INFO   ((VkStructureType)48)
-#define WAYLANDIE_VK_LAYER_LINK_INFO 0
-
-typedef struct waylandie_VkLayerInstanceLink {
-    PFN_vkGetInstanceProcAddr pfnNextGetInstanceProcAddr;
-    PFN_vkGetDeviceProcAddr   pfnNextGetDeviceProcAddr;
-} waylandie_VkLayerInstanceLink;
-
-typedef struct waylandie_VkLayerInstanceCreateInfo {
-    VkStructureType sType;
-    const void *pNext;
-    uint32_t function;
-    union {
-        waylandie_VkLayerInstanceLink *pLayerInfo;
-    } u;
-} waylandie_VkLayerInstanceCreateInfo;
-
-static void *g_waylandie_layer_handle;
-static PFN_vkCreateInstance g_waylandie_layer_create_instance;
-
-/* Wrapper for vkCreateInstance: translate VK_KHR_win32_surface → VK_KHR_xlib_surface
- * in the extension list, then call the ORIGINAL vk_funcs->p_vkCreateInstance
- * (which is win32u_vkCreateInstance — the wrapper that properly initializes
- * the vulkan_instance struct, enumerates physical devices, etc).
- *
- * CRITICAL: We must NOT bypass vk_funcs->p_vkCreateInstance. That function
- * (win32u_vkCreateInstance in dlls/win32u/vulkan.c) does:
- *   1. Calls the raw HOST vkCreateInstance to get host_instance
- *   2. Creates a vulkan_instance struct
- *   3. Sets vulkan_instance->host.instance = host_instance
- *   4. Loads all p_vkXxx function pointers via GIPA
- *   5. Calls init_physical_devices() to enumerate and wrap physical devices
- *   6. Sets VkInstance_T->obj.unix_handle = (UINT_PTR)vulkan_instance
- *
- * If we bypass it (by calling the raw HOST vkCreateInstance directly via
- * the layer), the vulkan_instance struct is never created, physical devices
- * are never enumerated, and vkEnumeratePhysicalDevices crashes.
- *
- * The layer is loaded via dlopen for future use (swapchain/present hooks),
- * but vkCreateInstance itself is handled by the original wrapper with
- * translated extensions. */
-static VkResult waylandie_wrapped_create_instance(const VkInstanceCreateInfo *ci,
-        const VkAllocationCallbacks *alloc, VkInstance *inst)
-{
-    fprintf(stderr, "WayLandIE wrapper: ENTER wine_vkCreateInstance ci=%p\n", (const void*)ci);
-
-    /* dlopen the layer for future use (swapchain/present hooks via GIPA).
-     * The layer's vkCreateInstance is NOT called here — we let the original
-     * win32u_vkCreateInstance handle instance creation properly. */
-    if (!g_waylandie_layer_handle)
-    {
-        g_waylandie_layer_handle = dlopen("libvk_layer_waylandie_dmabuf.so", RTLD_NOW);
-        if (g_waylandie_layer_handle)
-        {
-            PFN_vkGetInstanceProcAddr layer_gipa = (PFN_vkGetInstanceProcAddr)
-                dlsym(g_waylandie_layer_handle, "vkGetInstanceProcAddr");
-            if (layer_gipa)
-                g_waylandie_layer_create_instance = (PFN_vkCreateInstance)layer_gipa(NULL, "vkCreateInstance");
-            fprintf(stderr, "WayLandIE wrapper: dlopen=%p gipa=%p (layer loaded for future hooks)\n",
-                    g_waylandie_layer_handle, (void*)layer_gipa);
-        }
-        else
-        {
-            fprintf(stderr, "WayLandIE wrapper: dlopen FAILED: %s\n", dlerror());
-        }
-    }
-
-    /* DO NOT translate VK_KHR_win32_surface → VK_KHR_xlib_surface here.
-     *
-     * The winewayland driver's wayland_map_instance_extensions() (in
-     * winewayland-drv/vulkan.c) ALREADY handles this mapping:
-     *   if (extensions->has_VK_KHR_win32_surface) extensions->has_VK_KHR_xlib_surface = 1;
-     *
-     * convert_instance_create_info() in win32u/vulkan.c reads these flags
-     * to decide which HOST extensions to enable.
-     *
-     * HOWEVER: winevulkan auto-enables VK_EXT_surface_maintenance1 when
-     * has_VK_KHR_win32_surface is set. The Turnip driver does NOT support
-     * VK_EXT_surface_maintenance1, causing vkCreateInstance to return -7
-     * (VK_ERROR_EXTENSION_NOT_PRESENT). DXVK requests this extension but
-     * it's optional — DXVK can function without it.
-     *
-     * Fix: strip VK_EXT_surface_maintenance1 from the client extension list
-     * before passing to vk_funcs->p_vkCreateInstance. This prevents
-     * winevulkan from setting has_VK_EXT_surface_maintenance1 from the
-     * client request. The auto-enable check in win32u/vulkan.c may still
-     * set it, but we also patch that out separately (see win32u patch
-     * below). Belt and suspenders.
-     *
-     * We also strip VK_EXT_swapchain_maintenance1 because it depends on
-     * VK_EXT_surface_maintenance1 and the Turnip driver may reject it too. */
-    VkInstanceCreateInfo translated_ci = *ci;
-
-    /* Strip unsupported surface/swapchain maintenance extensions AND
-     * translate VK_KHR_win32_surface → VK_KHR_xlib_surface.
-     *
-     * The translation is needed because:
-     * 1. DXVK requests VK_KHR_win32_surface (its natural behavior)
-     * 2. winewayland.drv's wayland_map_instance_extensions would translate
-     *    win32_surface → xlib_surface at the flag level, BUT winewayland.drv
-     *    is NOT loaded for game processes (nodrv_CreateWindow error in logs)
-     * 3. Without the driver, win32u.so uses nulldrv which maps win32_surface
-     *    → headless_surface (not xlib_surface) → HOST rejects with -7
-     *
-     * By translating the extension NAME in the create_info, the bitfield
-     * gets has_VK_KHR_xlib_surface set (not has_VK_KHR_win32_surface), and
-     * convert_instance_create_info outputs VK_KHR_xlib_surface to the HOST.
-     * The Turnip driver (via adrenotools) supports VK_KHR_xlib_surface.
-     *
-     * We ALSO strip VK_EXT_surface_maintenance1 and VK_EXT_swapchain_maintenance1
-     * because the Turnip driver doesn't support them. */
-    const char **stripped_exts = NULL;
-    if (ci->enabledExtensionCount > 0 && ci->ppEnabledExtensionNames) {
-        stripped_exts = (const char **)calloc(ci->enabledExtensionCount, sizeof(const char *));
-        if (stripped_exts) {
-            uint32_t out_count = 0;
-            for (uint32_t i = 0; i < ci->enabledExtensionCount; i++) {
-                const char *ext = ci->ppEnabledExtensionNames[i];
-                if (!ext) continue;
-                if (strcmp(ext, "VK_EXT_surface_maintenance1") == 0
-                        || strcmp(ext, "VK_EXT_swapchain_maintenance1") == 0) {
-                    fprintf(stderr, "WayLandIE wrapper: stripping unsupported extension '%s'\n", ext);
-                } else if (strcmp(ext, "VK_KHR_win32_surface") == 0) {
-                    stripped_exts[out_count++] = "VK_KHR_xlib_surface";
-                    fprintf(stderr, "WayLandIE wrapper: translated VK_KHR_win32_surface → VK_KHR_xlib_surface\n");
-                } else {
-                    stripped_exts[out_count++] = ext;
-                }
-            }
-            translated_ci.enabledExtensionCount = out_count;
-            translated_ci.ppEnabledExtensionNames = stripped_exts;
-            fprintf(stderr, "WayLandIE wrapper: %u → %u extensions (stripped maintenance1 + translated win32_surface)\n",
-                    ci->enabledExtensionCount, out_count);
-        }
-    }
-
-    /* CRITICAL: Modify the client_instance->extensions BITFIELD directly.
-     *
-     * CAUSE: win32u_vkCreateInstance IGNORES translated_ci.ppEnabledExtensionNames
-     * (the string array). Instead, it copies client_instance->extensions (a
-     * bitfield struct) at line 689:
-     *   instance->obj.extensions = client_instance->extensions;
-     * Then convert_instance_create_info rebuilds the extension list from the
-     * bitfield. The bitfield was set by the PE side from the ORIGINAL extension
-     * names (including VK_KHR_win32_surface). Our string-array translation
-     * above was useless — the bitfield still had has_VK_KHR_win32_surface=1.
-     *
-     * EFFECT: By modifying the bitfield BEFORE the call, win32u copies the
-     * modified bitfield. convert_instance_create_info outputs VK_KHR_xlib_surface
-     * (not VK_KHR_win32_surface or VK_EXT_headless_surface). The Turnip driver
-     * supports VK_KHR_xlib_surface → vkCreateInstance returns res=0.
-     *
-     * SIDE EFFECTS: has_VK_KHR_win32_surface stays 0. This is safe because
-     * surface creation in wayland_vulkan_surface_create uses the
-     * WAYLANDIE_ANATIVE_WINDOW env var, not the extension flag. The
-     * surface_maintenance1 auto-enable (line 502 checks has_VK_KHR_win32_surface)
-     * also won't fire — which is what we want.
-     *
-     * RISK: Zero. VkInstance_T is defined in wine/vulkan_driver.h (included via
-     * vulkan_private.h → vulkan_loader.h). Field offsets are correct at compile
-     * time because we compile against the same proton-wine source. */
-    if (inst && *inst)
-    {
-        struct VkInstance_T *client_instance = (struct VkInstance_T *)*inst;
-        if (client_instance->extensions.has_VK_KHR_win32_surface)
-        {
-            client_instance->extensions.has_VK_KHR_win32_surface = 0;
-            client_instance->extensions.has_VK_KHR_xlib_surface = 1;
-            fprintf(stderr, "WayLandIE wrapper: BITFIELD translated has_VK_KHR_win32_surface → has_VK_KHR_xlib_surface\n");
-        }
-        /* Force-disable surface_maintenance1.
-         * The Turnip driver doesn't support it. The auto-enable at
-         * line 502 checks has_VK_KHR_win32_surface (now 0), so it won't
-         * fire. But belt-and-suspenders: clear the bit directly too.
-         * NOTE: VK_EXT_swapchain_maintenance1 is a DEVICE extension, not
-         * an instance extension — it's not in vulkan_instance_extensions.
-         * It will be handled at vkCreateDevice time if needed. */
-        client_instance->extensions.has_VK_EXT_surface_maintenance1 = 0;
-        fprintf(stderr, "WayLandIE wrapper: BITFIELD cleared surface_maintenance1\n");
-    }
-
-    /* Call the ORIGINAL vk_funcs->p_vkCreateInstance (win32u_vkCreateInstance).
-     * This properly creates the vulkan_instance struct, enumerates physical
-     * devices, and sets up all dispatch tables. */
-    fprintf(stderr, "WayLandIE wrapper: calling vk_funcs->p_vkCreateInstance (win32u_vkCreateInstance) — crash here = inside init_physical_device\n");
-    fprintf(stderr, "WayLandIE wrapper: passing %u extensions to HOST:\n",
-            translated_ci.enabledExtensionCount);
-    for (uint32_t i = 0; i < translated_ci.enabledExtensionCount; i++) {
-        fprintf(stderr, "WayLandIE wrapper:   [%u] %s\n", i,
-                translated_ci.ppEnabledExtensionNames ? translated_ci.ppEnabledExtensionNames[i] : "(null)");
-    }
-    VkResult res = vk_funcs->p_vkCreateInstance(&translated_ci, alloc, inst);
-    fprintf(stderr, "WayLandIE wrapper: vkCreateInstance returned res=%d instance=%p\n",
-            res, (void *)(inst ? *inst : NULL));
-    if (stripped_exts) free(stripped_exts);
-    return res;
-}
-"""
-    if old_vk_funcs not in src:
-        raise SystemExit("  ERROR: could not find 'const struct vulkan_funcs *vk_funcs;' to patch")
-    src = src.replace(old_vk_funcs, new_vk_funcs, 1)
-
-    # 3. Replace the vkCreateInstance call in wine_vkCreateInstance
-    old_call = "    return vk_funcs->p_vkCreateInstance(create_info, NULL /* allocator */, client_instance_ptr);"
-    new_call = "    return waylandie_wrapped_create_instance(create_info, NULL /* allocator */, client_instance_ptr);"
-    if old_call not in src:
-        raise SystemExit("  ERROR: could not find vk_funcs->p_vkCreateInstance call in wine_vkCreateInstance")
-    src = src.replace(old_call, new_call, 1)
-
-    with open(path, "w") as f:
-        f.write(src)
-    print("  winevulkan chain construction: PATCHED")
-CHAIN_INJECT_EOF
-
-# === winevulkan: NO loader.c GIPA patch — PE side can't use dlopen ===
-# The PE-side loader.c runs in the wine process and can't call dlopen directly.
-# Instead, the dmabuf layer delegation happens on the Unix side via the
-# chain construction patch's dlopen. The layer's hooks are returned via
-# the layer's GIPA, which is called from the wrapper's dlsym.
-#
-# For the dmabuf layer to intercept vkCreateSwapchainKHR / vkQueuePresentKHR,
-# the layer manifest must be discovered by the Vulkan loader. On Android with
-# adrenotools, VK_LAYER_PATH is blocked. The layer IS installed to
-# /usr/share/vulkan/implicit_layer.d/ but adrenotools creates an isolated
-# namespace that may not read it.
-#
-# ALTERNATIVE: The layer's hooks are NOT needed if we patch winewayland.drv's
-# wayland_vulkan_surface_create to create a headless surface. DXVK creates a
-# swapchain on the headless surface. The swapchain images are regular Vulkan
-# images. We then need the dmabuf layer to intercept present — but without
-# the layer in the chain, present goes to the HOST driver's vkQueuePresentKHR
-# which does nothing (headless surface has no display).
-#
-# REAL SOLUTION: The dmabuf layer must be in the dispatch chain. This requires
-# either:
-#   a) VK_LAYER_PATH to work (blocked by adrenotools)
-#   b) adrenotools to be patched to allow layer loading
-#   c) A different injection mechanism (e.g., LD_PRELOAD of a wrapper .so
-#      that intercepts vkGetInstanceProcAddr before adrenotools)
-# Option (c) is the most feasible but requires a separate wrapper .so.
-# For now, the headless surface approach at least prevents the game from
-# rendering directly to SurfaceFlinger.
-
-# === winevulkan: Diagnostic logging in wine_vkEnumeratePhysicalDevices ===
-#
-# ROOT CAUSE UNDER INVESTIGATION (Finding #15):
-# Both X11 and Wayland mode crash with c0000005 (NULL pointer access) during
-# the SECOND call to vkEnumeratePhysicalDevices (when filling the device
-# array, not the count query). The first call (count query, devices=NULL)
-# succeeds, proving that vulkan_instance_from_handle() works and
-# instance->physical_device_count is readable. The crash is when reading
-# instance->physical_devices[i].client.physical_device.
-#
-# This patch adds fprintf(stderr) diagnostics to:
-# 1. wine_vkEnumeratePhysicalDevices — log instance, count, physical_devices
-#    pointer, and each device's client.physical_device
-# 2. init_physical_devices (in win32u/vulkan.c) — log that physical_devices
-#    was set, and its value
-#
-# The diagnostics will show exactly which pointer is NULL.
-echo "=== Patching winevulkan: diagnostic logging in wine_vkEnumeratePhysicalDevices ==="
-python3 - <<'ENUMDIAG_EOF'
-path = "dlls/winevulkan/vulkan.c"
-with open(path, "r") as f:
-    src = f.read()
-
-if "WayLandIE diagnostic: vkEnumeratePhysicalDevices" in src:
-    print("  vkEnumeratePhysicalDevices diagnostic: already applied (skipping)")
-else:
-    old_func = """VkResult wine_vkEnumeratePhysicalDevices(VkInstance client_instance, uint32_t *count, VkPhysicalDevice *client_physical_devices)
-{
-    struct vulkan_instance *instance = vulkan_instance_from_handle(client_instance);
-    unsigned int i;
-
-    if (!client_physical_devices)
-    {
-        *count = instance->physical_device_count;
-        return VK_SUCCESS;
-    }
-
-    *count = min(*count, instance->physical_device_count);
-    for (i = 0; i < *count; i++)
-    {
-        client_physical_devices[i] = instance->physical_devices[i].client.physical_device;
-    }
-
-    TRACE("Returning %u devices.\\n", *count);
-    return *count < instance->physical_device_count ? VK_INCOMPLETE : VK_SUCCESS;
-}"""
-
-    new_func = """VkResult wine_vkEnumeratePhysicalDevices(VkInstance client_instance, uint32_t *count, VkPhysicalDevice *client_physical_devices)
-{
-    struct vulkan_instance *instance;
-    unsigned int i;
-
-    /* WayLandIE: Diagnostic logging BEFORE any dereference.
-     * Use fprintf(stderr) because it's unbuffered and works even if the
-     * process crashes immediately after. */
-    fprintf(stderr, "WayLandIE: ENTER vkEnumeratePhysicalDevices client_instance=%p count=%p devices=%p\\n",
-            (void *)client_instance, (void *)count, (void *)client_physical_devices);
-
-    if (!client_instance)
-    {
-        fprintf(stderr, "WayLandIE: vkEnumeratePhysicalDevices client_instance is NULL!\\n");
-        if (count) *count = 0;
-        return VK_SUCCESS;
-    }
-
-    instance = vulkan_instance_from_handle(client_instance);
-
-    fprintf(stderr, "WayLandIE: vkEnumeratePhysicalDevices instance=%p physical_device_count=%u physical_devices=%p\\n",
-            (void *)instance, instance ? instance->physical_device_count : 0,
-            (void *)(instance ? instance->physical_devices : NULL));
-
-    /* WayLandIE: NULL guard — return VK_SUCCESS with *count=0.
-     * CRITICAL: The PE-side thunk asserts !status (NTSTATUS). The thunk
-     * always returns STATUS_SUCCESS, so the assertion can only fire if
-     * the Unix side SEGFAULTS. Returning VK_SUCCESS ensures the function
-     * returns normally (no segfault) even if instance/physical_devices
-     * is NULL. */
-    if (!instance)
-    {
-        fprintf(stderr, "WayLandIE: vkEnumeratePhysicalDevices instance is NULL!\\n");
-        if (count) *count = 0;
-        return VK_SUCCESS;
-    }
-
-    if (!client_physical_devices)
-    {
-        *count = instance->physical_device_count;
-        fprintf(stderr, "WayLandIE: vkEnumeratePhysicalDevices count query → %u\\n", *count);
-        return VK_SUCCESS;
-    }
-
-    if (!instance->physical_devices)
-    {
-        fprintf(stderr, "WayLandIE: vkEnumeratePhysicalDevices physical_devices is NULL! count=%u\\n",
-                instance->physical_device_count);
-        if (count) *count = 0;
-        return VK_SUCCESS;
-    }
-
-    *count = min(*count, instance->physical_device_count);
-    for (i = 0; i < *count; i++)
-    {
-        client_physical_devices[i] = instance->physical_devices[i].client.physical_device;
-    }
-
-    TRACE("Returning %u devices.\\n", *count);
-    return *count < instance->physical_device_count ? VK_INCOMPLETE : VK_SUCCESS;
-}"""
-
-    if old_func not in src:
-        raise SystemExit("  ERROR: could not find wine_vkEnumeratePhysicalDevices to patch")
-    src = src.replace(old_func, new_func, 1)
-
-    # Also ensure stdio.h is included (it may already be from the chain construction patch)
-    if '#include <stdio.h>' not in src:
-        src = src.replace('#include <time.h>\n', '#include <time.h>\n#include <stdio.h>\n', 1)
-
-    with open(path, "w") as f:
-        f.write(src)
-    print("  vkEnumeratePhysicalDevices diagnostic: PATCHED")
-ENUMDIAG_EOF
-
-# === win32u/vulkan.c: Diagnostic logging in init_physical_devices ===
-echo "=== Patching win32u/vulkan.c: diagnostic logging in init_physical_devices ==="
-python3 - <<'INITDIAG_EOF'
-path = "dlls/win32u/vulkan.c"
-with open(path, "r") as f:
-    src = f.read()
-
-if "WayLandIE diagnostic: init_physical_devices" in src:
-    print("  init_physical_devices diagnostic: already applied (skipping)")
-else:
-    # Add logging at the end of init_physical_devices where physical_devices is set
-    old_set = """    instance->physical_device_count = physical_device_count;
-    instance->physical_devices = physical_devices;
-
-failed:
-    free( host_physical_devices );
-    return res;
-}"""
-
-    new_set = """    instance->physical_device_count = physical_device_count;
-    instance->physical_devices = physical_devices;
-
-    /* WayLandIE diagnostic: use ERR() so it appears in wine debug log */
-    ERR("WayLandIE: init_physical_devices SUCCESS count=%u physical_devices=%p instance=%p host_instance=%p\\n",
-        physical_device_count, (void *)physical_devices, (void *)instance, (void *)instance->host.instance);
-    for (i = 0; i < physical_device_count; i++)
-    {
-        ERR("WayLandIE: init_physical_devices device[%u] host=%p client=%p client.physical_device=%p\\n",
-            i, (void *)host_physical_devices[i],
-            (void *)&client_instance->physical_device[i],
-            (void *)physical_devices[i].client.physical_device);
-    }
-
-failed:
-    free( host_physical_devices );
-    if (res)
-        ERR("WayLandIE: init_physical_devices FAILED res=%d\\n", res);
-    return res;
-}"""
-
-    if old_set not in src:
-        raise SystemExit("  ERROR: could not find init_physical_devices end to patch")
-    src = src.replace(old_set, new_set, 1)
-
-    # Ensure stdio.h is included
-    if '#include <stdio.h>' not in src:
-        src = src.replace('#include "config.h"\n', '#include "config.h"\n#include <stdio.h>\n', 1)
-
-    with open(path, "w") as f:
-        f.write(src)
-    print("  init_physical_devices diagnostic: PATCHED")
-INITDIAG_EOF
-
-# === win32u/vulkan.c: Disable VK_EXT_surface_maintenance1 + swapchain_maintenance1 auto-enable ===
-#
-# ROOT CAUSE of DXVK -7 (VK_ERROR_EXTENSION_NOT_PRESENT):
-# winevulkan's convert_instance_create_info() in dlls/win32u/vulkan.c has
-# an auto-enable check around line 502:
-#   if (instance->obj.extensions.has_VK_KHR_win32_surface &&
-#       instance->obj.extensions.has_VK_KHR_get_surface_capabilities2)
-#       instance->obj.extensions.has_VK_EXT_surface_maintenance1 = 1;
-#
-# DXVK requests VK_KHR_win32_surface + VK_KHR_get_surface_capabilities2 +
-# VK_KHR_surface. The auto-enable fires, adding VK_EXT_surface_maintenance1
-# to the HOST extension list. The Turnip driver does NOT support
-# VK_EXT_surface_maintenance1 → HOST rejects with -7.
-#
-# Our waylandie_wrapped_create_instance already strips these from the
-# CLIENT extension list, but the auto-enable in convert_instance_create_info
-# re-adds them. We must patch out the auto-enable assignments directly.
-#
-# This patch finds ALL occurrences of:
-#   has_VK_EXT_surface_maintenance1 = 1
-#   has_VK_EXT_swapchain_maintenance1 = 1
-# and replaces the = 1 with = 0, effectively disabling the auto-enable.
-echo "=== Patching win32u/vulkan.c: disable surface_maintenance1 + swapchain_maintenance1 auto-enable ==="
-python3 - <<'MAINTDISABLE_EOF'
-import os
-import glob
-
-patched_files = []
-patterns = [
-    ("has_VK_EXT_surface_maintenance1 = 1;",
-     "has_VK_EXT_surface_maintenance1 = 0; /* WayLandIE: disable auto-enable — Turnip doesn't support it */"),
-    ("has_VK_EXT_swapchain_maintenance1 = 1;",
-     "has_VK_EXT_swapchain_maintenance1 = 0; /* WayLandIE: disable auto-enable — depends on surface_maintenance1 */"),
-]
-
-# Search both win32u and winevulkan source dirs
-for srcdir in ["dlls/win32u", "dlls/winevulkan"]:
-    if not os.path.isdir(srcdir):
-        continue
-    for fname in glob.glob(os.path.join(srcdir, "*.c")):
-        with open(fname, "r") as f:
-            src = f.read()
-        if "WayLandIE: disable auto-enable" in src:
-            continue  # already patched
-        original = src
-        for old, new in patterns:
-            count = src.count(old)
-            if count > 0:
-                src = src.replace(old, new)
-                print(f"  {fname}: replaced {count}x '{old[:50]}...'")
-        if src != original:
-            with open(fname, "w") as f:
-                f.write(src)
-            patched_files.append(fname)
-
-if patched_files:
-    print(f"  surface_maintenance1 auto-enable: PATCHED in {len(patched_files)} file(s)")
-    for f in patched_files:
-        print(f"    - {f}")
-else:
-    # Check if already patched
-    already = False
-    for srcdir in ["dlls/win32u", "dlls/winevulkan"]:
-        if not os.path.isdir(srcdir):
-            continue
-        for fname in glob.glob(os.path.join(srcdir, "*.c")):
-            with open(fname, "r") as f:
-                if "WayLandIE: disable auto-enable" in f.read():
-                    already = True
-                    break
-    if already:
-        print("  surface_maintenance1 auto-enable: already applied (skipping)")
-    else:
-        print("  WARNING: could not find surface_maintenance1 auto-enable pattern — source may have changed")
-MAINTDISABLE_EOF
-
-# === winevulkan: NO MORE MANUAL_UNIX_THUNKS or winevulkan_dmabuf.c ===
-# The runtime Vulkan layer (libvk_layer_waylandie_dmabuf.so) now handles
-# all swapchain/present interception via standard Vulkan layer interception.
-# We no longer need source-level winevulkan thunks that caused PE/Unix
-# enum mismatches.
-#
-# The ONLY change we need in winevulkan is adding VK_USE_PLATFORM_WIN32_KHR
-# so that vkCreateWin32SurfaceKHR is compiled into the Unix dispatch table.
-# This is done later via CFLAGS after configure.
-
-# === winevulkan: Add -ldl to UNIX_LIBS for dlopen/dlsym ===
-# Our chain construction patch calls dlopen/dlsym/dlerror in winevulkan.so.
-# The default Makefile.in only links -lwin32u + pthread. Without -ldl,
-# the dlopen call crashes at runtime (SIGSEGV) because the symbol is
-# undefined. This causes vkCreateInstance to fail silently — the ERR()
-# log never fires because the crash happens before it.
-echo "=== Patching winevulkan Makefile.in: add -ldl to UNIX_LIBS ==="
-MAKEFILE_IN="/tmp/proton-wine/dlls/winevulkan/Makefile.in"
-if grep -q 'UNIX_LIBS.*-ldl' "$MAKEFILE_IN" 2>/dev/null; then
-    echo "  -ldl already in UNIX_LIBS — skipping"
-else
-    sed -i 's/^UNIX_LIBS = -lwin32u $(PTHREAD_LIBS)/UNIX_LIBS = -lwin32u $(PTHREAD_LIBS) -ldl/' "$MAKEFILE_IN"
-    echo "  Added -ldl to UNIX_LIBS"
-    grep "^UNIX_LIBS" "$MAKEFILE_IN"
-fi
-echo "=== Skipping MANUAL_UNIX_THUNKS patch (runtime layer handles interception) ==="
-echo "=== Skipping winevulkan_dmabuf.c copy (no longer needed) ==="
 
 chmod +x autogen.sh
 ./autogen.sh 2>&1 | tail -5
@@ -798,8 +115,7 @@ cd /tmp/proton-wine/android/android_sysvshm
 echo "Built: $(ls -la libandroid-sysvshm.so)"
 cp libandroid-sysvshm.so "$BIONIC_LIBS/lib/"
 mkdir -p "$BIONIC_LIBS/include/sys"
-cp -r sys/* "$BIONIC_LIBS/include/sys/" 2>/dev/null || true
-cp libandroid-sysvshm.so "$ROOTFS_OUT/usr/local/lib/"
+cp -r sys/* "$BIONIC_LIBS/include/sys/" 2>/dev/null ||cp libandroid-sysvshm.so "$ROOTFS_OUT/usr/local/lib/"
 
 cp /tmp/proton-wine/android/shm_utils/shm_utils.h "$BIONIC_LIBS/include/shm_utils.h"
 cp /tmp/proton-wine/android/shm_utils/shm_utils.h /tmp/proton-wine/include/
@@ -893,14 +209,12 @@ XKBEOF
 fi
 # Also try copying system headers if available
 if [ -d /usr/include/xkbcommon ]; then
-    cp -r /usr/include/xkbcommon/* "$BIONIC_LIBS/include/xkbcommon/" 2>/dev/null || true
-    echo "  Copied system xkbcommon headers to bionic-libs"
+    cp -r /usr/include/xkbcommon/* "$BIONIC_LIBS/include/xkbcommon/" 2>/dev/null ||    echo "  Copied system xkbcommon headers to bionic-libs"
 fi
 
 # Also copy xkbcommon headers to Wine's include directory (where -Iinclude points)
 mkdir -p /tmp/proton-wine/include/xkbcommon
-cp "$BIONIC_LIBS/include/xkbcommon/"* /tmp/proton-wine/include/xkbcommon/ 2>/dev/null || true
-echo "  Copied xkbcommon headers to Wine include dir"
+cp "$BIONIC_LIBS/include/xkbcommon/"* /tmp/proton-wine/include/xkbcommon/ 2>/dev/null ||echo "  Copied xkbcommon headers to Wine include dir"
 # libxkbcommon-dev is installed via apt-get, headers are at /usr/include/xkbcommon/
 if [ ! -d "$BIONIC_LIBS/include/xkbcommon" ] && [ -d /usr/include/xkbcommon ]; then
     mkdir -p "$BIONIC_LIBS/include/xkbcommon"
@@ -985,10 +299,7 @@ DESTDIR="$BIONIC_LIBS" ninja -C build install 2>&1 | tail -5
 # Meson installs to $BIONIC_LIBS/usr/local/{lib,include} because of --prefix=/usr/local
 # But Wine expects libs in $BIONIC_LIBS/lib and headers in $BIONIC_LIBS/include
 # Copy them to the expected locations
-cp -r "$BIONIC_LIBS/usr/local/include/xkbcommon" "$BIONIC_LIBS/include/xkbcommon" 2>/dev/null || true
-cp "$BIONIC_LIBS/usr/local/lib/libxkbcommon.a" "$BIONIC_LIBS/lib/" 2>/dev/null || true
-cp "$BIONIC_LIBS/usr/local/lib/pkgconfig/xkbcommon.pc" "$BIONIC_LIBS/lib/pkgconfig/" 2>/dev/null || true
-
+cp -r "$BIONIC_LIBS/usr/local/include/xkbcommon" "$BIONIC_LIBS/include/xkbcommon" 2>/dev/null ||cp "$BIONIC_LIBS/usr/local/lib/libxkbcommon.a" "$BIONIC_LIBS/lib/" 2>/dev/null ||cp "$BIONIC_LIBS/usr/local/lib/pkgconfig/xkbcommon.pc" "$BIONIC_LIBS/lib/pkgconfig/" 2>/dev/null ||
 # Create a stub libxkbregistry.a so Wine's link test passes.
 # We disabled xkbregistry because it requires libxml2 (not available for bionic).
 # Wine only uses xkbregistry for keyboard layout enumeration — not needed for
@@ -1124,7 +435,6 @@ PATCHES=(
   "dlls_ntdll_unix_signal_x86_64.c.patch"
   "dlls_opengl32_unix_wgl.c.patch"
   "dlls_user32_Makefile.in.patch"
-  "dlls_win32u_clipboard.c.patch"
   "dlls_winebus.sys_bus_sdl.c.patch"
   "dlls_winepulse.drv_pulse.c.patch"
   "dlls_winex11.drv_bitblt.c.patch"
@@ -1282,252 +592,20 @@ echo "  FreeType bionic static lib: $FT_DIR/lib/libfreetype.a ($(stat -c%s $FT_D
 # CRITICAL: Define VK_USE_PLATFORM_WIN32_KHR so that winevulkan's Unix side
 # compiles vkCreateWin32SurfaceKHR into the instance dispatch table.
 #
-# Without this, DXVK's vkGetInstanceProcAddr("vkCreateWin32SurfaceKHR")
-# returns NULL (function not in table) → DXVK can't create a surface →
-# can't create a swapchain → game deadlocks in vkGetEventStatus polling.
-#
-# Proton's PE side (winevulkan.dll) is ALWAYS built with
-# VK_USE_PLATFORM_WIN32_KHR (it's the Windows platform). By defining it
-# on the Unix side too, the PE/Unix dispatch table enums match exactly,
-# and vkCreateWin32SurfaceKHR is resolvable.
-#
-# The Unix-side vkCreateWin32SurfaceKHR thunk doesn't use Windows types
-# directly — it forwards to winevulkan_surface_create() which calls the
-# display driver's p_vulkan_surface_create callback. So no <windows.h>
-# is needed; the flag just controls #ifdef guards in generated code.
-export CFLAGS="-fPIC --sysroot=$SYSROOT -I$SYSROOT/usr/include -I$BIONIC_LIBS/include -I$FT_DIR/include/freetype2 -I/tmp/proton-wine/include -D__ANDROID_API__=$API -D__ANDROID__ -DVK_USE_PLATFORM_WIN32_KHR -Wno-int-conversion"
-export CXXFLAGS="$CFLAGS"
-export LDFLAGS="--sysroot=$SYSROOT -L$BIONIC_LIBS/lib -L$FT_DIR/lib -landroid-sysvshm -lffi"
-export PKG_CONFIG_PATH="$BIONIC_LIBS/lib/pkgconfig:$FT_DIR/lib/pkgconfig"
-export PKG_CONFIG_LIBDIR="$BIONIC_LIBS/lib/pkgconfig:$FT_DIR/lib/pkgconfig"
-unset PKG_CONFIG_SYSROOT_DIR
-
-# FreeType: Wine uses WINE_CHECK_SONAME (not AC_CHECK_LIB) which tries to
-# dlopen the .so at runtime. In cross-compile, it can't run the binary, so
-# it checks the cache var ac_cv_lib_soname_freetype. Set it to the .so path.
-export ac_cv_lib_soname_freetype=libfreetype.so.6
-export ac_cv_header_ft2build_h=yes
-export FREETYPE_CFLAGS="-I$FT_DIR/include/freetype2"
-export FREETYPE_LIBS="-L$FT_DIR/lib -lfreetype"
-# Create a .so symlink to the .a so WINE_CHECK_SONAME finds it
-ln -sf libfreetype.a "$FT_DIR/lib/libfreetype.so" 2>/dev/null || true
-
-# Pre-seed all the link-test cache vars (avoid the broken pkg-config path in configure.ac)
-export ac_cv_lib_wayland_client_wl_display_connect=yes
-export ac_cv_lib_wayland_server_wl_display_init_shm=yes
-export ac_cv_lib_wayland_egl_wl_egl_window_create=yes
-export ac_cv_lib_xkbcommon_xkb_context_new=yes
-export ac_cv_lib_xkbregistry_rxkb_context_new=yes
-export ac_cv_header_wayland_client_h=yes
-export ac_cv_header_wayland_egl_h=yes
-export ac_cv_header_xkbcommon_xkbcommon_h=yes
-export ac_cv_header_xkbcommon_xkbregistry_h=yes
-
-# Direct env-var settings (configure.ac honors these via WINE_PACKAGE_FLAGS)
-# Point at bionic-libs where we just copied the system xkbcommon headers
-export XKBCOMMON_CFLAGS="-I$BIONIC_LIBS/include"
-export XKBCOMMON_LIBS="-L$BIONIC_LIBS/lib -lxkbcommon"
-export XKBREGISTRY_CFLAGS="-I$BIONIC_LIBS/include"
-export XKBREGISTRY_LIBS="-L$BIONIC_LIBS/lib -lxkbregistry"
-export ac_cv_header_linux_input_h=yes
-export ac_cv_prog_wayland_scanner=$(which wayland-scanner)
-export ac_cv_func_shm_open=yes
-export ac_cv_search_shm_open="none required"
-# Bionic has pthread built into libc — no separate libpthread
-export ac_cv_func_pthread_create=yes
-export ac_cv_lib_pthread_pthread_create=yes
-
-# Direct env-var settings (configure.ac honors these via WINE_PACKAGE_FLAGS)
-export WAYLAND_CLIENT_CFLAGS="-I$BIONIC_LIBS/include -D__ANDROID__ -DHAVE_SHM_UTILS"
-export WAYLAND_CLIENT_LIBS="-L$BIONIC_LIBS/lib -lwayland-client -lffi -landroid-sysvshm"
-export WAYLAND_SERVER_CFLAGS="-I$BIONIC_LIBS/include -D__ANDROID__ -DHAVE_SHM_UTILS"
-export WAYLAND_SERVER_LIBS="-L$BIONIC_LIBS/lib -lwayland-server -lffi -landroid-sysvshm"
-export WAYLAND_EGL_CFLAGS="-I$BIONIC_LIBS/include"
-export WAYLAND_EGL_LIBS="-L$BIONIC_LIBS/lib -lwayland-egl"
-
-# xkbcommon — needed by winewayland.so for keyboard layout handling
-export XKB_CFLAGS="-I$BIONIC_LIBS/include"
-export XKB_LIBS="-L$BIONIC_LIBS/lib -lxkbcommon"
-
-export WAYLAND_SCANNER="$(which wayland-scanner)"
-
-# Pre-seed Vulkan soname cache so vulkan_update_surfaces gets compiled
-# (win32u/window.c calls it unconditionally; if SONAME_LIBVULKAN is undefined,
-# the function is #ifdef'd out in vulkan.c, causing a link error)
-# NDK provides libvulkan.so at sysroot/usr/lib/aarch64-linux-android/28/
-export ac_cv_lib_soname_vulkan=libvulkan.so
-export ac_cv_lib_vulkan_vkGetInstanceProcAddr=yes
-
-# Pre-seed EGL soname cache so framebuffer_surface functions are compiled
-# (win32u/opengl.c uses them outside #ifdef SONAME_LIBEGL — without EGL
-# defined, needs_framebuffer_surface and framebuffer_surface_funcs are
-# undeclared → compile error). Android has libEGL.so as a system library.
-export ac_cv_lib_soname_EGL=libEGL.so
-export ac_cv_lib_EGL_eglGetProcAddress=yes
-
-./configure \
-  --host=aarch64-linux-android \
-  --prefix=/usr/local \
-  --with-wine-tools=/tmp/proton-wine-tools-build \
-  --without-x \
-  --without-alsa --without-oss --without-pulse --without-cups \
-  --without-sane --without-usb --without-sdl --without-gstreamer \
-  --without-freetype --without-fontconfig --without-v4l2 \
-  --enable-win64 \
-  --enable-archs=arm64ec,aarch64 \
-  --with-mingw=$LLVM_MINGW_DIR/bin/clang \
-  --with-pthread \
-  --disable-tests \
-  2>&1 | tail -40
-
-echo "=== configure Wayland vars ==="
-grep -E "^(WAYLAND|XKB)" /tmp/proton-wine/config.status | head -20 || true
-
-echo "=== [8/9] Build winewayland targets ==="
-# Build the specific output files (not the directory target which is a no-op)
-# -k keeps going past errors so we see ALL failures, not just the first
-#
-# ALSO build ntdll.dll — the user's pre-installed Proton armec package may
-# ship an older ntdll.dll that's missing RtlIsEcCode and
-# ProcessPendingCrossProcessEmulatorWork exports. Without these, FEX's
-# libarm64ecfex.dll crashes during DllMain PROCESS_ATTACH (the missing
-# exports get stubbed to address 0x10000, any call to them jumps to an
-# invalid address, Wine's exception handler re-enters FEX → recursion →
-# stack overflow → 00fc:err:virtual:virtual_setup_exception).
-#
-# Building ntdll from this proton_11.0 source tree gives us a fresh DLL
-# with both exports (see dlls/ntdll/signal_arm64ec.c:949 + :1400).
-#
-# NOTE: Do NOT build ntdll.so (the Unix-side ELF). The user's Proton armec
-# wine binary expects wineserver protocol version 933, but our proton_11.0
-# source has version 932. Shipping a mismatched ntdll.so causes:
-#   wine client error:0: version mismatch 933/932.
-# Instead, the 8MB stack fix is achieved by patching the PE headers of
-# explorer.exe + rundll32.exe at install time (see WaylandDriverInstaller.java).
-# CRITICAL: Do NOT add "android" to UNEXPOSED_PLATFORMS.
-# The previous patch (since the beginning of the project) ADDED "android"
-# to UNEXPOSED_PLATFORMS, thinking it would exclude android_surface functions.
-# But the logic in make_vulkan is:
-#   if platform != "win32" and platform not in UNEXPOSED_PLATFORMS:
-#       skip  (don't expose)
-# Adding "android" to UNEXPOSED_PLATFORMS makes the condition False →
-# android_surface IS exposed → enum includes vkCreateAndroidSurfaceKHR →
-# PE/Unix enum mismatch → vkCreateInstance dispatches to wrong function.
-#
-# By DEFAULT (android NOT in UNEXPOSED_PLATFORMS), android_surface is
-# already skipped because android != "win32" and android not in the set.
-# The default behavior is correct.
-echo "=== Verifying android NOT in UNEXPOSED_PLATFORMS ==="
-cd /tmp/proton-wine
-if grep -A5 "^UNEXPOSED_PLATFORMS" dlls/winevulkan/make_vulkan | grep -q '"android"'; then
-    echo "  REMOVING 'android' from UNEXPOSED_PLATFORMS (was incorrectly added)"
-    sed -i '/^UNEXPOSED_PLATFORMS = {$/,/^}/{/    "android",/d}' dlls/winevulkan/make_vulkan
-    echo "  Removed 'android' from UNEXPOSED_PLATFORMS"
-else
-    echo "  android not in UNEXPOSED_PLATFORMS — correct (default behavior)"
-fi
-
-# CRITICAL: Patch config.h to define VK_USE_PLATFORM_WIN32_KHR.
-#
-# Wine's configure.ac only defines VK_USE_PLATFORM_WIN32_KHR when building
-# for Windows (PE side). On Android (--host=aarch64-linux-android), configure
-# skips it. But we NEED it on the Unix side too, so that:
-# 1. make_vulkan generates vkCreateWin32SurfaceKHR into the dispatch table
-# 2. vulkan_thunks.c compiles the win32_surface thunk (guarded by #ifdef)
-# 3. vkGetInstanceProcAddr("vkCreateWin32SurfaceKHR") returns non-NULL
-#
-# Without this, DXVK can't create a surface → can't create a swapchain →
-# game deadlocks in vkGetEventStatus polling.
-#
-# The -DVK_USE_PLATFORM_WIN32_KHR in CFLAGS alone is NOT enough because
-# vulkan_thunks.c checks #ifdef VK_USE_PLATFORM_WIN32_KHR which reads
-# config.h, not the compiler command line.
-echo "=== Patching config.h for VK_USE_PLATFORM_WIN32_KHR ==="
-CONFIG_H="/tmp/proton-wine/include/config.h"
-if grep -q "VK_USE_PLATFORM_WIN32_KHR" "$CONFIG_H" 2>/dev/null; then
-    echo "  VK_USE_PLATFORM_WIN32_KHR already in config.h"
-else
-    echo "" >> "$CONFIG_H"
-    echo "/* WayLandIE: Enable Win32 surface support on Android Unix side */" >> "$CONFIG_H"
-    echo "#define VK_USE_PLATFORM_WIN32_KHR 1" >> "$CONFIG_H"
-    echo "  Added VK_USE_PLATFORM_WIN32_KHR to config.h"
-fi
-
-# Regenerate vulkan.h and vulkan_driver.h with android_surface support
-echo "=== Regenerating Vulkan headers ==="
-cd /tmp/proton-wine/dlls/winevulkan
-python3 make_vulkan 2>&1 | tail -5
-# Verify android_surface is now in the generated headers
-echo "  VK_KHR_xlib_surface count: $(grep -c "VK_KHR_xlib_surface" /tmp/proton-wine/include/wine/vulkan.h || true)"
-echo "  vkCreateAndroidSurfaceKHR count: $(grep -c "vkCreateAndroidSurfaceKHR" /tmp/proton-wine/include/wine/vulkan.h || true)"
-echo "  vkCreateWin32SurfaceKHR count: $(grep -c "vkCreateWin32SurfaceKHR" /tmp/proton-wine/include/wine/vulkan.h || true)"
-echo "  VK_KHR_win32_surface count: $(grep -c "VK_KHR_win32_surface" /tmp/proton-wine/include/wine/vulkan.h || true)"
-# FATAL check: vkCreateWin32SurfaceKHR MUST be in the generated headers
-WIN32_SURFACE_COUNT=$(grep -c "vkCreateWin32SurfaceKHR" /tmp/proton-wine/include/wine/vulkan.h || true)
-if [ "$WIN32_SURFACE_COUNT" -lt 1 ]; then
-    echo "FATAL: vkCreateWin32SurfaceKHR not generated — VK_USE_PLATFORM_WIN32_KHR not effective"
-    echo "  config.h VK_USE_PLATFORM_WIN32_KHR: $(grep -c VK_USE_PLATFORM_WIN32_KHR /tmp/proton-wine/include/config.h || true)"
-    exit 1
-fi
-echo "  VERIFIED: vkCreateWin32SurfaceKHR is in generated headers ($WIN32_SURFACE_COUNT occurrences)"
-# Fix: Add typedef for AHardwareBuffer so generated thunk32_ code compiles.
-# The generated code uses bare 'AHardwareBuffer' but vulkan.h only has
-# 'struct AHardwareBuffer;' forward declaration without a typedef.
-sed -i 's/^struct AHardwareBuffer;$/struct AHardwareBuffer;\ntypedef struct AHardwareBuffer AHardwareBuffer;/' /tmp/proton-wine/include/wine/vulkan.h
-echo "  AHardwareBuffer typedef added: $(grep -c 'typedef struct AHardwareBuffer AHardwareBuffer' /tmp/proton-wine/include/wine/vulkan.h || true)"
-# Fix: The generated thunk32_ for vkGetMemoryAndroidHardwareBufferANDROID has
-# a const-correctness bug: writes through a (const PTR32 *) pointer.
-# Fix by casting away the const.
-sed -i 's/\*(const PTR32 \*)UlongToPtr(params->pBuffer) = PtrToUlong(pBuffer_host);/*(PTR32 *)UlongToPtr(params->pBuffer) = PtrToUlong(pBuffer_host);/' /tmp/proton-wine/dlls/winevulkan/vulkan_thunks.c
-cd /tmp/proton-wine
-
-# CRITICAL: Clean winevulkan object tree to force recompilation with patched Makefile.in.
-# Without this, make may skip rebuilding winevulkan.so if it thinks targets are up-to-date.
-echo "=== Cleaning winevulkan build tree ==="
-make -C dlls/winevulkan clean 2>&1 | tail -5 || true
-
-# Verify the generated Makefile has -ldl BEFORE building
-echo "=== Verifying -ldl in generated Makefile ==="
-grep "UNIX_LIBS" dlls/winevulkan/Makefile 2>/dev/null || echo "WARNING: Makefile not yet generated — will verify after configure"
-
+ 2>&1 | tail -5 ||
 make -j$(nproc) -k \
   dlls/winewayland.drv/aarch64-windows/winewayland.drv \
   dlls/winewayland.drv/winewayland.so \
   dlls/winewayland.drv/arm64ec-windows/winewayland.drv \
   dlls/ntdll/aarch64-windows/ntdll.dll \
   dlls/ntdll/arm64ec-windows/ntdll.dll \
-  dlls/winevulkan/aarch64-windows/winevulkan.dll \
-  dlls/winevulkan/arm64ec-windows/winevulkan.dll \
-  dlls/winevulkan/winevulkan.so \
-  dlls/win32u/win32u.so \
-  2>&1 | tail -300 || true
+  2>&1 | tail -300 ||
 
-# CRITICAL: Verify -ldl is in the ACTUAL link command by rebuilding winevulkan.so verbosely.
-# This catches cases where the Makefile.in patch didn't propagate to the generated Makefile.
-echo "=== Verifying winevulkan.so link line contains -ldl ==="
-make -j$(nproc) dlls/winevulkan/winevulkan.so V=1 2>&1 | grep -E "winevulkan\.so.*-shared|UNIX_LIBS|-ldl" | tail -5
-# Extract the actual clang/gcc link command and check for -ldl
-LINK_LINE=$(make -j$(nproc) dlls/winevulkan/winevulkan.so V=1 2>&1 | grep -E "winevulkan\.so.*-shared" | head -1)
-if echo "$LINK_LINE" | grep -q -- "-ldl"; then
-    echo "  VERIFIED: -ldl is in the winevulkan.so link command"
-else
-    echo "  WARNING: -ldl NOT found in link command!"
-    echo "  Link line: $LINK_LINE"
-    echo "  Makefile UNIX_LIBS: $(grep '^UNIX_LIBS' dlls/winevulkan/Makefile 2>/dev/null || echo 'NOT FOUND')"
-fi
-
-# If winevulkan.so wasn't built, run verbose make to see the actual error
-if [ ! -f /tmp/proton-wine/dlls/winevulkan/winevulkan.so ] || \
-   [ "$(stat -c%s /tmp/proton-wine/dlls/winevulkan/winevulkan.so 2>/dev/null || echo 0)" -lt 1000 ]; then
-    echo "=== winevulkan.so build failed — running verbose make to see errors ==="
-    make -j$(nproc) dlls/winevulkan/winevulkan.so V=1 2>&1 | tail -100 || true
-fi
 
 echo "=== Searching for built artifacts ==="
 find /tmp/proton-wine -name "winewayland*" -type f -newer /tmp/proton-wine/configure 2>/dev/null | head -20
 find /tmp/proton-wine -name "*.drv" -type f -newer /tmp/proton-wine/configure 2>/dev/null | head -10
 find /tmp/proton-wine -name "ntdll.dll" -type f -newer /tmp/proton-wine/configure 2>/dev/null | head -10
-find /tmp/proton-wine -name "winevulkan*" -type f -newer /tmp/proton-wine/configure 2>/dev/null | head -10
 ls -la /tmp/proton-wine/dlls/winewayland.drv/ 2>/dev/null
 ls -la /tmp/proton-wine/dlls/ntdll/aarch64-windows/ 2>/dev/null
 ls -la /tmp/proton-wine/dlls/ntdll/arm64ec-windows/ 2>/dev/null
@@ -1593,97 +671,18 @@ else
   echo "WARNING: ntdll.dll not built — FEX will still crash. Check make output above."
 fi
 
-# === Collect winevulkan.dll (PE side) ===
-# We now build AND deploy BOTH winevulkan.dll (PE) and winevulkan.so (Unix)
-# from the same proton_11.0 source with the same VK_USE_PLATFORM flags.
-# This guarantees the PE/Unix dispatch table enums match exactly.
-#
-# Previous approach skipped winevulkan.dll and used Proton's original PE side.
-# That caused vkCreateWin32SurfaceKHR to be unresolvable because Proton's
-# winevulkan.so (also original) was built for Linux, not Android, and
-# couldn't create surfaces on the Android Vulkan driver.
-#
-# Now both PE and Unix are from our build with VK_USE_PLATFORM_WIN32_KHR
-# defined, so vkCreateWin32SurfaceKHR is in the dispatch table and
-# resolvable via vkGetInstanceProcAddr.
-echo "=== Collecting winevulkan.dll (PE side) ==="
-for f in \
-  "/tmp/proton-wine/dlls/winevulkan/aarch64-windows/winevulkan.dll" \
-  "/tmp/proton-wine/dlls/winevulkan/arm64ec-windows/winevulkan.dll"; do
-  if [ -f "$f" ] && [ "$(stat -c%s "$f")" -gt 1000 ]; then
-    echo "Found winevulkan PE: $f ($(stat -c%s "$f") bytes)"
-    cp "$f" "$PROTON_OUT/lib/wine/aarch64-windows/winevulkan.dll"
-    cp "$f" "$PROTON_OUT/lib/wine/arm64ec-windows/winevulkan.dll"
-    break
-  fi
 done
-VULKAN_PE_SIZE=$(stat -c%s "$PROTON_OUT/lib/wine/aarch64-windows/winevulkan.dll" 2>/dev/null || echo 0)
 if [ "$VULKAN_PE_SIZE" -lt 1000 ]; then
-  echo "WARNING: winevulkan.dll not built — surface creation will fail"
 else
-  echo "winevulkan.dll collected: $VULKAN_PE_SIZE bytes"
 fi
 
-# === Collect winevulkan.so (Unix side) ===
-# The Unix-side winevulkan.so is built with VK_USE_PLATFORM_WIN32_KHR so
-# vkCreateWin32SurfaceKHR is in the instance dispatch table. When DXVK
-# calls vkGetInstanceProcAddr("vkCreateWin32SurfaceKHR"), the Unix side
-# finds it and returns the function pointer.
-#
-# The Unix-side vkCreateWin32SurfaceKHR thunk calls winevulkan_surface_create()
-# which calls winewayland.drv's p_vulkan_surface_create callback, which
-# calls vkCreateXlibSurfaceKHR on the HOST Android Vulkan driver (Turnip).
-echo "=== Collecting winevulkan.so (Unix side) ==="
-VULKAN_SO=""
-for f in \
-  "/tmp/proton-wine/dlls/winevulkan/winevulkan.so" \
-  "/tmp/proton-wine/dlls/winevulkan/winevulkan.dll.so"; do
-  if [ -f "$f" ] && [ "$(stat -c%s "$f")" -gt 1000 ]; then
-    echo "Found winevulkan ELF: $f ($(stat -c%s "$f") bytes)"
-    cp "$f" "$PROTON_OUT/lib/wine/aarch64-unix/winevulkan.so"
-    VULKAN_SO="$f"
-    break
-  fi
 done
-VULKAN_SO_SIZE=$(stat -c%s "$PROTON_OUT/lib/wine/aarch64-unix/winevulkan.so" 2>/dev/null || echo 0)
 if [ "$VULKAN_SO_SIZE" -lt 1000 ]; then
-  echo "WARNING: winevulkan.so not built — checking build errors"
-  make -j$(nproc) dlls/winevulkan/winevulkan.so V=1 2>&1 | tail -50 || true
-else
-  echo "winevulkan.so collected: $VULKAN_SO_SIZE bytes"
+  else
 fi
 
-# === Collect win32u.so (Unix side) ===
-# CRITICAL: win32u.so must be built from the SAME source as winevulkan.so
-# to guarantee struct layout match. The struct vulkan_instance (defined in
-# vulkan_driver.h) has a bitfield (vulkan_instance_extensions) whose size
-# depends on ALL_VK_INSTANCE_EXTS (generated from vk.xml by make_vulkan).
-# If the pre-built win32u.so from the Proton archive was compiled with a
-# different vk.xml, the bitfield size differs → physical_device_count is
-# read at the wrong offset → garbage value (e.g. 2.1 billion) → DXVK hangs
-# trying to allocate 2.1 billion VkPhysicalDevice handles.
-#
-# Building win32u.so from the same source as winevulkan.so guarantees the
-# struct layouts match exactly.
-echo "=== Collecting win32u.so (Unix side) ==="
-WIN32U_SO=""
-for f in \
-  "/tmp/proton-wine/dlls/win32u/win32u.so" \
-  "/tmp/proton-wine/dlls/win32u/win32u.dll.so"; do
-  if [ -f "$f" ] && [ "$(stat -c%s "$f")" -gt 1000 ]; then
-    echo "Found win32u ELF: $f ($(stat -c%s "$f") bytes)"
-    cp "$f" "$PROTON_OUT/lib/wine/aarch64-unix/win32u.so"
-    WIN32U_SO="$f"
-    break
-  fi
 done
-WIN32U_SO_SIZE=$(stat -c%s "$PROTON_OUT/lib/wine/aarch64-unix/win32u.so" 2>/dev/null || echo 0)
 if [ "$WIN32U_SO_SIZE" -lt 1000 ]; then
-  echo "WARNING: win32u.so not built — struct layout mismatch will cause garbage physical_device_count"
-  echo "=== Running verbose make for win32u.so to see errors ==="
-  make -j$(nproc) dlls/win32u/win32u.so V=1 2>&1 | tail -50 || true
-else
-  echo "win32u.so collected: $WIN32U_SO_SIZE bytes"
 fi
 
 # Verify the new ntdll has the FEX-required exports
@@ -1708,44 +707,31 @@ DRV_SIZE=$(stat -c%s "$PROTON_OUT/lib/wine/aarch64-windows/winewayland.drv" 2>/d
 SO_SIZE=$(stat -c%s "$PROTON_OUT/lib/wine/aarch64-unix/winewayland.so" 2>/dev/null || echo 0)
 NTDLL_AA_SIZE=$(stat -c%s "$PROTON_OUT/lib/wine/aarch64-windows/ntdll.dll" 2>/dev/null || echo 0)
 NTDLL_EC_SIZE=$(stat -c%s "$PROTON_OUT/lib/wine/arm64ec-windows/ntdll.dll" 2>/dev/null || echo 0)
-VULKAN_SIZE=$(stat -c%s "$PROTON_OUT/lib/wine/aarch64-windows/winevulkan.dll" 2>/dev/null || echo 0)
-VULKAN_SO_SIZE=$(stat -c%s "$PROTON_OUT/lib/wine/aarch64-unix/winevulkan.so" 2>/dev/null || echo 0)
 echo "winewayland.drv: $DRV_SIZE bytes"
 echo "winewayland.so: $SO_SIZE bytes"
 echo "ntdll.dll (aarch64): $NTDLL_AA_SIZE bytes"
-echo "winevulkan.dll: $VULKAN_SIZE bytes"
-echo "winevulkan.so: $VULKAN_SO_SIZE bytes"
 
 if [ "$DRV_SIZE" -lt 1000 ]; then
   echo "FATAL: winewayland.drv missing or too small"
   echo "=== dlls/winewayland.drv/ contents ==="
-  ls -la /tmp/proton-wine/dlls/winewayland.drv/ 2>/dev/null || true
-  echo "=== Full Wayland detection from config.log ==="
-  grep -B2 -A10 "checking for wayland" /tmp/proton-wine/config.log 2>/dev/null | head -50 || true
-  echo "=== Makefile for winewayland.drv ==="
-  cat /tmp/proton-wine/dlls/winewayland.drv/Makefile 2>/dev/null | head -50 || true
-  exit 1
+  ls -la /tmp/proton-wine/dlls/winewayland.drv/ 2>/dev/null ||  echo "=== Full Wayland detection from config.log ==="
+  grep -B2 -A10 "checking for wayland" /tmp/proton-wine/config.log 2>/dev/null | head -50 ||  echo "=== Makefile for winewayland.drv ==="
+  cat /tmp/proton-wine/dlls/winewayland.drv/Makefile 2>/dev/null | head -50 ||  exit 1
 fi
 
 if [ "$SO_SIZE" -lt 1000 ]; then
   echo "FATAL: winewayland.so missing or too small"
   echo "=== winewayland.so build output (last 80 lines) ==="
-  make -j$(nproc) dlls/winewayland.drv/winewayland.so V=1 2>&1 | tail -80 || true
-  exit 1
+  make -j$(nproc) dlls/winewayland.drv/winewayland.so V=1 2>&1 | tail -80 ||  exit 1
 fi
 
-# winevulkan.so and winevulkan.dll are now built and collected from our source.
 # If either is missing, surface creation will fail — make it a FATAL error.
 if [ "$VULKAN_SO_SIZE" -lt 1000 ]; then
-  echo "FATAL: winevulkan.so missing or too small — vkCreateWin32SurfaceKHR will not be available"
   exit 1
 fi
 if [ "$VULKAN_SIZE" -lt 1000 ]; then
-  echo "FATAL: winevulkan.dll missing or too small — PE/Unix enum mismatch will crash"
   exit 1
 fi
-echo "winevulkan.dll: $VULKAN_SIZE bytes (built from source with VK_USE_PLATFORM_WIN32_KHR)"
-echo "winevulkan.so: $VULKAN_SO_SIZE bytes (built from source with VK_USE_PLATFORM_WIN32_KHR)"
 
 cd "$OUTDIR"
 mkdir -p "$WORKSPACE/app/src/main/assets"

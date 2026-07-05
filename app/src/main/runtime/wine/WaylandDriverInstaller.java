@@ -97,25 +97,15 @@ public final class WaylandDriverInstaller {
             copyIfExists(prefix, "lib/wine/aarch64-unix/winewayland.so", wineAarch64Unix);
             copyIfExists(prefix, "lib/wine/aarch64-windows/libarm64ecfex.dll", wineAarch64Windows);
             copyIfExists(prefix, "lib/wine/aarch64-windows/ntdll.dll", wineAarch64Windows);
-            // Copy source-built winevulkan.so (Unix-side) — built with VK_USE_PLATFORM_WIN32_KHR
-            // so vkCreateWin32SurfaceKHR is in the dispatch table.
-            copyIfExists(prefix, "lib/wine/aarch64-unix/winevulkan.so", wineAarch64Unix);
-            // Copy source-built win32u.so (Unix-side) — CRITICAL: must be from the same
-            // source as winevulkan.so to guarantee struct layout match.
-            // The struct vulkan_instance has a bitfield (vulkan_instance_extensions)
-            // whose size depends on ALL_VK_INSTANCE_EXTS (generated from vk.xml).
-            // If win32u.so is from a different source version, physical_device_count
-            // is read at the wrong offset → garbage value → DXVK hangs.
-            copyIfExists(prefix, "lib/wine/aarch64-unix/win32u.so", wineAarch64Unix);
-            // Copy source-built winevulkan.dll (PE side) — built from the same source
-            // with the same flags as winevulkan.so, guaranteeing PE/Unix enum match.
-            copyIfExists(prefix, "lib/wine/aarch64-windows/winevulkan.dll", wineAarch64Windows);
+            // NOTE: winevulkan.so and win32u.so are NOT replaced — we use stock Proton versions
+            // to avoid struct layout mismatches. Only winewayland.so is source-built.
+            // NOTE: winevulkan.dll is NOT replaced — stock Proton version + binary patch only
             // arm64ec-windows dir may not exist in all Proton builds — only copy if dir exists
             File arm64ecDir = new File(winePath, "lib/wine/arm64ec-windows");
             if (arm64ecDir.isDirectory()) {
                 copyIfExists(prefix, "lib/wine/aarch64-windows/libarm64ecfex.dll", arm64ecDir);
                 copyIfExists(prefix, "lib/wine/aarch64-windows/ntdll.dll", arm64ecDir);
-                copyIfExists(prefix, "lib/wine/aarch64-windows/winevulkan.dll", arm64ecDir);
+                // NOTE: winevulkan.dll NOT copied to arm64ec — stock Proton version used
             } else {
                 Log.i(TAG, "ensureDriverInstalled: arm64ec-windows dir not present — skipping arm64ec copies");
             }
@@ -139,28 +129,7 @@ public final class WaylandDriverInstaller {
             File winevulkanPrefix = new File(prefix, "drive_c/windows/system32/winevulkan.dll");
             File winevulkanSyswow64 = new File(prefix, "drive_c/windows/syswow64/winevulkan.dll");
 
-            // CRITICAL: Replace syswow64/winevulkan.dll with our source-built version.
-            //
-            // The syswow64/winevulkan.dll is loaded by 32-bit games (e.g. LIMBO).
-            // The Proton archive ships a Proton 9.0 version with a DIFFERENT vk.xml
-            // enum order than our proton_11.0 source-built winevulkan.so. This causes
-            // a PE/Unix dispatch table mismatch: the PE side calls
-            // WINE_UNIX_CALL(unix_vkCreateInstance) but the Unix side dispatches to
-            // thunk32_vkCreateOpticalFlowSessionNV (wrong function) → assert at
-            // loader.c:424.
-            //
-            // Fix: copy our source-built winevulkan.dll to syswow64, replacing the
-            // Proton 9.0 archive version. Both PE and Unix sides are now from the
-            // same proton_11.0 source with matching enums.
-            if (winevulkanAarch64.exists() && winevulkanAarch64.length() > 1000) {
-                try {
-                    copyFile(winevulkanAarch64, winevulkanSyswow64);
-                    Log.i(TAG, "ensureDriverInstalled: replaced syswow64/winevulkan.dll with source-built version ("
-                            + winevulkanSyswow64.length() + " bytes) — fixes 32-bit PE/Unix enum mismatch");
-                } catch (IOException e) {
-                    Log.e(TAG, "ensureDriverInstalled: failed to replace syswow64/winevulkan.dll", e);
-                }
-            }
+            // NOTE: syswow64/winevulkan.dll is NOT replaced — stock Proton version used
 
             patchSurfaceExtension(winevulkanAarch64);
             patchSurfaceExtension(winevulkanArm64ec);
@@ -197,12 +166,6 @@ public final class WaylandDriverInstaller {
             //
             // NOTE: The Unix companion is named win32u.so (UNIXLIB = win32u.so
             // in Makefile.in), NOT win32u.dll.so.
-            File win32uUnix = new File(wineAarch64Unix, "win32u.so");
-            File win32uPrefix = new File(prefix, "lib/wine/aarch64-unix/win32u.so");
-            patchExtensionString(win32uUnix, "VK_EXT_surface_maintenance1", "VK_EXT_surface_maintenance0");
-            patchExtensionString(win32uPrefix, "VK_EXT_surface_maintenance1", "VK_EXT_surface_maintenance0");
-            patchExtensionString(win32uUnix, "VK_EXT_swapchain_maintenance1", "VK_EXT_swapchain_maintenance0");
-            patchExtensionString(win32uPrefix, "VK_EXT_swapchain_maintenance1", "VK_EXT_swapchain_maintenance0");
 
             // Do NOT patch DXVK DLLs — DXVK should request VK_KHR_win32_surface
             // (its natural behavior). Wine's wayland_map_instance_extensions
@@ -479,7 +442,6 @@ public final class WaylandDriverInstaller {
         // vkCreateInstance dispatches to the wrong Unix function → failure.
         // Both PE (system32) and Unix (winevulkan.so) sides MUST be from the
         // same proton_11.0 source.
-        copyIfExists(prefix, "lib/wine/aarch64-windows/winevulkan.dll", system32);
     }
 
     /**
