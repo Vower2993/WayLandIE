@@ -55,6 +55,43 @@ public class GuestProgramLauncherComponent extends EnvironmentComponent {
   private final Shortcut shortcut;
   private File workingDir;
   private Runnable preUnpackCallback;
+  // Gamescope integration: when true, Wine's WAYLAND_DISPLAY env var is set
+  // to "gamescope-0" (gamescope's internal Wayland display) instead of
+  // "wayland-0" (the WaylandIE bridge display that gamescope itself connects
+  // to as a client). The gamescope binary is started separately by
+  // GamescopeComponent; Wine just connects to its gamescope-0 socket.
+  // Topology: WaylandIE bridge (wayland-0) ← gamescope ← Wine (gamescope-0)
+  private boolean gamescopeEnabled = false;
+  private String gamescopeInternalDisplay = "gamescope-0";
+  // Internal rendering resolution (what the game thinks it's rendering at).
+  // Smaller values = better performance, gamescope upscales to the output size.
+  private int gamescopeInternalWidth = 1280;
+  private int gamescopeInternalHeight = 720;
+  // Output resolution (what gamescope composites to and presents to the
+  // WaylandIE bridge). Match the Android device's native panel resolution.
+  private int gamescopeOutputWidth = 2400;
+  private int gamescopeOutputHeight = 1080;
+  // FSR sharpness (0-100). 30 is a sensible default for 720p→1080p upscaling.
+  private int gamescopeSharpness = 30;
+
+  public void setGamescopeEnabled(boolean enabled) {
+    this.gamescopeEnabled = enabled;
+  }
+
+  public boolean isGamescopeEnabled() {
+    return gamescopeEnabled;
+  }
+
+  public void setGamescopeResolutions(int internalW, int internalH, int outputW, int outputH) {
+    this.gamescopeInternalWidth = internalW;
+    this.gamescopeInternalHeight = internalH;
+    this.gamescopeOutputWidth = outputW;
+    this.gamescopeOutputHeight = outputH;
+  }
+
+  public void setGamescopeSharpness(int sharpness) {
+    this.gamescopeSharpness = sharpness;
+  }
 
   public static File ensureImageFsNativeLibrary(
       Context context, ImageFs imageFs, String libraryName) {
@@ -174,8 +211,12 @@ public class GuestProgramLauncherComponent extends EnvironmentComponent {
     envVars.put("USER", ImageFs.USER);
     envVars.put("TMPDIR", imageFs.getRootDir().getPath() + "/tmp");
     envVars.put("DISPLAY", ":0");
-        envVars.put("WAYLAND_DISPLAY", "wayland-0");
-        envVars.put("XDG_RUNTIME_DIR", imageFs.getRootDir().getPath() + "/usr/tmp/runtime");
+    if (gamescopeEnabled) {
+      envVars.put("WAYLAND_DISPLAY", gamescopeInternalDisplay);
+    } else {
+      envVars.put("WAYLAND_DISPLAY", "wayland-0");
+    }
+    envVars.put("XDG_RUNTIME_DIR", imageFs.getRootDir().getPath() + "/usr/tmp/runtime");
 
     String winePath =
         wineProfile == null
@@ -905,8 +946,18 @@ public class GuestProgramLauncherComponent extends EnvironmentComponent {
     if (!envVars.has("WINE_ADPF")) envVars.put("WINE_ADPF", "1");
     envVars.put("PREFIX", rootDir.getPath() + "/usr");
     envVars.put("DISPLAY", ":0");
-        envVars.put("WAYLAND_DISPLAY", "wayland-0");
-        envVars.put("XDG_RUNTIME_DIR", imageFs.getRootDir().getPath() + "/usr/tmp/runtime");
+    // In gamescope mode, Wine connects to gamescope's internal Wayland display
+    // (gamescope-0), NOT the WaylandIE bridge (wayland-0). Gamescope connects
+    // to wayland-0 as a client; Wine connects to gamescope-0 as a client of
+    // gamescope. This is the nested compositor topology:
+    //   WaylandIE bridge (wayland-0) ← gamescope ← Wine (gamescope-0)
+    if (gamescopeEnabled) {
+      envVars.put("WAYLAND_DISPLAY", gamescopeInternalDisplay);
+      Log.i(TAG, "Gamescope mode: Wine WAYLAND_DISPLAY=" + gamescopeInternalDisplay);
+    } else {
+      envVars.put("WAYLAND_DISPLAY", "wayland-0");
+    }
+    envVars.put("XDG_RUNTIME_DIR", imageFs.getRootDir().getPath() + "/usr/tmp/runtime");
     envVars.put("WINE_DISABLE_FULLSCREEN_HACK", "1");
     envVars.put("GST_PLUGIN_FEATURE_RANK", "ximagesink:3000");
     envVars.put(
@@ -1174,6 +1225,17 @@ public class GuestProgramLauncherComponent extends EnvironmentComponent {
     File box64File = new File(rootDir, "/usr/bin/box64");
     if (box64File.exists()) {
       FileUtils.chmod(box64File, 0755);
+    }
+
+    // Gamescope mode: when enabled, Wine is launched DIRECTLY (not wrapped in
+    // `libgamescope.so -- <cmd>`). The gamescope binary is already running as
+    // a separate process started by GamescopeComponent, and Wine connects to
+    // gamescope's internal gamescope-0 socket via WAYLAND_DISPLAY=gamescope-0
+    // (set above in the env vars block). This decouples Wine's lifecycle from
+    // gamescope's — Wine can restart without killing gamescope.
+    if (gamescopeEnabled) {
+      Log.i(TAG, "Gamescope mode: launching Wine directly with WAYLAND_DISPLAY="
+          + gamescopeInternalDisplay + " (gamescope is running separately)");
     }
 
     Log.d(

@@ -54,7 +54,7 @@ HOST_TRIPLET="aarch64-linux-android"
 
 # Versions
 LIBFFI_VERSION="3.4.4"
-WAYLAND_VERSION="1.22.0"
+WAYLAND_VERSION="1.23.1"
 
 # ---------------------------------------------------------------------------
 # Sanity checks
@@ -105,7 +105,7 @@ if [ ! -x "$HOST_SCANNER" ]; then
     cd "$WORK_DIR"
     if [ ! -d "wayland-host-$WAYLAND_VERSION" ]; then
         git clone --depth 1 --branch "$WAYLAND_VERSION" \
-            https://github.com/nicholasgasior/wayland.git \
+            https://gitlab.freedesktop.org/wayland/wayland.git \
             "wayland-host-$WAYLAND_VERSION" 2>&1 | tail -3
     fi
     cd "wayland-host-$WAYLAND_VERSION"
@@ -209,7 +209,7 @@ if [ ! -d "wayland-$WAYLAND_VERSION" ]; then
     # GitLab tarball download is unreliable from some CI networks; use git clone
     # which falls back through mirrors more gracefully.
     git clone --depth 1 --branch "$WAYLAND_VERSION" \
-        https://github.com/nicholasgasior/wayland.git \
+        https://gitlab.freedesktop.org/wayland/wayland.git \
         "wayland-$WAYLAND_VERSION" 2>&1 | tail -5
 fi
 
