@@ -6662,6 +6662,22 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
             envVars.put("WAYLANDIE_DMABUF_LAYER_ENABLE", "1");
             envVars.put("WAYLANDIE_BRIDGE_SOCKET", "waylandie.display.bridge.v1");
 
+            // In gamescope mode, route game presentation through gamescope via
+            // VK_KHR_wayland_surface. This makes DXVK's swapchain bind to a
+            // Wayland surface on gamescope-0 (WAYLAND_DISPLAY=gamescope-0, set
+            // by GuestProgramLauncherComponent). gamescope receives the dmabuf,
+            // composites (FSR upscaling + frame pacing), and presents to the
+            // bridge (wayland-0).
+            //
+            // If Turnip doesn't support VK_KHR_wayland_surface, vulkan.c falls
+            // back to PATH A (xlib_surface → adrenotools → SurfaceFlinger).
+            // This is safe — the game still renders, just without gamescope.
+            if ("gamescope".equals(displayMode)) {
+                envVars.put("WAYLANDIE_GAME_VIA_BRIDGE", "1");
+                Log.i("XServerDisplayActivity", "Gamescope mode: WAYLANDIE_GAME_VIA_BRIDGE=1 — "
+                    + "game presentation will route through gamescope via VK_KHR_wayland_surface");
+            }
+
             // === GLOBAL DIAGNOSTIC TRACING ===
             // Reduce WINEDEBUG to ONLY waylanddrv — the +vulkan channel floods the
             // 80KB logcat buffer with init_physical_device extension listing lines,
