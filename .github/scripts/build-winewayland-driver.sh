@@ -28,7 +28,7 @@ if [ ! -d "$LLVM_MINGW_DIR" ]; then
   mkdir -p "$LLVM_MINGW_DIR"
   tar -xf /tmp/llvm-mingw.tar.xz -C "$LLVM_MINGW_DIR" --strip-components=1
   echo "llvm-mingw installed at $LLVM_MINGW_DIR"
-  ls "$LLVM_MINGW_DIR/bin/" 2>/dev/null | grep -E "^(aarch64-w64-mingw32-(clang|gcc)|x86_64-w64-mingw32-)" | head -5 ||fi
+  ls "$LLVM_MINGW_DIR/bin/" 2>/dev/null | grep -E "^(aarch64-w64-mingw32-(clang|gcc)|x86_64-w64-mingw32-)" | head -5 || true
 export PATH="$LLVM_MINGW_DIR/bin:$PATH"
 
 echo "=== [2/9] Locate NDK ==="
