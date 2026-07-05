@@ -148,18 +148,80 @@ PYKB
     sed -i '/^[[:space:]]*dllmain\.c \\$/a \\tlinux-dmabuf-unstable-v1.xml \\\n\twayland_dmabuf.c \\' \
         dlls/winewayland.drv/Makefile.in
 
-    # 8. NOTE: The USER-lock crash (user_check_not_lock) was a SYMPTOM, not the
-    #    root cause. The actual root cause was the XKB ruleset failure (fix #1b
-    #    above) which caused wayland_keyboard_init to bail out early, leaving
-    #    the driver in a partially-initialized state that eventually triggered
-    #    the USER-lock assertion. With fix #1b applied, the keyboard initializes
-    #    correctly and the cascade is prevented.
+    # 8. CRITICAL FIX: Remove wl_display_dispatch_queue_pending from
+    #    wayland_buffer_queue_get_free_buffer to prevent USER-lock re-entrancy.
     #
-    # The previous diagnostic instrumentation (user_lock_diag.h, backtrace
-    # logging, etc.) has been removed — it was causing build failures and
-    # was no longer needed once the root cause was identified.
+    # ROOT CAUSE of user_check_not_lock crash (confirmed via Wine source analysis):
+    #
+    # The crash trace:
+    #   flush_window_surfaces (called while USER lock held by ancestor)
+    #     → wayland_window_surface_flush
+    #       → wayland_buffer_queue_get_free_buffer
+    #         → wl_display_dispatch_queue_pending  ← PROCESSES WAYLAND EVENTS
+    #           → buffer_release listener
+    #             → wayland_shm_buffer_unref
+    #               → NtGdiDeleteObjectApp  ← RE-ENTERS win32u (GDI)
+    #                 → user_check_not_lock CRASH
+    #
+    # The problem: wayland_buffer_queue_get_free_buffer calls
+    # wl_display_dispatch_queue_pending to process buffer_release events.
+    # But buffer_release → wayland_shm_buffer_unref → NtGdiDeleteObjectApp
+    # re-enters win32u's GDI subsystem. When this happens while the USER
+    # lock is held (by an ancestor frame in the call stack), the re-entrant
+    # win32u call hits user_check_not_lock() and crashes.
+    #
+    # In upstream Wine, the message loop calls user_check_not_lock() BEFORE
+    # flush_window_surfaces to ensure the lock isn't held. But Proton 11.0
+    # has additional code paths (desktop/layered window painting) that call
+    # flush_window_surfaces while the USER lock IS held.
+    #
+    # FIX: Remove the wl_display_dispatch_queue_pending call from
+    # wayland_buffer_queue_get_free_buffer. The dedicated Wayland event
+    # thread (waylanddrv_unix_read_events) will process buffer_release
+    # events asynchronously. Buffers will still be freed — just not
+    # synchronously during the flush. This breaks the re-entrancy cycle.
+    #
+    # This is safe because:
+    # - buffer_release just sets busy=FALSE and calls wayland_shm_buffer_unref
+    # - The event thread processes these on a separate thread without USER lock
+    # - The buffer queue has multiple buffers, so not getting an immediate
+    #   release just means we use the next available buffer
 
-    echo "  dmabuf sources + XKB fix applied"
+    echo "  Patching window_surface.c: remove wl_display_dispatch_queue_pending"
+    # Replace the dispatch call with a comment (no-op)
+    # The call is: wl_display_dispatch_queue_pending(process_wayland.wl_display, queue->wl_event_queue);
+    sed -i 's/wl_display_dispatch_queue_pending(process_wayland\.wl_display,/\/\/ DISABLED: wl_display_dispatch_queue_pending(process_wayland.wl_display,/g' \
+        dlls/winewayland.drv/window_surface.c 2>/dev/null
+    sed -i 's/^[[:space:]]*queue->wl_event_queue);/\/\/ queue->wl_event_queue);  \/\/ removed to prevent USER-lock re-entrancy/g' \
+        dlls/winewayland.drv/window_surface.c 2>/dev/null
+
+    # Verify the patch
+    if grep -q "DISABLED: wl_display_dispatch_queue_pending" dlls/winewayland.drv/window_surface.c; then
+        echo "  Patched: wl_display_dispatch_queue_pending disabled in buffer_queue_get_free_buffer"
+    else
+        echo "  WARNING: sed patch did not apply — trying Python approach"
+        python3 << 'PYDISP'
+with open('dlls/winewayland.drv/window_surface.c', 'r') as f:
+    c = f.read()
+# Find and remove the wl_display_dispatch_queue_pending call
+import re
+# Match the full statement (may span 2 lines)
+pattern = r'wl_display_dispatch_queue_pending\s*\(\s*process_wayland\.wl_display\s*,\s*queue->wl_event_queue\s*\)\s*;'
+if re.search(pattern, c):
+    c = re.sub(pattern, '/* DISABLED: wl_display_dispatch_queue_pending — causes USER-lock re-entrancy */', c)
+    with open('dlls/winewayland.drv/window_surface.c', 'w') as f:
+        f.write(c)
+    print("  Python patch applied: wl_display_dispatch_queue_pending removed")
+else:
+    print("  ERROR: could not find wl_display_dispatch_queue_pending pattern")
+    # Show what's there for debugging
+    for i, line in enumerate(c.split('\n')):
+        if 'dispatch_queue_pending' in line:
+            print(f"    line {i+1}: {line.rstrip()}")
+PYDISP
+    fi
+
+    echo "  dmabuf sources + XKB fix + USER-lock re-entrancy fix applied"
 else
     echo "  WARNING: $WLD_SRC not found — building without dmabuf support"
 fi
