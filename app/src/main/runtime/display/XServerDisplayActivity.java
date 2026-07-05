@@ -6684,6 +6684,13 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
         if ("wayland".equals(displayMode)) {
             xServerView.setWaylandMode(true);
             waylandBridgeServer = new WaylandBridgeServer();
+            // In Wayland mode, dismiss the preloader when the first frame
+            // is presented (not when an X11 window appears, which never happens)
+            waylandBridgeServer.setPreloaderDismissCallback(() -> {
+                if (preloaderDialog != null) {
+                    preloaderDialog.closeOnUiThread();
+                }
+            });
             waylandBridgeServer.start(xServerView, this);
             // Pass the ANativeWindow to winevulkan NOW — surfaceCreated fired
             // before setupUI, so WaylandBridgeServer wasn't loaded yet and

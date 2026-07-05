@@ -29,6 +29,7 @@ public class WaylandBridgeServer {
     private int width = 1920;
     private int height = 1080;
     private int frameIndex = 0;
+    private Runnable preloaderDismissCallback = null;
 
     // Native methods — implemented in waylandie_display_native.c
     private static native String nativePresentAhbVkDmaBufFrame(
@@ -51,6 +52,10 @@ public class WaylandBridgeServer {
         } catch (UnsatisfiedLinkError e) {
             Log.e(TAG, "Failed to load waylandie_display_native", e);
         }
+    }
+
+    public void setPreloaderDismissCallback(Runnable callback) {
+        this.preloaderDismissCallback = callback;
     }
 
     public void start(SurfaceView view) {
@@ -280,6 +285,16 @@ public class WaylandBridgeServer {
 
             // Check if present passed
             if (result != null && result.contains("status=pass")) {
+                // Dismiss the preloader dialog on the first successful frame.
+                // In Wayland mode, the XServer's onUpdateWindowContent never fires
+                // (no X11 windows), so the preloader would stay forever.
+                // This callback dismisses it when the first frame is presented.
+                if (frameIndex == 1) {
+                    Log.i(TAG, "First frame presented — dismissing preloader");
+                    if (preloaderDismissCallback != null) {
+                        preloaderDismissCallback.run();
+                    }
+                }
                 return "waylandie-bridge dmabuf-present status=pass";
             } else {
                 return "waylandie-bridge dmabuf-present status=fail reason=" + result;
