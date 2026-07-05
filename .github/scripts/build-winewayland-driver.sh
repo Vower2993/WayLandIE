@@ -486,18 +486,15 @@ git apply "$WORKSPACE/.github/scripts/patches/add_esync_include.patch" 2>&1 || \
   echo "  WARNING: add_esync_include.patch failed (may already be applied)"
 
 # Apply our custom patch: export FEX-required ntdll functions from all win64 archs.
-#
 # Background: FEX's libarm64ecfex.dll imports RtlIsEcCode + ProcessPendingCrossProcessEmulatorWork
 # from ntdll.dll. These functions ARE in the proton_11.0 source (signal_arm64ec.c:949 + :1400)
 # but the spec file marks them with -arch=arm64ec and -arch=x86_64 respectively.
-#
 # When Wine's build system creates a hybrid ARM64X ntdll.dll (via -b arm64ec-windows -marm64x),
 # the ARM64EC-specific exports go into the CHPE metadata's export table (not the standard PE
 # export directory). Wine's import_dll uses RtlImageDirectoryEntryToData to find exports,
 # which ONLY looks at the standard PE export directory. Result: FEX's imports can't find
 # these symbols → Wine stubs them to 0x10000 → FEX's DllMain calls them → SIGSEGV →
 # exception handler re-enters FEX → recursion → stack overflow → FEX never inits.
-#
 # Fix is in TWO parts:
 #   1. ntdll-fex-stubs.patch — adds stub implementations of both functions to signal_arm64.c
 #      (compiled for native ARM64, where __arm64ec__ is NOT defined). Without these stubs,
@@ -506,7 +503,6 @@ git apply "$WORKSPACE/.github/scripts/patches/add_esync_include.patch" 2>&1 || \
 #   2. ntdll-spec-fex-exports.patch — changes -arch=arm64ec / -arch=x86_64 to -arch=win64
 #      so the functions are exported from the STANDARD PE export directory (where Wine's
 #      import_dll can find them).
-#
 # Side effect: ARM64 native processes also see these exports. This is safe because:
 #   - RtlIsEcCode stub returns FALSE (no native ARM64 code is EC code)
 #   - ProcessPendingCrossProcessEmulatorWork stub is a no-op (no CHPE V2 work for native)
@@ -524,14 +520,12 @@ echo "  Spec entries:"
 grep -E "RtlIsEcCode|ProcessPendingCrossProcessEmulatorWork" /tmp/proton-wine/dlls/ntdll/ntdll.spec | head -5
 
 # Apply our custom patch: increase minimum thread stack from 1MB to 8MB.
-#
 # Background: FEX's libarm64ecfex.dll DllMain consumes nearly 1MB of stack during
 # PROCESS_ATTACH (JIT initialization, allocator setup, etc.). Wine's default
 # minimum thread stack is 1MB, so FEX's DllMain overflows the stack before it
 # can complete. The overflow hits the guard page, but by then there's only 432
 # bytes of stack left — not enough for Wine's exception handler to run →
 # 00fc:err:virtual:virtual_setup_exception stack overflow 432 bytes → abort.
-#
 # Fix: change the minimum from 1MB to 8MB in virtual_alloc_thread_stack().
 # This ensures ALL threads (including the initial process thread that loads
 # FEX) get at least 8MB of stack, which is enough for FEX's DllMain + Wine's
@@ -590,10 +584,37 @@ export STRIP="$TOOLCHAIN/bin/llvm-strip"
 FT_DIR="$WORKSPACE/.github/scripts/freetype-bionic"
 echo "  FreeType bionic static lib: $FT_DIR/lib/libfreetype.a ($(stat -c%s $FT_DIR/lib/libfreetype.a 2>/dev/null || echo 0) bytes)"
 
-# CRITICAL: Define VK_USE_PLATFORM_WIN32_KHR so that winevulkan's Unix side
-# compiles vkCreateWin32SurfaceKHR into the instance dispatch table.
-#
- 2>&1 | tail -5 ||
+# FreeType: Wine uses WINE_CHECK_SONAME (not AC_CHECK_LIB) which tries to
+# dlopen the .so at runtime. In cross-compile, it can't run the binary, so
+# it relies on --with-freetype-lib. But we use a static .a, so we just
+# make the .so available via LDFLAGS.
+export CFLAGS="-fPIC --sysroot=$SYSROOT -I$SYSROOT/usr/include -I$BIONIC_LIBS/include -I$FT_DIR/include/freetype2 -I/tmp/proton-wine/include -D__ANDROID_API__=$API -D__ANDROID__ -Wno-int-conversion"
+export CXXFLAGS="$CFLAGS"
+export LDFLAGS="--sysroot=$SYSROOT -L$BIONIC_LIBS/lib -L$FT_DIR/lib -landroid-sysvshm -lffi"
+export PKG_CONFIG_PATH="$BIONIC_LIBS/lib/pkgconfig:$FT_DIR/lib/pkgconfig"
+export PKG_CONFIG_LIBDIR="$BIONIC_LIBS/lib/pkgconfig:$FT_DIR/lib/pkgconfig"
+unset PKG_CONFIG_SYSROOT_DIR
+
+./configure \
+  --host=aarch64-linux-android \
+  --prefix=/usr/local \
+  --with-wine-tools=/tmp/proton-wine-tools-build \
+  --without-x \
+  --without-alsa --without-oss --without-pulse --without-cups \
+  --without-sane --without-usb --without-sdl --without-gstreamer \
+  --without-freetype --without-fontconfig --without-v4l2 \
+  --enable-win64 \
+  --enable-archs=arm64ec,aarch64 \
+  --with-mingw=$LLVM_MINGW_DIR/bin/clang \
+  --with-pthread \
+  --disable-tests \
+  2>&1 | tail -40
+
+echo "=== configure Wayland vars ==="
+grep -E "^(WAYLAND|XKB)" /tmp/proton-wine/config.status | head -20 || true
+
+echo "=== [8/9] Build winewayland targets ==="
+
 make -j$(nproc) -k \
   dlls/winewayland.drv/aarch64-windows/winewayland.drv \
   dlls/winewayland.drv/winewayland.so \
@@ -639,7 +660,6 @@ done
 # be missing RtlIsEcCode + ProcessPendingCrossProcessEmulatorWork exports
 # that FEX's libarm64ecfex.dll requires. Without these, FEX crashes during
 # DllMain PROCESS_ATTACH (stack overflow from invalid address 0x10000 stub).
-#
 # Wine's build system produces a HYBRID ntdll.dll at:
 #   dlls/ntdll/aarch64-windows/ntdll.dll
 # This single PE file contains BOTH aarch64 (native ARM64) code AND arm64ec
