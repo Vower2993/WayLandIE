@@ -116,7 +116,8 @@ cd /tmp/proton-wine/android/android_sysvshm
 echo "Built: $(ls -la libandroid-sysvshm.so)"
 cp libandroid-sysvshm.so "$BIONIC_LIBS/lib/"
 mkdir -p "$BIONIC_LIBS/include/sys"
-cp -r sys/* "$BIONIC_LIBS/include/sys/" 2>/dev/null ||cp libandroid-sysvshm.so "$ROOTFS_OUT/usr/local/lib/"
+cp -r sys/* "$BIONIC_LIBS/include/sys/" 2>/dev/null || true
+cp libandroid-sysvshm.so "$ROOTFS_OUT/usr/local/lib/"
 
 cp /tmp/proton-wine/android/shm_utils/shm_utils.h "$BIONIC_LIBS/include/shm_utils.h"
 cp /tmp/proton-wine/android/shm_utils/shm_utils.h /tmp/proton-wine/include/
@@ -594,6 +595,23 @@ export LDFLAGS="--sysroot=$SYSROOT -L$BIONIC_LIBS/lib -L$FT_DIR/lib -landroid-sy
 export PKG_CONFIG_PATH="$BIONIC_LIBS/lib/pkgconfig:$FT_DIR/lib/pkgconfig"
 export PKG_CONFIG_LIBDIR="$BIONIC_LIBS/lib/pkgconfig:$FT_DIR/lib/pkgconfig"
 unset PKG_CONFIG_SYSROOT_DIR
+
+# Cross-compile env vars — configure can't run test binaries, so we
+# pre-set the results of common checks
+export ac_cv_prog_wayland_scanner=$(which wayland-scanner)
+export ac_cv_func_shm_open=yes
+export ac_cv_search_shm_open="none required"
+# Bionic has pthread built into libc — no separate libpthread
+export ac_cv_func_pthread_create=yes
+export ac_cv_lib_pthread_pthread_create=yes
+
+# Direct env-var settings (configure.ac honors these via WINE_PACKAGE_FLAGS)
+export WAYLAND_CLIENT_CFLAGS="-I$BIONIC_LIBS/include -D__ANDROID__ -DHAVE_SHM_UTILS"
+export WAYLAND_CLIENT_LIBS="-L$BIONIC_LIBS/lib -lwayland-client -lffi -landroid-sysvshm"
+export WAYLAND_SERVER_CFLAGS="-I$BIONIC_LIBS/include -D__ANDROID__ -DHAVE_SHM_UTILS"
+export WAYLAND_SERVER_LIBS="-L$BIONIC_LIBS/lib -lwayland-server -lffi -landroid-sysvshm"
+export WAYLAND_EGL_CFLAGS="-I$BIONIC_LIBS/include"
+export WAYLAND_EGL_LIBS="-L$BIONIC_LIBS/lib -lwayland-egl"
 
 ./configure \
   --host=aarch64-linux-android \
