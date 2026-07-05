@@ -6597,6 +6597,28 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
             envVars.put("WINEDLLOVERRIDES", wlOverrides);
             Log.i("XServerDisplayActivity", "Wayland WINEDLLOVERRIDES: " + wlOverrides);
 
+            // CRITICAL: Clear DISPLAY so Wine does NOT load winex11.drv.
+            //
+            // CAUSE: GuestProgramLauncherComponent.java:907 unconditionally sets
+            // DISPLAY=:0 (for X11 mode). In Wayland mode, Xvfb IS running on :0,
+            // so Wine loads winex11.drv FIRST, creates a desktop, then when
+            // winewayland.drv loads later, create_desktop() fails because a
+            // desktop already exists → crash cascade → nodrv_CreateWindow errors.
+            //
+            // EFFECT: Clearing DISPLAY here flows through setEnvVars →
+            // mergeExternalEnvVars (line 743: envVars.putAll(this.envVars))
+            // which overrides the hardcoded DISPLAY=:0 from line 907. Wine can't
+            // find an X display → skips winex11.drv → loads winewayland.drv
+            // exclusively → desktop creation succeeds.
+            //
+            // SIDE EFFECTS: Any Wine code that checks DISPLAY will fail. This is
+            // intentional — in Wayland mode, ALL display operations should go
+            // through winewayland.drv, not winex11.drv. The Wine services
+            // (services.exe, rpcss.exe) that start before explorer will also use
+            // winewayland.drv (or fall back to nulldrv if the Wayland socket
+            // isn't ready yet, which is safe — they don't render).
+            envVars.put("DISPLAY", "");
+
             // Enable the WaylandIE dmabuf forwarding in winevulkan.so.
             // Our custom thunks (winevulkan_dmabuf.c, compiled into winevulkan.so)
             // intercept vkCreateSwapchainKHR/vkQueuePresentKHR to create opaque-fd

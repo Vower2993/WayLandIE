@@ -317,6 +317,7 @@ struct surface_state {
     int has_pending_attach;
     int commit_count;
     int is_xdg_surface;
+    struct waylandie_xdg_surface_state *xdg_surface; /* link back to xdg_surface_state */
     int is_subsurface;
     struct surface_state *subsurface_parent;
     struct wl_list subsurface_children;
@@ -2112,6 +2113,7 @@ struct waylandie_xdg_surface_state {
     struct surface_state *surface;
     struct wl_resource *resource;
     struct wl_resource *toplevel_resource;
+    int configure_sent; /* 0 until the first configure is sent on first commit */
 };
 
 struct waylandie_xdg_toplevel_state {
@@ -2364,7 +2366,13 @@ static void xdg_surface_get_toplevel(struct wl_client *client, struct wl_resourc
         xdg_surface->toplevel_resource = toplevel_resource;
     }
     wl_resource_set_implementation(toplevel_resource, &xdg_toplevel_impl, toplevel, destroy_xdg_toplevel_resource);
-    send_xdg_configure(xdg_surface);
+    /* Do NOT send xdg_configure here — the xdg-shell spec requires the
+     * configure to be sent in response to the first wl_surface.commit,
+     * not at get_toplevel time. Sending it here causes the client to
+     * receive a configure before it has committed any buffer, which
+     * violates the spec and can cause the client to skip the initial
+     * surface setup. The configure is now sent in surface_commit()
+     * on the first commit. */
 }
 
 static void xdg_surface_get_popup(
@@ -2433,6 +2441,7 @@ static void xdg_wm_base_get_xdg_surface(
     xdg_surface->surface = wl_resource_get_user_data(surface_resource);
     if (xdg_surface->surface != NULL) {
         xdg_surface->surface->is_xdg_surface = 1;
+        xdg_surface->surface->xdg_surface = xdg_surface; /* link back */
     }
     printf("wayland-shm-ahb xdg-surface surface=%p\n", (void *)xdg_surface->surface);
     fflush(stdout);
@@ -4377,6 +4386,18 @@ static void surface_commit(struct wl_client *client, struct wl_resource *resourc
         return;
     }
     g_diag.surfaces_committed++;
+
+    /* xdg-shell spec: send the initial configure on the FIRST commit,
+     * not at get_toplevel time. The old code sent it in
+     * xdg_surface_get_toplevel (before any commit), violating the spec.
+     * This caused clients to receive a configure before committing any
+     * buffer, leading to incorrect surface setup. */
+    if (surface->is_xdg_surface && surface->xdg_surface != NULL
+            && !surface->xdg_surface->configure_sent) {
+        send_xdg_configure(surface->xdg_surface);
+        surface->xdg_surface->configure_sent = 1;
+    }
+
     if (!surface_is_displayable(surface)) {
         printf("wayland-shm-ahb commit=ignored-non-displayable xdg=%d subsurface=%d kind=%d\n",
                 surface->is_xdg_surface,
