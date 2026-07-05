@@ -1025,8 +1025,171 @@ static void close_android_window_for_surface(struct surface_state *surface) {
 struct shm_ahb_handle {
     AHardwareBuffer* ahb;
     int dmabuf_fd;
+    int from_pool;  // 1=from pool (don't close fd on release), 0=fallback
     struct shm_buffer_state temp_buffer;  // kind=DMABUF, ready to present
 };
+
+// ----------------------------------------------------------------------
+// AHB POOL — reuse AHardwareBuffers to avoid GPU memory exhaustion.
+//
+// ROOT CAUSE of the desktop freeze after ~90 frames:
+//   Every SHM→AHB conversion called AHardwareBuffer_allocate(), which
+//   allocates a NEW GPU buffer. SurfaceFlinger holds presented buffers
+//   until the next frame replaces them (~4-5 buffers in flight). With
+//   the Java side's 8-slot ring buffer + SurfaceFlinger's hold, the GPU
+//   runs out of memory after ~90 frames. AHardwareBuffer_allocate() then
+//   BLOCKS for 500ms+ waiting for memory, causing the freeze.
+//
+// FIX: Maintain a pool of pre-allocated AHBs. When a frame arrives, find
+//   a FREE AHB of matching dimensions, reuse it, and mark it IN_USE.
+//   When the present completes, mark it FREE for reuse. This caps the
+//   total GPU memory at POOL_SIZE buffers, regardless of frame count.
+//
+// WHY X11 MODE DOESN'T FREEZE:
+//   X11 mode uses the XServer's Java-side X11 image buffer (single buffer,
+//   CPU-rendered, no GPU allocation per frame). The Wayland SHM→AHB path
+//   allocates GPU buffers per frame, which exhausts GPU memory. This is
+//   a Wayland-only issue.
+// ----------------------------------------------------------------------
+#define SHM_AHB_POOL_SIZE 8
+#define SHM_AHB_POOL_MAX_DIMS 4  // track up to 4 different buffer dimensions
+
+struct shm_ahb_pool_entry {
+    AHardwareBuffer *ahb;
+    int dmabuf_fd;       // cached dmabuf fd (valid for lifetime of AHB)
+    int width;
+    int height;
+    int stride_px;       // stride in pixels (from AHardwareBuffer_describe)
+    int in_use;          // 0=free, 1=in use
+    int64_t frame_index; // last frame that used this entry (diagnostic)
+};
+
+struct shm_ahb_pool_dim_slot {
+    int width;
+    int height;
+    struct shm_ahb_pool_entry entries[SHM_AHB_POOL_SIZE];
+};
+
+static struct shm_ahb_pool_dim_slot g_ahb_pool[SHM_AHB_POOL_MAX_DIMS];
+static int g_ahb_pool_init_done = 0;
+static pthread_mutex_t g_ahb_pool_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static struct shm_ahb_pool_dim_slot *find_or_create_dim_slot(int width, int height) {
+    // Find existing slot with matching dimensions
+    for (int i = 0; i < SHM_AHB_POOL_MAX_DIMS; i++) {
+        if (g_ahb_pool[i].width == width && g_ahb_pool[i].height == height
+                && g_ahb_pool[i].entries[0].ahb != NULL) {
+            return &g_ahb_pool[i];
+        }
+    }
+    // Find empty slot
+    for (int i = 0; i < SHM_AHB_POOL_MAX_DIMS; i++) {
+        if (g_ahb_pool[i].entries[0].ahb == NULL) {
+            g_ahb_pool[i].width = width;
+            g_ahb_pool[i].height = height;
+            return &g_ahb_pool[i];
+        }
+    }
+    return NULL;  // pool full of different dimensions
+}
+
+static int shm_ahb_pool_acquire(int width, int height,
+                                AHardwareBuffer **out_ahb, int *out_fd,
+                                int *out_stride_px, int frame_index) {
+    pthread_mutex_lock(&g_ahb_pool_mutex);
+
+    struct shm_ahb_pool_dim_slot *slot = find_or_create_dim_slot(width, height);
+    if (slot == NULL) {
+        pthread_mutex_unlock(&g_ahb_pool_mutex);
+        return -1;
+    }
+
+    // Find a free entry
+    for (int i = 0; i < SHM_AHB_POOL_SIZE; i++) {
+        struct shm_ahb_pool_entry *e = &slot->entries[i];
+        if (!e->in_use && e->ahb != NULL) {
+            e->in_use = 1;
+            e->frame_index = frame_index;
+            *out_ahb = e->ahb;
+            *out_fd = e->dmabuf_fd;
+            *out_stride_px = e->stride_px;
+            pthread_mutex_unlock(&g_ahb_pool_mutex);
+            return 0;  // reused
+        }
+    }
+
+    // No free entry — allocate a new one in an empty slot
+    for (int i = 0; i < SHM_AHB_POOL_SIZE; i++) {
+        struct shm_ahb_pool_entry *e = &slot->entries[i];
+        if (e->ahb == NULL) {
+            AHardwareBuffer_Desc desc = {};
+            desc.width = (uint32_t)width;
+            desc.height = (uint32_t)height;
+            desc.layers = 1;
+            desc.format = AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM;
+            desc.usage = AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN
+                       | AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE
+                       | AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN;
+            int rc = AHardwareBuffer_allocate(&desc, &e->ahb);
+            if (rc != 0 || e->ahb == NULL) {
+                pthread_mutex_unlock(&g_ahb_pool_mutex);
+                return -1;
+            }
+            // Cache the dmabuf fd for the lifetime of the AHB
+            const struct waylandie_native_handle *h = AHardwareBuffer_getNativeHandle(e->ahb);
+            if (h == NULL || h->numFds < 1) {
+                AHardwareBuffer_release(e->ahb);
+                e->ahb = NULL;
+                pthread_mutex_unlock(&g_ahb_pool_mutex);
+                return -1;
+            }
+            e->dmabuf_fd = dup(h->data[0]);
+            if (e->dmabuf_fd < 0) {
+                AHardwareBuffer_release(e->ahb);
+                e->ahb = NULL;
+                pthread_mutex_unlock(&g_ahb_pool_mutex);
+                return -1;
+            }
+            AHardwareBuffer_Desc queried = {};
+            AHardwareBuffer_describe(e->ahb, &queried);
+            e->stride_px = queried.stride ? (int)queried.stride : width;
+            e->width = width;
+            e->height = height;
+            e->in_use = 1;
+            e->frame_index = frame_index;
+            *out_ahb = e->ahb;
+            *out_fd = e->dmabuf_fd;
+            *out_stride_px = e->stride_px;
+            g_diag.ahb_allocated++;
+            pthread_mutex_unlock(&g_ahb_pool_mutex);
+            return 0;  // newly allocated
+        }
+    }
+
+    // All entries in use — this should NOT happen if POOL_SIZE >= Java's ring size
+    // Fall through to blocking allocate (old behavior)
+    pthread_mutex_unlock(&g_ahb_pool_mutex);
+    return -1;
+}
+
+static void shm_ahb_pool_release(AHardwareBuffer *ahb) {
+    if (ahb == NULL) return;
+    pthread_mutex_lock(&g_ahb_pool_mutex);
+    for (int d = 0; d < SHM_AHB_POOL_MAX_DIMS; d++) {
+        struct shm_ahb_pool_dim_slot *slot = &g_ahb_pool[d];
+        for (int i = 0; i < SHM_AHB_POOL_SIZE; i++) {
+            if (slot->entries[i].ahb == ahb) {
+                slot->entries[i].in_use = 0;
+                pthread_mutex_unlock(&g_ahb_pool_mutex);
+                return;
+            }
+        }
+    }
+    // Not found in pool — this was a fallback allocation, release it
+    pthread_mutex_unlock(&g_ahb_pool_mutex);
+    AHardwareBuffer_release(ahb);
+    g_diag.ahb_released++;
+}
 
 static int shm_to_ahb(struct shm_buffer_state *shm, int frame_index,
                        struct shm_ahb_handle *out) {
@@ -1093,48 +1256,69 @@ static int shm_to_ahb(struct shm_buffer_state *shm, int frame_index,
         return -1;
     }
 
-    // 1. Allocate AHardwareBuffer
-    AHardwareBuffer_Desc desc = {};
-    desc.width = (uint32_t)shm->width;
-    desc.height = (uint32_t)shm->height;
-    desc.layers = 1;
-    desc.format = AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM;
-    desc.usage = AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN
-               | AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE
-               | AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN;
-    desc.rfu0 = 0;
-    desc.rfu1 = 0;
+    // 1. Acquire AHardwareBuffer from pool (reuses existing AHBs)
+    int pool_stride_px = 0;
+    int pool_fd = -1;
+    int pool_rc = shm_ahb_pool_acquire(shm->width, shm->height,
+                                        &out->ahb, &pool_fd, &pool_stride_px,
+                                        frame_index);
+    if (pool_rc != 0 || out->ahb == NULL) {
+        // Pool full or allocation failed — fall back to direct allocation
+        AHardwareBuffer_Desc desc = {};
+        desc.width = (uint32_t)shm->width;
+        desc.height = (uint32_t)shm->height;
+        desc.layers = 1;
+        desc.format = AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM;
+        desc.usage = AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN
+                   | AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE
+                   | AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN;
+        desc.rfu0 = 0;
+        desc.rfu1 = 0;
 
-    int rc = AHardwareBuffer_allocate(&desc, &out->ahb);
-    if (rc != 0 || out->ahb == NULL) {
-        printf("wayland-shm-ahb frame=%d status=fail reason=ahb-alloc rc=%d errno=%d %s "
-               "buf_id=%llu %dx%d\n",
-               frame_index, rc, errno, strerror(errno),
-               (unsigned long long)shm->id, shm->width, shm->height);
-        g_diag.shm_to_ahb_failures++;
-        out->ahb = NULL;
-        return -1;
+        int rc = AHardwareBuffer_allocate(&desc, &out->ahb);
+        if (rc != 0 || out->ahb == NULL) {
+            printf("wayland-shm-ahb frame=%d status=fail reason=ahb-alloc rc=%d errno=%d %s "
+                   "buf_id=%llu %dx%d\n",
+                   frame_index, rc, errno, strerror(errno),
+                   (unsigned long long)shm->id, shm->width, shm->height);
+            g_diag.shm_to_ahb_failures++;
+            out->ahb = NULL;
+            return -1;
+        }
+        g_diag.ahb_allocated++;
+        // For fallback path, we need to get the fd and stride ourselves
+        const struct waylandie_native_handle *h = AHardwareBuffer_getNativeHandle(out->ahb);
+        if (h == NULL || h->numFds < 1) {
+            AHardwareBuffer_release(out->ahb);
+            out->ahb = NULL;
+            return -1;
+        }
+        pool_fd = dup(h->data[0]);
+        AHardwareBuffer_Desc queried = {};
+        AHardwareBuffer_describe(out->ahb, &queried);
+        pool_stride_px = queried.stride ? (int)queried.stride : shm->width;
     }
-    g_diag.ahb_allocated++;
+
+    // At this point, out->ahb is valid. pool_fd is the dmabuf fd.
+    // If from pool, pool_fd is the CACHED fd (don't close it — it's reused).
+    // If from fallback, pool_fd is a fresh dup (close it after present).
 
     // 2. Lock for CPU write
     void* dst = NULL;
-    rc = AHardwareBuffer_lock(out->ahb,
+    int lock_rc = AHardwareBuffer_lock(out->ahb,
                               AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN
                               | AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN,
                               -1, NULL, &dst);
-    if (rc != 0 || dst == NULL) {
+    if (lock_rc != 0 || dst == NULL) {
         printf("wayland-shm-ahb frame=%d status=fail reason=ahb-lock rc=%d\n",
-               frame_index, rc);
-        AHardwareBuffer_release(out->ahb);
+               frame_index, lock_rc);
+        shm_ahb_pool_release(out->ahb);  // return to pool for reuse
         out->ahb = NULL;
         return -1;
     }
 
-    // 3. Get AHB stride
-    AHardwareBuffer_Desc queried = {};
-    AHardwareBuffer_describe(out->ahb, &queried);
-    int dst_stride_px = queried.stride ? (int)queried.stride : shm->width;
+    // 3. Use the stride from the pool (or from describe for fallback)
+    int dst_stride_px = pool_stride_px;
     size_t dst_stride_bytes = (size_t)dst_stride_px * 4;
 
     // 4. Copy with byte swap:
@@ -1160,23 +1344,12 @@ static int shm_to_ahb(struct shm_buffer_state *shm, int frame_index,
 
     AHardwareBuffer_unlock(out->ahb, NULL);
 
-    // 5. Get dmabuf fd
-    const struct waylandie_native_handle* h = AHardwareBuffer_getNativeHandle(out->ahb);
-    if (h == NULL || h->numFds < 1) {
-        printf("wayland-shm-ahb frame=%d status=fail reason=no-dmabuf-fd numFds=%d\n",
-               frame_index, h ? h->numFds : -1);
-        AHardwareBuffer_release(out->ahb);
-        out->ahb = NULL;
-        return -1;
-    }
-    out->dmabuf_fd = dup(h->data[0]);
-    if (out->dmabuf_fd < 0) {
-        printf("wayland-shm-ahb frame=%d status=fail reason=dup-fd errno=%d\n",
-               frame_index, errno);
-        AHardwareBuffer_release(out->ahb);
-        out->ahb = NULL;
-        return -1;
-    }
+    // 5. Use the cached dmabuf fd from the pool (or the fresh dup for fallback).
+    //    For pool entries, this fd is stable for the lifetime of the AHB and
+    //    is reused across frames — no dup/close per frame.
+    //    For fallback entries, pool_fd is a fresh dup that we close in release.
+    out->dmabuf_fd = pool_fd;
+    out->from_pool = (pool_rc == 0);  // track for release path
 
     // 6. Build a temporary buffer_state that present_buffer_to_android can use
     out->temp_buffer.kind = BUFFER_KIND_DMABUF;
@@ -1194,22 +1367,30 @@ static int shm_to_ahb(struct shm_buffer_state *shm, int frame_index,
     out->temp_buffer.dmabuf_fd = out->dmabuf_fd;
 
     printf("wayland-shm-ahb frame=%d shm-to-ahb ok src_stride=%d dst_stride=%d "
-           "%dx%d fd=%d\n",
+           "%dx%d fd=%d pool=%s\n",
            frame_index, src_stride_bytes, (int)dst_stride_bytes,
-           shm->width, shm->height, out->dmabuf_fd);
+           shm->width, shm->height, out->dmabuf_fd,
+           out->from_pool ? "reused" : "fallback");
     return 0;
 }
 
 static void shm_ahb_release(struct shm_ahb_handle *h) {
-    if (h->dmabuf_fd >= 0) {
-        close(h->dmabuf_fd);
-        g_diag.dmabuf_fds_closed++;
-        h->dmabuf_fd = -1;
-    }
     if (h->ahb != NULL) {
-        AHardwareBuffer_release(h->ahb);
-        g_diag.ahb_released++;
+        if (h->from_pool) {
+            // Return AHB to pool for reuse. DON'T close the dmabuf fd —
+            // it's cached for the lifetime of the AHB and reused across frames.
+            shm_ahb_pool_release(h->ahb);
+        } else {
+            // Fallback path — close the fresh dup fd and release the AHB
+            if (h->dmabuf_fd >= 0) {
+                close(h->dmabuf_fd);
+                g_diag.dmabuf_fds_closed++;
+            }
+            AHardwareBuffer_release(h->ahb);
+            g_diag.ahb_released++;
+        }
         h->ahb = NULL;
+        h->dmabuf_fd = -1;
     }
 }
 #endif  // WAYLANDIE_HAS_AHARDWAREBUFFER
