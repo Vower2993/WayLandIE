@@ -1505,9 +1505,9 @@ make -j$(nproc) -k \
 # CRITICAL: Verify -ldl is in the ACTUAL link command by rebuilding winevulkan.so verbosely.
 # This catches cases where the Makefile.in patch didn't propagate to the generated Makefile.
 echo "=== Verifying winevulkan.so link line contains -ldl ==="
-make -j1 dlls/winevulkan/winevulkan.so V=1 2>&1 | grep -E "winevulkan\.so.*-shared|UNIX_LIBS|-ldl" | tail -5
+make -j$(nproc) dlls/winevulkan/winevulkan.so V=1 2>&1 | grep -E "winevulkan\.so.*-shared|UNIX_LIBS|-ldl" | tail -5
 # Extract the actual clang/gcc link command and check for -ldl
-LINK_LINE=$(make -j1 dlls/winevulkan/winevulkan.so V=1 2>&1 | grep -E "winevulkan\.so.*-shared" | head -1)
+LINK_LINE=$(make -j$(nproc) dlls/winevulkan/winevulkan.so V=1 2>&1 | grep -E "winevulkan\.so.*-shared" | head -1)
 if echo "$LINK_LINE" | grep -q -- "-ldl"; then
     echo "  VERIFIED: -ldl is in the winevulkan.so link command"
 else
@@ -1520,7 +1520,7 @@ fi
 if [ ! -f /tmp/proton-wine/dlls/winevulkan/winevulkan.so ] || \
    [ "$(stat -c%s /tmp/proton-wine/dlls/winevulkan/winevulkan.so 2>/dev/null || echo 0)" -lt 1000 ]; then
     echo "=== winevulkan.so build failed — running verbose make to see errors ==="
-    make -j1 dlls/winevulkan/winevulkan.so V=1 2>&1 | tail -100 || true
+    make -j$(nproc) dlls/winevulkan/winevulkan.so V=1 2>&1 | tail -100 || true
 fi
 
 echo "=== Searching for built artifacts ==="
@@ -1648,7 +1648,7 @@ done
 VULKAN_SO_SIZE=$(stat -c%s "$PROTON_OUT/lib/wine/aarch64-unix/winevulkan.so" 2>/dev/null || echo 0)
 if [ "$VULKAN_SO_SIZE" -lt 1000 ]; then
   echo "WARNING: winevulkan.so not built — checking build errors"
-  make -j1 dlls/winevulkan/winevulkan.so V=1 2>&1 | tail -50 || true
+  make -j$(nproc) dlls/winevulkan/winevulkan.so V=1 2>&1 | tail -50 || true
 else
   echo "winevulkan.so collected: $VULKAN_SO_SIZE bytes"
 fi
@@ -1681,7 +1681,7 @@ WIN32U_SO_SIZE=$(stat -c%s "$PROTON_OUT/lib/wine/aarch64-unix/win32u.so" 2>/dev/
 if [ "$WIN32U_SO_SIZE" -lt 1000 ]; then
   echo "WARNING: win32u.so not built — struct layout mismatch will cause garbage physical_device_count"
   echo "=== Running verbose make for win32u.so to see errors ==="
-  make -j1 dlls/win32u/win32u.so V=1 2>&1 | tail -50 || true
+  make -j$(nproc) dlls/win32u/win32u.so V=1 2>&1 | tail -50 || true
 else
   echo "win32u.so collected: $WIN32U_SO_SIZE bytes"
 fi
@@ -1730,7 +1730,7 @@ fi
 if [ "$SO_SIZE" -lt 1000 ]; then
   echo "FATAL: winewayland.so missing or too small"
   echo "=== winewayland.so build output (last 80 lines) ==="
-  make -j1 dlls/winewayland.drv/winewayland.so V=1 2>&1 | tail -80 || true
+  make -j$(nproc) dlls/winewayland.drv/winewayland.so V=1 2>&1 | tail -80 || true
   exit 1
 fi
 

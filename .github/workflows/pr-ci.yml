@@ -172,7 +172,7 @@ jobs:
         KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
         KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
         KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-        GRADLE_OPTS: -Xmx4g -XX:+UseG1GC
+        GRADLE_OPTS: -Xmx12g -Xms8g -XX:MaxMetaspaceSize=4g -XX:+UseG1GC -XX:MaxGCPauseMillis=100 -Dorg.gradle.daemon=true -Dorg.gradle.parallel=true -Dorg.gradle.workers.max=4
       run: |
         export KEYSTORE_FILE="${{ github.workspace }}/release.jks"
         if [ -n "$KEYSTORE_BASE64" ]; then
@@ -188,7 +188,7 @@ jobs:
             -storepass dummypass -keypass dummypass \
             -dname "CN=CI, OU=CI, O=CI, L=CI, ST=CI, C=US"
         fi
-        ./gradlew :app:${{ matrix.flavor.gradleTask }} --build-cache --parallel -x lint
+        ./gradlew :app:${{ matrix.flavor.gradleTask }} --build-cache --parallel --max-workers=4 -x lint
 
     - name: Compute artifact label
       id: label
