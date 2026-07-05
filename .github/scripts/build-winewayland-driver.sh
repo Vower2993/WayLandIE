@@ -187,65 +187,78 @@ PYKB
     # - The buffer queue has multiple buffers, so not getting an immediate
     #   release just means we use the next available buffer
 
-    echo "  Patching window_surface.c: remove wl_display_dispatch_queue_pending"
-    # The call spans 2 lines:
-    #   wl_display_dispatch_queue_pending(process_wayland.wl_display,
-    #                                     queue->wl_event_queue);
-    # Use Python to reliably match and replace the multi-line statement
-    python3 << 'PYDISP'
+    echo "  Patching window_surface.c + wayland_surface.c: neutralize ALL NtGdi calls"
+    python3 << 'PYNTGDI'
 import re
+
+# ── window_surface.c ──────────────────────────────────────────────────
 with open('dlls/winewayland.drv/window_surface.c', 'r') as f:
     c = f.read()
 
-# Match the full statement (may span 1 or 2 lines, with any whitespace)
-# Pattern: wl_display_dispatch_queue_pending( process_wayland.wl_display , queue->wl_event_queue ) ;
+ntgdi_calls_before = len(re.findall(r'NtGdi\w+\s*\(', c))
+
+# 1. Remove wl_display_dispatch_queue_pending (prevents event dispatch during flush)
 pattern = r'wl_display_dispatch_queue_pending\s*\(\s*process_wayland\.wl_display\s*,\s*queue->wl_event_queue\s*\)\s*;'
-
 if re.search(pattern, c, re.DOTALL):
-    c = re.sub(pattern,
-               '/* DISABLED: wl_display_dispatch_queue_pending — causes USER-lock re-entrancy crash */',
-               c, flags=re.DOTALL)
-    with open('dlls/winewayland.drv/window_surface.c', 'w') as f:
-        f.write(c)
-    print("  Patch applied: wl_display_dispatch_queue_pending removed")
-else:
-    print("  WARNING: could not find wl_display_dispatch_queue_pending in window_surface.c")
+    c = re.sub(pattern, '/* DISABLED: wl_display_dispatch_queue_pending */', c, flags=re.DOTALL)
+    print("  [window_surface.c] wl_display_dispatch_queue_pending removed")
 
-# Also patch wayland_surface.c: make wayland_shm_buffer_unref NOT call
-# NtGdiDeleteObjectApp (which re-enters win32u and triggers user_check_not_lock).
-# Instead, just leak the damage_region HRGN — it's a small GDI object and
-# leaking it is better than crashing. The region is recreated on each flush.
-print("  Patching wayland_surface.c: neutralize NtGdiDeleteObjectApp")
-try:
-    with open('dlls/winewayland.drv/wayland_surface.c', 'r') as f:
-        surface_c = f.read()
+# 2. Define macros that stub out ALL NtGdi calls — they re-enter win32u and
+#    trigger user_check_not_lock when called during flush_window_surfaces.
+#    The crash trace: copy_pixel_region → get_region_data → NtGdiGetRegionData → CRASH
+macros = '''
+/* NtGdi NEUTRALIZATION: All NtGdi calls re-enter win32u and trigger
+ * user_check_not_lock when called during flush_window_surfaces (which
+ * holds the USER lock in Proton 11.0). We stub them out:
+ * - Create/Combine/SetRectRgn -> return 0 (NULL/ERROR, callers handle it)
+ * - GetRegionData -> return 0 (no region data, copy_pixel_region skips)
+ * - DeleteObjectApp -> leak the object (evaluate arg for side effects) */
+#define NtGdiCreateRectRgn(...) ((HRGN)0)
+#define NtGdiCombineRgn(...) 0
+#define NtGdiSetRectRgn(...) ((void)0)
+#define NtGdiGetRegionData(...) 0
+#define NtGdiDeleteObjectApp(x) ((void)(x))
+'''
 
-    # Count before
-    before = surface_c.count('NtGdiDeleteObjectApp')
+c = c.replace('#include "config.h"', '#include "config.h"\n' + macros, 1)
 
-    # Simple replacement: NtGdiDeleteObjectApp(x) -> (void)(x)
-    # This evaluates the argument (no side effects skipped) but doesn't call win32u
-    import re
-    surface_c = re.sub(
-        r'NtGdiDeleteObjectApp\s*\(',
-        '/* LEAK: was NtGdiDeleteObjectApp */ (void)(',
-        surface_c)
+ntgdi_calls_after = len(re.findall(r'NtGdi\w+\s*\(', c))
+macro_count = c.count('#define NtGdi')
+actual_calls = ntgdi_calls_after - macro_count
 
-    after = surface_c.count('NtGdiDeleteObjectApp')
-    print(f"  NtGdiDeleteObjectApp calls: {before} before, {after} after patch")
+print(f"  [window_surface.c] NtGdi calls: {ntgdi_calls_before} -> {actual_calls} (macros: {macro_count})")
 
-    if before > 0 and after < before:
-        with open('dlls/winewayland.drv/wayland_surface.c', 'w') as f:
-            f.write(surface_c)
-        print("  Patch applied: NtGdiDeleteObjectApp neutralized in wayland_surface.c")
-    else:
-        print("  WARNING: NtGdiDeleteObjectApp patch did not apply")
+with open('dlls/winewayland.drv/window_surface.c', 'w') as f:
+    f.write(c)
+print("  [window_surface.c] patched")
 
-except FileNotFoundError:
-    print("  WARNING: wayland_surface.c not found")
-except Exception as e:
-    print(f"  ERROR patching wayland_surface.c: {e}")
-PYDISP
+# ── wayland_surface.c ─────────────────────────────────────────────────
+with open('dlls/winewayland.drv/wayland_surface.c', 'r') as f:
+    c2 = f.read()
+
+before2 = len(re.findall(r'NtGdi\w+\s*\(', c2))
+
+macros2 = '''
+/* NtGdi NEUTRALIZATION for wayland_surface.c — same rationale as window_surface.c */
+#define NtGdiCreateRectRgn(...) ((HRGN)0)
+#define NtGdiDeleteObjectApp(x) ((void)(x))
+#define NtGdiExtGetObjectW(...) 0
+#define NtGdiGetDIBitsInternal(...) 0
+#define NtGdiCreateCompatibleDC(...) ((HDC)0)
+'''
+
+c2 = c2.replace('#include "config.h"', '#include "config.h"\n' + macros2, 1)
+
+after2 = len(re.findall(r'NtGdi\w+\s*\(', c2))
+macro_count2 = c2.count('#define NtGdi')
+actual_calls2 = after2 - macro_count2
+
+print(f"  [wayland_surface.c] NtGdi calls: {before2} -> {actual_calls2} (macros: {macro_count2})")
+
+with open('dlls/winewayland.drv/wayland_surface.c', 'w') as f:
+    f.write(c2)
+print("  [wayland_surface.c] patched")
+PYNTGDI
 
     echo "  dmabuf sources + XKB fix + USER-lock re-entrancy fix applied"
 else
