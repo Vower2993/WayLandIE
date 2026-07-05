@@ -904,8 +904,16 @@ public class GuestProgramLauncherComponent extends EnvironmentComponent {
     // Performance: hint Android to use performance CPU cores
     if (!envVars.has("WINE_ADPF")) envVars.put("WINE_ADPF", "1");
     envVars.put("PREFIX", rootDir.getPath() + "/usr");
-    envVars.put("DISPLAY", ":0");
-        envVars.put("WAYLAND_DISPLAY", "wayland-0");
+    // In Wayland mode, don't set DISPLAY — winewayland.drv must be the primary
+    // display driver. Setting DISPLAY=:0 lets winex11.drv connect to Xvfb first,
+    // creating a desktop that prevents winewayland.drv's create_desktop() from
+    // succeeding (get_desktop_window() fails → crash cascade).
+    // The Wayland compositor (bridge) is always started before the guest process.
+    String wlEnable = this.envVars != null ? this.envVars.get("WAYLANDIE_DMABUF_LAYER_ENABLE") : null;
+    if (!"1".equals(wlEnable)) {
+        envVars.put("DISPLAY", ":0");
+    }
+    envVars.put("WAYLAND_DISPLAY", "wayland-0");
         envVars.put("XDG_RUNTIME_DIR", imageFs.getRootDir().getPath() + "/usr/tmp/runtime");
     envVars.put("WINE_DISABLE_FULLSCREEN_HACK", "1");
     envVars.put("GST_PLUGIN_FEATURE_RANK", "ximagesink:3000");

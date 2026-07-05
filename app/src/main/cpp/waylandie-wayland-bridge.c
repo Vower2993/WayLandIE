@@ -317,6 +317,7 @@ struct surface_state {
     int has_pending_attach;
     int commit_count;
     int is_xdg_surface;
+    struct waylandie_xdg_surface_state *xdg_surface;
     int is_subsurface;
     struct surface_state *subsurface_parent;
     struct wl_list subsurface_children;
@@ -2112,6 +2113,7 @@ struct waylandie_xdg_surface_state {
     struct surface_state *surface;
     struct wl_resource *resource;
     struct wl_resource *toplevel_resource;
+    int configure_sent;
 };
 
 struct waylandie_xdg_toplevel_state {
@@ -2342,6 +2344,9 @@ static const struct xdg_popup_interface xdg_popup_impl = {
 
 static void destroy_xdg_surface_resource(struct wl_resource *resource) {
     struct waylandie_xdg_surface_state *xdg_surface = wl_resource_get_user_data(resource);
+    if (xdg_surface != NULL && xdg_surface->surface != NULL) {
+        xdg_surface->surface->xdg_surface = NULL;
+    }
     free(xdg_surface);
 }
 
@@ -2364,7 +2369,6 @@ static void xdg_surface_get_toplevel(struct wl_client *client, struct wl_resourc
         xdg_surface->toplevel_resource = toplevel_resource;
     }
     wl_resource_set_implementation(toplevel_resource, &xdg_toplevel_impl, toplevel, destroy_xdg_toplevel_resource);
-    send_xdg_configure(xdg_surface);
 }
 
 static void xdg_surface_get_popup(
@@ -2433,6 +2437,7 @@ static void xdg_wm_base_get_xdg_surface(
     xdg_surface->surface = wl_resource_get_user_data(surface_resource);
     if (xdg_surface->surface != NULL) {
         xdg_surface->surface->is_xdg_surface = 1;
+        xdg_surface->surface->xdg_surface = xdg_surface;
     }
     printf("wayland-shm-ahb xdg-surface surface=%p\n", (void *)xdg_surface->surface);
     fflush(stdout);
@@ -4377,6 +4382,17 @@ static void surface_commit(struct wl_client *client, struct wl_resource *resourc
         return;
     }
     g_diag.surfaces_committed++;
+
+    // Send the first xdg-shell configure event on the FIRST commit (not before).
+    // xdg-shell protocol requires the compositor to send the initial configure
+    // AFTER the client commits, not during get_toplevel. Sending it early (old
+    // code) can confuse winewayland.drv's state machine.
+    if (surface->xdg_surface != NULL
+            && surface->xdg_surface->toplevel_resource != NULL
+            && !surface->xdg_surface->configure_sent) {
+        send_xdg_configure(surface->xdg_surface);
+        surface->xdg_surface->configure_sent = 1;
+    }
     if (!surface_is_displayable(surface)) {
         printf("wayland-shm-ahb commit=ignored-non-displayable xdg=%d subsurface=%d kind=%d\n",
                 surface->is_xdg_surface,
