@@ -96,6 +96,112 @@ if [ -d "$WLD_SRC" ]; then
         dlls/winewayland.drv/Makefile.in
 
     echo "  dmabuf sources applied"
+
+    # === DEEP DIAGNOSTIC: Add fprintf(stderr) logging to DllMain and wayland_process_init ===
+    # This will tell us EXACTLY why explorer.exe fails to load winewayland.drv.
+    # The logs appear in wine_*.txt because stderr is captured by logcat.
+    echo "  Adding deep diagnostic logging to winewayland.drv..."
+
+    # Patch waylanddrv_main.c — log DllMain entry/exit and process attach
+    WDRV_MAIN="dlls/winewayland.drv/waylanddrv_main.c"
+    if [ -f "$WDRV_MAIN" ]; then
+        # Add fprintf after each major step in DllMain
+        # Insert logging at the top of the file (after includes)
+        sed -i '1a #include <stdio.h>' "$WDRV_MAIN"
+
+        # Log DLL_PROCESS_ATTACH entry
+        sed -i '/DLL_PROCESS_ATTACH/,/case/{/case/i\    fprintf(stderr, "WayLandIE-DIAG: DllMain DLL_PROCESS_ATTACH pid=%d\\n", (int)getpid());' "$WDRV_MAIN"
+
+        # Log wayland_process_init call result
+        sed -i '/wayland_process_init/,/return/{/return/i\        fprintf(stderr, "WayLandIE-DIAG: wayland_process_init returned %d\\n", wayland_process_init());' "$WDRV_MAIN" 2>/dev/null || true
+
+        # Simpler approach: just add a wrapper around wayland_process_init
+        python3 -c "
+import re
+path = '$WDRV_MAIN'
+with open(path) as f:
+    src = f.read()
+
+# Add logging before and after wayland_process_init() call
+src = src.replace(
+    'wayland_process_init()',
+    '({ fprintf(stderr, \"WayLandIE-DIAG: calling wayland_process_init pid=%d\\n\", (int)getpid()); int _r = wayland_process_init(); fprintf(stderr, \"WayLandIE-DIAG: wayland_process_init returned %d\\n\", _r); _r; })'
+)
+
+# Add logging at DllMain entry
+src = src.replace(
+    'BOOL WINAPI DllMain',
+    'extern int getpid(void);\nBOOL WINAPI DllMain'
+)
+
+# Log DllMain reason
+src = src.replace(
+    'switch(reason)',
+    'fprintf(stderr, \"WayLandIE-DIAG: DllMain reason=%d pid=%d\\n\", reason, (int)getpid()); switch(reason)'
+)
+
+with open(path, 'w') as f:
+    f.write(src)
+print('  waylanddrv_main.c patched with diagnostics')
+"
+    else
+        echo "  WARNING: $WDRV_MAIN not found — skipping DllMain diagnostics"
+    fi
+
+    # Patch wayland.c — log wayland_process_init internals
+    WDRV_WAYLAND="dlls/winewayland.drv/wayland.c"
+    if [ -f "$WDRV_WAYLAND" ]; then
+        python3 -c "
+path = '$WDRV_WAYLAND'
+with open(path) as f:
+    src = f.read()
+
+# Add stdio.h include
+if '#include <stdio.h>' not in src:
+    src = src.replace('#include \"config.h\"', '#include \"config.h\"\n#include <stdio.h>', 1)
+
+# Add logging at wayland_process_init entry
+src = src.replace(
+    'BOOL wayland_process_init(void)',
+    'extern int getpid(void);\nBOOL wayland_process_init(void)'
+)
+src = src.replace(
+    '{\n    struct wl_registry *registry;',
+    '{\n    fprintf(stderr, \"WayLandIE-DIAG: wayland_process_init ENTER pid=%d\\n\", (int)getpid());\n    struct wl_registry *registry;'
+)
+
+# Add logging before wl_display_connect
+src = src.replace(
+    'process_wayland.wl_display = wl_display_connect(NULL)',
+    'fprintf(stderr, \"WayLandIE-DIAG: calling wl_display_connect(NULL)\\n\");\n    process_wayland.wl_display = wl_display_connect(NULL)'
+)
+
+# Add logging after wl_display_connect
+src = src.replace(
+    'if (!process_wayland.wl_display)',
+    'fprintf(stderr, \"WayLandIE-DIAG: wl_display_connect returned %p\\n\", (void *)process_wayland.wl_display);\n    if (!process_wayland.wl_display)'
+)
+
+# Add logging at function exit (success)
+src = src.replace(
+    'return TRUE;',
+    'fprintf(stderr, \"WayLandIE-DIAG: wayland_process_init SUCCESS\\n\");\n    return TRUE;'
+)
+
+# Add logging at function exit (failure)
+src = src.replace(
+    'return FALSE;',
+    'fprintf(stderr, \"WayLandIE-DIAG: wayland_process_init FAILED\\n\");\n    return FALSE;'
+)
+
+with open(path, 'w') as f:
+    f.write(src)
+print('  wayland.c patched with diagnostics')
+"
+    else
+        echo "  WARNING: $WDRV_WAYLAND not found — skipping wayland.c diagnostics"
+    fi
+
 else
     echo "  WARNING: $WLD_SRC not found — building without dmabuf support"
 fi
