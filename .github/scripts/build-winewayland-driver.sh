@@ -188,38 +188,33 @@ PYKB
     #   release just means we use the next available buffer
 
     echo "  Patching window_surface.c: remove wl_display_dispatch_queue_pending"
-    # Replace the dispatch call with a comment (no-op)
-    # The call is: wl_display_dispatch_queue_pending(process_wayland.wl_display, queue->wl_event_queue);
-    sed -i 's/wl_display_dispatch_queue_pending(process_wayland\.wl_display,/\/\/ DISABLED: wl_display_dispatch_queue_pending(process_wayland.wl_display,/g' \
-        dlls/winewayland.drv/window_surface.c 2>/dev/null
-    sed -i 's/^[[:space:]]*queue->wl_event_queue);/\/\/ queue->wl_event_queue);  \/\/ removed to prevent USER-lock re-entrancy/g' \
-        dlls/winewayland.drv/window_surface.c 2>/dev/null
-
-    # Verify the patch
-    if grep -q "DISABLED: wl_display_dispatch_queue_pending" dlls/winewayland.drv/window_surface.c; then
-        echo "  Patched: wl_display_dispatch_queue_pending disabled in buffer_queue_get_free_buffer"
-    else
-        echo "  WARNING: sed patch did not apply — trying Python approach"
-        python3 << 'PYDISP'
+    # The call spans 2 lines:
+    #   wl_display_dispatch_queue_pending(process_wayland.wl_display,
+    #                                     queue->wl_event_queue);
+    # Use Python to reliably match and replace the multi-line statement
+    python3 << 'PYDISP'
+import re
 with open('dlls/winewayland.drv/window_surface.c', 'r') as f:
     c = f.read()
-# Find and remove the wl_display_dispatch_queue_pending call
-import re
-# Match the full statement (may span 2 lines)
+
+# Match the full statement (may span 1 or 2 lines, with any whitespace)
+# Pattern: wl_display_dispatch_queue_pending( process_wayland.wl_display , queue->wl_event_queue ) ;
 pattern = r'wl_display_dispatch_queue_pending\s*\(\s*process_wayland\.wl_display\s*,\s*queue->wl_event_queue\s*\)\s*;'
-if re.search(pattern, c):
-    c = re.sub(pattern, '/* DISABLED: wl_display_dispatch_queue_pending — causes USER-lock re-entrancy */', c)
+
+if re.search(pattern, c, re.DOTALL):
+    c = re.sub(pattern,
+               '/* DISABLED: wl_display_dispatch_queue_pending — causes USER-lock re-entrancy crash */',
+               c, flags=re.DOTALL)
     with open('dlls/winewayland.drv/window_surface.c', 'w') as f:
         f.write(c)
-    print("  Python patch applied: wl_display_dispatch_queue_pending removed")
+    print("  Patch applied: wl_display_dispatch_queue_pending removed")
 else:
     print("  ERROR: could not find wl_display_dispatch_queue_pending pattern")
     # Show what's there for debugging
     for i, line in enumerate(c.split('\n')):
-        if 'dispatch_queue_pending' in line:
+        if 'dispatch_queue_pending' in line or 'wl_event_queue' in line:
             print(f"    line {i+1}: {line.rstrip()}")
 PYDISP
-    fi
 
     echo "  dmabuf sources + XKB fix + USER-lock re-entrancy fix applied"
 else
