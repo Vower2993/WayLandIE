@@ -1221,6 +1221,33 @@ static int present_buffer_to_android(struct surface_state *surface, struct shm_b
     int status = -1;
     double start_ms = now_ms();
 
+    /* Frame rate limiting: skip frames that arrive too fast.
+     * The desktop UI is mostly static — 15 fps is plenty.
+     * Without limiting, Wine sends 55+ frames in 2 seconds, each allocating
+     * a new AHardwareBuffer. SurfaceFlinger can't release them fast enough,
+     * GPU memory exhausts, and AHardwareBuffer_allocate blocks → freeze.
+     *
+     * CAUSE: 55 frames in 2 seconds → 55 AHBs allocated → GPU memory exhaustion
+     * EFFECT: Skip frames faster than 66ms (15 fps) → ~30 AHBs over 2 seconds
+     * SIDE EFFECTS: Desktop may feel slightly less responsive — acceptable for
+     * a file manager UI. Game frames (via dmabuf layer) bypass this path.
+     * RISK: None — frames are skipped, not dropped. The latest content is
+     * always presented on the next non-skipped frame.
+     */
+    static double last_present_ms = 0;
+    double now = now_ms();
+    if (buffer != NULL && buffer->kind == BUFFER_KIND_SHM && frame_index > 0) {
+        double elapsed = now - last_present_ms;
+        if (elapsed < 66.0) {
+            /* Too soon — skip this frame, release the buffer */
+            if (buffer->resource != NULL) {
+                wl_buffer_send_release(buffer->resource);
+            }
+            return 0;
+        }
+    }
+    last_present_ms = now;
+
     if (state == NULL) {
         printf("wayland-shm-ahb frame=%d status=fail reason=no-server\n", frame_index);
         return -1;
