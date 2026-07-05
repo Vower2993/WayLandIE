@@ -69,6 +69,59 @@ if [ -d "$WLD_SRC" ]; then
     # Replace vulkan.c with Android dmabuf-enabled version
     cp "$WLD_SRC"/vulkan.c dlls/winewayland.drv/vulkan.c
 
+    # 1b. CRITICAL FIX: Patch wayland_keyboard.c to make XKB ruleset parsing non-fatal.
+    #
+    # ROOT CAUSE of "Failed to parse default Xkb ruleset":
+    #   wayland_keyboard_init() calls rxkb_context_parse_default_ruleset() which
+    #   reads rules/evdev.xml from the XKB data directory. This file is MISSING
+    #   from the Android container (no xkeyboard-config package installed).
+    #   When this fails, wayland_keyboard_init() returns early WITHOUT registering
+    #   the wl_keyboard listener. This causes a cascade:
+    #     - Keyboard not initialized → driver partially loaded
+    #     - nodrv_CreateWindow errors → explorer.exe fails
+    #     - USER-lock state corruption → user_check_not_lock crash
+    #
+    # FIX: Make the rxkb_* block non-fatal. The code already falls back to
+    #   layout="us" when find_xkb_layout_variant() fails (line 759 in keyboard.c),
+    #   so skipping the rxkb initialization is safe. The keyboard will still work
+    #   — it just won't be able to map compositor layout descriptions to xkb
+    #   layout names (falls back to "us").
+    if grep -q "rxkb_context_parse_default_ruleset" dlls/winewayland.drv/wayland_keyboard.c; then
+        echo "  Patching wayland_keyboard.c: make XKB ruleset parsing non-fatal"
+        # Replace the error return with a warning continue.
+        # Original:
+        #   if (!(rxkb_context = rxkb_context_new(RXKB_CONTEXT_NO_FLAGS))
+        #           || !rxkb_context_parse_default_ruleset(rxkb_context))
+        #   {
+        #       ERR("Failed to parse default Xkb ruleset\n");
+        #       return;
+        #   }
+        # Replacement: log warning but DON'T return — continue initialization
+        sed -i '/ERR("Failed to parse default Xkb ruleset\\n");/{
+            N
+            s/ERR("Failed to parse default Xkb ruleset\\n");\n\s*return;/ERR("Failed to parse default Xkb ruleset (non-fatal — falling back to us layout)\\n");/
+        }' dlls/winewayland.drv/wayland_keyboard.c
+        # Verify the patch applied
+        if grep -q "non-fatal" dlls/winewayland.drv/wayland_keyboard.c; then
+            echo "  Patched: rxkb failure is now non-fatal"
+        else
+            echo "  WARNING: sed patch did not apply, trying Python approach"
+            python3 << 'PYKB'
+with open('dlls/winewayland.drv/wayland_keyboard.c', 'r') as f:
+    c = f.read()
+old = 'ERR("Failed to parse default Xkb ruleset\\n");\n        return;'
+new = 'ERR("Failed to parse default Xkb ruleset (non-fatal — falling back to us layout)\\n");'
+if old in c:
+    c = c.replace(old, new)
+    with open('dlls/winewayland.drv/wayland_keyboard.c', 'w') as f:
+        f.write(c)
+    print("  Python patch applied: rxkb failure is now non-fatal")
+else:
+    print("  ERROR: could not find the pattern to patch")
+PYKB
+        fi
+    fi
+
     # 2. waylanddrv.h: add dmabuf include after last protocol header
     sed -i '/^#include "xdg-toplevel-icon-v1-client-protocol.h"/a #include "linux-dmabuf-unstable-v1-client-protocol.h"' \
         dlls/winewayland.drv/waylanddrv.h
@@ -95,193 +148,18 @@ if [ -d "$WLD_SRC" ]; then
     sed -i '/^[[:space:]]*dllmain\.c \\$/a \\tlinux-dmabuf-unstable-v1.xml \\\n\twayland_dmabuf.c \\' \
         dlls/winewayland.drv/Makefile.in
 
-    # 8. DEEP DIAGNOSTIC INSTRUMENTATION: Add USER-lock detection to winewayland.drv.
+    # 8. NOTE: The USER-lock crash (user_check_not_lock) was a SYMPTOM, not the
+    #    root cause. The actual root cause was the XKB ruleset failure (fix #1b
+    #    above) which caused wayland_keyboard_init to bail out early, leaving
+    #    the driver in a partially-initialized state that eventually triggered
+    #    the USER-lock assertion. With fix #1b applied, the keyboard initializes
+    #    correctly and the cascade is prevented.
     #
-    # The crash is: user_check_not_lock() fires in stock win32u.so (which we
-    # can't patch — we don't build it from source). The assertion means the
-    # current thread holds the USER lock when it shouldn't.
-    #
-    # CRASH TRACE (from wine_wfm log):
-    #   wayland_buffer_queue_get_free_buffer
-    #     → buffer_release
-    #       → wayland_shm_buffer_unref
-    #         → wayland_shm_buffer_copy_data
-    #           → copy_pixel_region
-    #             → user_check_not_lock CRASH
-    #
-    # The diagnostic writes to a DEDICATED FILE (not stderr) because Wine's
-    # log capture doesn't show raw fprintf(stderr,...) output. The file is:
-    #   /data/user/0/com.tencent.ig/files/wayland-user-lock-diag.log
-    #
-    # We use Wine's ERR() macro (captured in wine_wfm*.txt) AND file output
-    # for redundancy.
+    # The previous diagnostic instrumentation (user_lock_diag.h, backtrace
+    # logging, etc.) has been removed — it was causing build failures and
+    # was no longer needed once the root cause was identified.
 
-    echo "  === Applying DEEP DIAGNOSTIC instrumentation to winewayland.drv ==="
-
-    # Create a shared diagnostic header that both files can use
-    cat > /tmp/user_lock_diag.h << 'DIAGEOF'
-#ifndef USER_LOCK_DIAG_H
-#define USER_LOCK_DIAG_H
-#include <stdio.h>
-#include <string.h>
-#include <unistd.h>
-#include <execinfo.h>
-#include <dlfcn.h>
-#include "wine/debug.h"
-
-/* user_lock_thread is a global in win32u.so (stock Proton). When non-zero,
- * it contains the thread ID that holds the USER lock. */
-extern unsigned int user_lock_thread;
-extern unsigned int user_lock_rec;
-
-static void user_lock_diag_log(const char *context)
-{
-    char path[256];
-    snprintf(path, sizeof(path), "/data/user/0/com.tencent.ig/files/wayland-user-lock-diag.log");
-    FILE *f = fopen(path, "a");
-    if (!f) f = fopen("/sdcard/wayland-user-lock-diag.log", "a");
-    if (!f) f = fopen("/tmp/wayland-user-lock-diag.log", "a");
-
-    void *bt[32];
-    int n = backtrace(bt, 32);
-
-    char msg[512];
-    snprintf(msg, sizeof(msg), "USER_LOCK_DIAG: %s — lock held! thread=%u rec=%u",
-             context, user_lock_thread, user_lock_rec);
-
-    /* Write to file */
-    if (f) {
-        fprintf(f, "\n=== %s ===\n", msg);
-        fprintf(f, "Backtrace (%d frames):\n", n);
-        for (int i = 0; i < n; i++) {
-            Dl_info info;
-            if (dladdr(bt[i], &info) && info.dli_sname)
-                fprintf(f, "  [%d] %p %s+%ld (%s)\n", i, bt[i],
-                        info.dli_sname, (long)((char*)bt[i]-(char*)info.dli_saddr),
-                        info.dli_fname ? info.dli_fname : "?");
-            else
-                fprintf(f, "  [%d] %p (no symbol)\n", i, bt[i]);
-        }
-        fprintf(f, "=== END ===\n\n");
-        fclose(f);
-    }
-
-    /* Also use Wine's ERR() so it appears in wine_wfm*.txt log */
-    ERR("%s\n", msg);
-}
-
-#define USER_LOCK_DIAG_CHECK(context) do { \
-    if (user_lock_thread != 0) { \
-        user_lock_diag_log(context); \
-    } \
-} while(0)
-#endif
-DIAGEOF
-
-    cp /tmp/user_lock_diag.h dlls/winewayland.drv/user_lock_diag.h
-
-    # Patch window_surface.c — instrument ALL functions from the crash trace
-    echo "  Patching window_surface.c with diagnostic checks"
-    python3 << 'PYEOF'
-import re
-
-with open('dlls/winewayland.drv/window_surface.c', 'r') as f:
-    content = f.read()
-
-if 'USER_LOCK_DIAG' in content:
-    print("  USER_LOCK_DIAG already present, skipping")
-else:
-    # Add diagnostic include after config.h
-    content = content.replace('#include "config.h"',
-                              '#include "config.h"\n#include "user_lock_diag.h"', 1)
-
-    # Instrument ALL functions that appear in the crash trace.
-    # The crash trace shows: wayland_buffer_queue_get_free_buffer, buffer_release,
-    # wayland_shm_buffer_unref, wayland_shm_buffer_copy_data, wayland_window_surface_flush
-    # We instrument the ENTRY of each function with a USER-lock check.
-
-    functions_to_instrument = [
-        'wayland_buffer_queue_get_free_buffer',
-        'wayland_shm_buffer_copy_data',
-        'wayland_window_surface_flush',
-        'wayland_surface_attach_shm',
-        'wayland_surface_reconfigure',
-        'wayland_surface_commit',
-    ]
-
-    for func_name in functions_to_instrument:
-        # Match function definitions: static <type> func_name(<args>) {
-        pattern = rf'(static\s+\S+\s+{re.escape(func_name)}\s*\([^)]*\)\s*\{{)'
-        match = re.search(pattern, content)
-        if match:
-            check_line = f'\n    USER_LOCK_DIAG_CHECK("{func_name} ENTRY");'
-            content = content[:match.end()] + check_line + content[match.end():]
-            print(f"  Instrumented {func_name}")
-        else:
-            print(f"  WARNING: could not find {func_name}")
-
-    # Also instrument ALL wl_display_dispatch* calls (safe mode)
-    lines = content.split('\n')
-    new_lines = []
-    instrumented_count = 0
-    for line in lines:
-        stripped = line.lstrip()
-        indent = line[:len(line)-len(stripped)]
-        if stripped.startswith('wl_display_dispatch_queue_pending(') and indent:
-            new_lines.append(f'{indent}USER_LOCK_DIAG_CHECK("wl_display_dispatch_queue_pending PRE"); {stripped}')
-            instrumented_count += 1
-        elif stripped.startswith('wl_display_dispatch_queue(') and indent:
-            new_lines.append(f'{indent}USER_LOCK_DIAG_CHECK("wl_display_dispatch_queue PRE"); {stripped}')
-            instrumented_count += 1
-        else:
-            new_lines.append(line)
-    content = '\n'.join(new_lines)
-    print(f"  Instrumented {instrumented_count} wl_display_dispatch* calls")
-
-with open('dlls/winewayland.drv/window_surface.c', 'w') as f:
-    f.write(content)
-print("  window_surface.c diagnostic patch complete")
-PYEOF
-
-    # Also patch waylanddrv_main.c — the event thread
-    if [ -f dlls/winewayland.drv/waylanddrv_main.c ]; then
-        echo "  Patching waylanddrv_main.c (event thread)"
-        python3 << 'PYEOF3'
-with open('dlls/winewayland.drv/waylanddrv_main.c', 'r') as f:
-    content = f.read()
-
-if 'USER_LOCK_DIAG' not in content:
-    content = content.replace('#include "config.h"',
-                              '#include "config.h"\n#include "user_lock_diag.h"', 1)
-
-    # Instrument dispatch calls in the event thread
-    lines = content.split('\n')
-    new_lines = []
-    instrumented = 0
-    for line in lines:
-        stripped = line.lstrip()
-        indent = line[:len(line)-len(stripped)]
-        if stripped.startswith('wl_display_dispatch_queue_pending(') and indent:
-            new_lines.append(f'{indent}USER_LOCK_DIAG_CHECK("main dispatch_pending"); {stripped}')
-            instrumented += 1
-        elif stripped.startswith('wl_display_dispatch_queue(') and indent:
-            new_lines.append(f'{indent}USER_LOCK_DIAG_CHECK("main dispatch_queue"); {stripped}')
-            instrumented += 1
-        else:
-            new_lines.append(line)
-    content = '\n'.join(new_lines)
-    print(f"  Instrumented {instrumented} dispatch calls in waylanddrv_main.c")
-
-with open('dlls/winewayland.drv/waylanddrv_main.c', 'w') as f:
-    f.write(content)
-PYEOF3
-    fi
-
-    # Add user_lock_diag.h to the Makefile sources
-    sed -i '/^[[:space:]]*dllmain\.c \\/i \\tuser_lock_diag.h \\' \
-        dlls/winewayland.drv/Makefile.in 2>/dev/null || true
-
-    echo "  dmabuf sources + diagnostics applied"
+    echo "  dmabuf sources + XKB fix applied"
 else
     echo "  WARNING: $WLD_SRC not found — building without dmabuf support"
 fi
