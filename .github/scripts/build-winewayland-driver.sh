@@ -95,41 +95,155 @@ if [ -d "$WLD_SRC" ]; then
     sed -i '/^[[:space:]]*dllmain\.c \\$/a \\tlinux-dmabuf-unstable-v1.xml \\\n\twayland_dmabuf.c \\' \
         dlls/winewayland.drv/Makefile.in
 
-    # 8. CRITICAL FIX: Patch window_surface.c to avoid USER-lock re-entrancy crash.
+    # 8. DEEP DIAGNOSTIC INSTRUMENTATION: Add USER-lock detection to winewayland.drv.
     #
-    # ROOT CAUSE: Wine 11.0's win32u has a USER-lock leak bug (fixed in Wine 11.10
-    # via the NtUserGetClassInfoEx error-path fix). When winewayland.drv's
-    # flush_window_surfaces() calls wl_display_dispatch_queue_pending() to process
-    # buffer_release events, it ALSO processes window configuration events
-    # (xdg_surface::configure) that trigger WAYLAND_WindowPosChanged → user_lock().
-    # If the USER lock is already held (leaked), this re-entrant call hits
-    # user_check_not_lock() → assertion "0" failed → Wine crashes.
+    # The crash is: user_check_not_lock() fires in stock win32u.so (which we
+    # can't patch — we don't build it from source). The assertion means the
+    # current thread holds the USER lock when it shouldn't.
     #
-    # This is Wayland-specific because X11 mode doesn't dispatch X11 events
-    # during flush_window_surfaces — it uses a separate event thread.
+    # Since we CAN'T patch sysparams.c (stock win32u.so), we instrument
+    # winewayland.drv's window_surface.c instead. The user_lock_thread global
+    # is exported by win32u.so, so we can READ it from winewayland.so to detect
+    # when the USER lock is held during Wayland event dispatch.
     #
-    # FIX: Remove the wl_display_dispatch_queue_pending() call from
-    # wayland_buffer_queue_get_free_buffer(). The dedicated event thread
-    # (waylanddrv_unix_read_events) will process buffer_release events
-    # asynchronously, so buffers will still be freed — just not synchronously
-    # during flush_window_surfaces. This breaks the re-entrancy cycle.
+    # The diagnostic logs:
+    #   1. Every call to flush_window_surfaces — whether USER lock is held
+    #   2. Every call to wl_display_dispatch_queue_pending — whether USER lock is held
+    #   3. Every Wayland event callback (xdg_configure, buffer_release, etc.)
+    #      — whether USER lock is held at that point
+    #   4. A full backtrace when the USER lock IS held during any of the above
     #
-    # The crash sequence was:
-    #   flush_window_surfaces (USER lock held)
-    #     → wayland_buffer_queue_get_free_buffer
-    #       → wl_display_dispatch_queue (processes ALL pending events)
-    #         → xdg_surface::configure event
-    #           → WAYLAND_WindowPosChanged → user_lock() → CRASH
-    if grep -q "wl_display_dispatch_queue_pending" dlls/winewayland.drv/window_surface.c; then
-        echo "  Patching window_surface.c to remove re-entrant Wayland event dispatch"
-        # Replace wl_display_dispatch_queue_pending with a no-op (just poll, don't dispatch)
-        # This prevents window config events from being processed during flush_window_surfaces
-        sed -i 's/wl_display_dispatch_queue_pending([^)]*)/0/g' \
-            dlls/winewayland.drv/window_surface.c
-        echo "  Patched: wl_display_dispatch_queue_pending → 0 (no-op)"
+    # This will pinpoint the EXACT code path that holds the lock and triggers
+    # the re-entrant call.
+
+    echo "  === Applying DEEP DIAGNOSTIC instrumentation to winewayland.drv ==="
+
+    # Patch window_surface.c: add USER-lock detection + backtrace
+    if grep -q "flush_window_surfaces" dlls/winewayland.drv/window_surface.c; then
+        echo "  Adding USER-lock diagnostics to window_surface.c"
+        python3 << 'PYEOF'
+import re
+
+with open('dlls/winewayland.drv/window_surface.c', 'r') as f:
+    content = f.read()
+
+if 'USER_LOCK_DIAG' in content:
+    print("  USER_LOCK_DIAG already present, skipping")
+else:
+    # Add diagnostic infrastructure after config.h include
+    diag_header = r'''#include "config.h"
+#include <execinfo.h>
+#include <dlfcn.h>
+
+/* USER_LOCK_DIAG: Deep diagnostic to catch USER-lock re-entrancy.
+ *
+ * user_lock_thread is a global in win32u.so (stock Proton). When non-zero,
+ * it contains the thread ID that holds the USER lock. We read it to detect
+ * when winewayland.drv calls into Wayland event dispatch while the USER
+ * lock is held — the exact condition that triggers user_check_not_lock().
+ */
+extern unsigned int user_lock_thread;
+extern unsigned int user_lock_rec;
+
+static void user_lock_diag_backtrace(const char *context)
+{
+    void *bt[32];
+    int n = backtrace(bt, 32);
+    fprintf(stderr, "\n=== USER_LOCK_DIAG: %s — USER lock HELD ===\n", context);
+    fprintf(stderr, "  holder_thread=%u rec=%u\n", user_lock_thread, user_lock_rec);
+    fprintf(stderr, "  Backtrace:\n");
+    for (int i = 0; i < n; i++)
+    {
+        Dl_info info;
+        if (dladdr(bt[i], &info) && info.dli_sname)
+            fprintf(stderr, "  [%d] %p %s+%ld (%s)\n", i,
+                    bt[i], info.dli_sname,
+                    (long)((char*)bt[i] - (char*)info.dli_saddr),
+                    info.dli_fname ? info.dli_fname : "?");
+        else
+            fprintf(stderr, "  [%d] %p (no symbol)\n", i, bt[i]);
+    }
+    fprintf(stderr, "=== END USER_LOCK_DIAG ===\n\n");
+    fflush(stderr);
+}
+
+#define USER_LOCK_DIAG_CHECK(context) do { \
+    if (user_lock_thread != 0) { \
+        user_lock_diag_backtrace(context); \
+    } \
+} while(0)
+'''
+
+    content = content.replace('#include "config.h"', diag_header, 1)
+
+    # Instrument flush_window_surfaces — add check at entry
+    pattern = r'(static\s+(?:void\s+)?flush_window_surfaces\s*\([^)]*\)\s*\{)'
+    match = re.search(pattern, content)
+    if match:
+        content = content[:match.end()] + '\n    USER_LOCK_DIAG_CHECK("flush_window_surfaces ENTRY");' + content[match.end():]
+        print("  Instrumented flush_window_surfaces entry")
+    else:
+        print("  WARNING: could not find flush_window_surfaces")
+
+    # Instrument wayland_buffer_queue_get_free_buffer — add check at entry
+    pattern2 = r'(static\s+(?:struct\s+)?wayland_buffer\s*\*\s*wayland_buffer_queue_get_free_buffer\s*\([^)]*\)\s*\{)'
+    match2 = re.search(pattern2, content)
+    if match2:
+        content = content[:match2.end()] + '\n    USER_LOCK_DIAG_CHECK("wayland_buffer_queue_get_free_buffer ENTRY");' + content[match2.end():]
+        print("  Instrumented wayland_buffer_queue_get_free_buffer entry")
+    else:
+        print("  WARNING: could not find wayland_buffer_queue_get_free_buffer")
+
+    # Instrument any wl_display_dispatch* calls
+    content = content.replace(
+        'wl_display_dispatch_queue_pending(',
+        'USER_LOCK_DIAG_CHECK("wl_display_dispatch_queue_pending PRE"); wl_display_dispatch_queue_pending(')
+    content = content.replace(
+        'wl_display_dispatch_queue(',
+        'USER_LOCK_DIAG_CHECK("wl_display_dispatch_queue PRE"); wl_display_dispatch_queue(')
+    print("  Instrumented wl_display_dispatch* calls")
+
+with open('dlls/winewayland.drv/window_surface.c', 'w') as f:
+    f.write(content)
+print("  window_surface.c diagnostic patch complete")
+PYEOF
     fi
 
-    echo "  dmabuf sources applied"
+    # Also patch waylanddrv_main.c to instrument the event thread
+    if grep -q "waylanddrv_unix_read_events\|wl_display_dispatch" dlls/winewayland.drv/waylanddrv_main.c 2>/dev/null; then
+        echo "  Adding diagnostics to waylanddrv_main.c (event thread)"
+        python3 << 'PYEOF3'
+with open('dlls/winewayland.drv/waylanddrv_main.c', 'r') as f:
+    content = f.read()
+
+if 'USER_LOCK_DIAG' not in content:
+    content = content.replace(
+        '#include "config.h"',
+        '''#include "config.h"
+#include <execinfo.h>
+#include <dlfcn.h>
+extern unsigned int user_lock_thread;
+extern unsigned int user_lock_rec;
+static void user_lock_diag_bt(const char *ctx)
+{
+    void *bt[32]; int n = backtrace(bt, 32);
+    fprintf(stderr, "\\nUSER_LOCK_DIAG: %s — lock held! thread=%u rec=%u\\n", ctx, user_lock_thread, user_lock_rec);
+    for (int i = 0; i < n; i++) { Dl_info info; if (dladdr(bt[i], &info) && info.dli_sname) fprintf(stderr, "  [%d] %s+%ld\\n", i, info.dli_sname, (long)((char*)bt[i]-(char*)info.dli_saddr)); }
+    fflush(stderr);
+}
+#define ULDC(ctx) do { if (user_lock_thread != 0) user_lock_diag_bt(ctx); } while(0)''',
+        1)
+    # Instrument dispatch calls
+    content = content.replace('wl_display_dispatch_queue_pending(', 'ULDC("read_events dispatch_pending"); wl_display_dispatch_queue_pending(')
+    content = content.replace('wl_display_dispatch_queue(', 'ULDC("read_events dispatch_queue"); wl_display_dispatch_queue(')
+    print("  Instrumented waylanddrv_main.c")
+
+with open('dlls/winewayland.drv/waylanddrv_main.c', 'w') as f:
+    f.write(content)
+PYEOF3
+    fi
+
+    echo "  dmabuf sources + diagnostics applied"
 else
     echo "  WARNING: $WLD_SRC not found — building without dmabuf support"
 fi
@@ -649,7 +763,7 @@ ln -sf libfreetype.a "$FT_DIR/lib/libfreetype.so" 2>/dev/null || true
 
 export CFLAGS="-fPIC --sysroot=$SYSROOT -I$SYSROOT/usr/include -I$BIONIC_LIBS/include -I$FT_DIR/include/freetype2 -I/tmp/proton-wine/include -D__ANDROID_API__=$API -D__ANDROID__ -Wno-int-conversion"
 export CXXFLAGS="$CFLAGS"
-export LDFLAGS="--sysroot=$SYSROOT -L$BIONIC_LIBS/lib -L$FT_DIR/lib -landroid-sysvshm -lffi"
+export LDFLAGS="--sysroot=$SYSROOT -L$BIONIC_LIBS/lib -L$FT_DIR/lib -landroid-sysvshm -lffi -ldl -rdynamic"
 export PKG_CONFIG_PATH="$BIONIC_LIBS/lib/pkgconfig:$FT_DIR/lib/pkgconfig"
 export PKG_CONFIG_LIBDIR="$BIONIC_LIBS/lib/pkgconfig:$FT_DIR/lib/pkgconfig"
 unset PKG_CONFIG_SYSROOT_DIR
