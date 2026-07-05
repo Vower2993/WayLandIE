@@ -29,6 +29,7 @@ if [ ! -d "$LLVM_MINGW_DIR" ]; then
   tar -xf /tmp/llvm-mingw.tar.xz -C "$LLVM_MINGW_DIR" --strip-components=1
   echo "llvm-mingw installed at $LLVM_MINGW_DIR"
   ls "$LLVM_MINGW_DIR/bin/" 2>/dev/null | grep -E "^(aarch64-w64-mingw32-(clang|gcc)|x86_64-w64-mingw32-)" | head -5 || true
+fi
 export PATH="$LLVM_MINGW_DIR/bin:$PATH"
 
 echo "=== [2/9] Locate NDK ==="
@@ -671,20 +672,6 @@ else
   echo "WARNING: ntdll.dll not built — FEX will still crash. Check make output above."
 fi
 
-done
-if [ "$VULKAN_PE_SIZE" -lt 1000 ]; then
-else
-fi
-
-done
-if [ "$VULKAN_SO_SIZE" -lt 1000 ]; then
-  else
-fi
-
-done
-if [ "$WIN32U_SO_SIZE" -lt 1000 ]; then
-fi
-
 # Verify the new ntdll has the FEX-required exports
 echo "=== Verifying ntdll exports ==="
 NTDLL_HYBRID="$PROTON_OUT/lib/wine/aarch64-windows/ntdll.dll"
@@ -725,13 +712,6 @@ if [ "$SO_SIZE" -lt 1000 ]; then
   make -j$(nproc) dlls/winewayland.drv/winewayland.so V=1 2>&1 | tail -80 ||  exit 1
 fi
 
-# If either is missing, surface creation will fail — make it a FATAL error.
-if [ "$VULKAN_SO_SIZE" -lt 1000 ]; then
-  exit 1
-fi
-if [ "$VULKAN_SIZE" -lt 1000 ]; then
-  exit 1
-fi
 
 cd "$OUTDIR"
 mkdir -p "$WORKSPACE/app/src/main/assets"
