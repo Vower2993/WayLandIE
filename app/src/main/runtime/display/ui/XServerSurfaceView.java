@@ -55,21 +55,28 @@ public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Cal
     public void setWaylandMode(boolean wayland) {
         this.waylandMode = wayland;
         if (wayland) {
-            /* In Wayland mode, the VulkanRenderer render thread is skipped
-             * (see startRenderThreadIfNeeded). The SurfaceView's own surface
-             * has no content — only the presentLayer (child SurfaceControl
-             * created by WaylandBridgeServer) has content.
-             *
-             * setZOrderOnTop(true) ensures the SurfaceView's SurfaceControl
-             * (and its children) is composited ON TOP of the window's other
-             * content. Without this, Android 16 (Samsung S25 Ultra) may not
-             * composite child layers of an empty/inactive parent.
-             *
-             * This was the root cause of 'display shows nothing in Wayland
-             * mode' — the presentLayer was receiving frames (status=pass)
-             * but SurfaceFlinger wasn't compositing it because the parent
-             * SurfaceView had no buffer queue (render thread skipped). */
             setZOrderOnTop(true);
+
+            /* Push a dummy frame to the SurfaceView's Surface so SurfaceFlinger
+             * considers the parent SurfaceControl "active". Without this, the
+             * child presentLayer may not composite on some devices (Samsung S25/
+             * Android 16) because the parent has no buffer queue (render thread
+             * is skipped in Wayland mode).
+             *
+             * surfaceCreated may have fired before setWaylandMode, so we also
+             * push the dummy frame here if the surface is already valid. */
+            SurfaceHolder h = getHolder();
+            if (h != null && h.getSurface() != null && h.getSurface().isValid()) {
+                try {
+                    android.graphics.Canvas c = h.lockCanvas();
+                    if (c != null) {
+                        c.drawColor(android.graphics.Color.BLACK);
+                        h.unlockCanvasAndPost(c);
+                    }
+                } catch (Exception e) {
+                    android.util.Log.w("XServerSurfaceView", "Dummy frame failed: " + e.getMessage());
+                }
+            }
         }
     }
 
@@ -150,6 +157,20 @@ public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Cal
         } catch (UnsatisfiedLinkError e) {
             // waylandie_display_native not loaded — X11 mode, ignore
         }
+
+        // In Wayland mode, push a dummy frame to the SurfaceView's Surface
+        // so SurfaceFlinger considers the parent SurfaceControl "active".
+        // Without this, the child presentLayer (created by WaylandBridgeServer)
+        // may not composite on some devices (Samsung S25/Android 16) because
+        // the parent has no buffer queue (render thread is skipped).
+        if (waylandMode) {
+            android.graphics.Canvas c = holder.lockCanvas();
+            if (c != null) {
+                c.drawColor(android.graphics.Color.BLACK);
+                holder.unlockCanvasAndPost(c);
+            }
+        }
+
         startRenderThreadIfNeeded();
     }
 
