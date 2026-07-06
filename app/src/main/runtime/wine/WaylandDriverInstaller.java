@@ -185,6 +185,17 @@ public final class WaylandDriverInstaller {
                 "VK_EXT_surface_maintenance1", "VK_EXT_surface_maintenance0");
             patchExtensionString(win32uSoPrefix,
                 "VK_EXT_swapchain_maintenance1", "VK_EXT_swapchain_maintenance0");
+            // Also patch winevulkan.so — the auto-enable check may be here instead
+            File winevulkanSo = new File(wineAarch64Unix, "winevulkan.so");
+            patchExtensionString(winevulkanSo,
+                "VK_EXT_surface_maintenance1", "VK_EXT_surface_maintenance0");
+            patchExtensionString(winevulkanSo,
+                "VK_EXT_swapchain_maintenance1", "VK_EXT_swapchain_maintenance0");
+            File winevulkanSoPrefix = new File(prefix, "lib/wine/aarch64-unix/winevulkan.so");
+            patchExtensionString(winevulkanSoPrefix,
+                "VK_EXT_surface_maintenance1", "VK_EXT_surface_maintenance0");
+            patchExtensionString(winevulkanSoPrefix,
+                "VK_EXT_swapchain_maintenance1", "VK_EXT_swapchain_maintenance0");
 
             // Do NOT patch DXVK DLLs — DXVK should request VK_KHR_win32_surface
             // (its natural behavior). Wine's wayland_map_instance_extensions
