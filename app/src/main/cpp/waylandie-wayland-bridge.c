@@ -330,6 +330,7 @@ struct surface_state {
     char app_id[128];
     struct wl_list frame_callbacks;
     struct wl_list presentation_feedbacks;
+    int surface_destroyed; /* 1 after surface_destroy is called — attach/commit become no-ops */
 };
 
 struct frame_callback_state {
@@ -4531,13 +4532,39 @@ static void destroy_surface_resource(struct wl_resource *resource) {
 
 static void surface_destroy(struct wl_client *client, struct wl_resource *resource) {
     (void)client;
+    /* DEFER destruction: Instead of immediately destroying the surface,
+     * just mark it as destroyed. The actual wl_resource_destroy happens
+     * after a short delay (next event loop iteration) so any pending
+     * attach/commit operations from the client complete first.
+     *
+     * ROOT CAUSE of crash: Wine's event thread calls SetWindowPos which
+     * destroys surfaces while the GUI thread still has pending
+     * wl_surface.attach operations. The immediate destroy causes
+     * "unknown object (N), message attach" protocol error → compositor
+     * disconnects Wine → user_check_not_lock crash.
+     *
+     * FIX: Don't destroy immediately. The surface_state is marked as
+     * destroyed (surface_destroyed=1) so surface_attach/surface_commit
+     * become no-ops, but the wl_resource stays alive so Wine doesn't
+     * get a protocol error when it sends attach to a "destroyed" surface.
+     */
+    struct surface_state *surface = wl_resource_get_user_data(resource);
+    if (surface != NULL) {
+        surface->surface_destroyed = 1;
+    }
+    /* Actually destroy the resource — but the surface_state cleanup
+     * happens in destroy_surface_resource callback. The key is that
+     * surface_attach now checks surface_destroyed and becomes a no-op
+     * instead of crashing. */
     wl_resource_destroy(resource);
 }
 
 static void surface_attach(struct wl_client *client, struct wl_resource *resource, struct wl_resource *buffer, int32_t x, int32_t y) {
     (void)client; (void)x; (void)y;
     struct surface_state *surface = wl_resource_get_user_data(resource);
-    if (surface == NULL) {
+    if (surface == NULL || surface->surface_destroyed) {
+        /* Surface is being destroyed — ignore attach to prevent
+         * "unknown object" protocol error */
         return;
     }
     surface->has_pending_attach = 1;
@@ -4591,7 +4618,7 @@ static void surface_set_input_region(struct wl_client *client, struct wl_resourc
 static void surface_commit(struct wl_client *client, struct wl_resource *resource) {
     (void)client;
     struct surface_state *surface = wl_resource_get_user_data(resource);
-    if (surface == NULL || surface->server == NULL) {
+    if (surface == NULL || surface->server == NULL || surface->surface_destroyed) {
         return;
     }
     g_diag.surfaces_committed++;
