@@ -13,12 +13,14 @@
 
 #include "vk_driver.h"
 #include "vk_state.h"
+#include "vk_dispatch.h"
 #include <android/log.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <vulkan/vulkan.h>
-#include <vulkan/vulkan_android.h>
+
+/* Forward declarations for static functions in vk_renderer.c */
+extern void wait_inflight_frames(VkRenderer* r);
 
 #define VK_WL_TAG "WaylandVkPresent"
 #define VK_WL_LOGI(...) __android_log_print(ANDROID_LOG_INFO, VK_WL_TAG, __VA_ARGS__)
@@ -42,9 +44,9 @@ static struct VkWaylandPresent* get_wl_present(VkRenderer* r) {
     if (!r->wl_present) {
         r->wl_present = calloc(1, sizeof(struct VkWaylandPresent));
         if (!r->wl_present) return NULL;
-        r->wl_present->last_dmabuf_fd = -1;
+        ((struct VkWaylandPresent*)r->wl_present)->last_dmabuf_fd = -1;
     }
-    return r->wl_present;
+    return (struct VkWaylandPresent*)r->wl_present;
 }
 
 /* Import a dmabuf fd as a VkImage using VK_KHR_external_memory_fd */
@@ -170,7 +172,7 @@ Java_com_winlator_cmod_runtime_display_renderer_VulkanRenderer_nativePresentDmaB
     if (res != VK_SUCCESS) return JNI_FALSE;
 
     /* Acquire swapchain image */
-    VkFrame* f = &r->frames[r->frame_index % r->frame_count];
+    VkFrame* f = &r->frames[r->frame_index % VK_FRAMES_IN_FLIGHT];
     r->frame_index++;
     wait_inflight_frames(r);
 

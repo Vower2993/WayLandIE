@@ -14,6 +14,9 @@ extern "C" {
 void *winlator_open_vulkan(JNIEnv *env, jobject context, const char *driver_name);
 void *winlator_open_system_vulkan(void);
 
+/* Used by vk_wayland_present.c */
+void wait_inflight_frames(VkRenderer* r);
+
 #ifdef __cplusplus
 }
 #endif
