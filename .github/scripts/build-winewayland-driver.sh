@@ -187,76 +187,48 @@ PYKB
     # - The buffer queue has multiple buffers, so not getting an immediate
     #   release just means we use the next available buffer
 
-    echo "  Patching window_surface.c + wayland_surface.c: neutralize ALL NtGdi calls"
+    echo "  Patching window_surface.c + wayland_surface.c: surgical NtGdi fix"
     python3 << 'PYNTGDI'
 import re
 
-# The macros must be placed AFTER all #include lines, so they don't conflict
-# with Wine's function declarations. We also #undef first to avoid redefinition warnings.
+# SURGICAL FIX: Only neutralize NtGdiGetRegionData — the ACTUAL crashing call.
+#
+# Previous broad neutralization (ALL NtGdi calls) broke rendering because
+# NtGdiCreateRectRgn returned NULL → "failed to create surface damage region"
+# → wayland_window_surface_flush bailed out → no buffer ever attached →
+# stuck at "wine starting" with no desktop.
+#
+# The crash trace was EXACTLY:
+#   copy_pixel_region → get_region_data → NtGdiGetRegionData → user_check_not_lock
+#
+# NtGdiGetRegionData is the ONLY call that crashes. The other NtGdi calls
+# (CreateRectRgn, CombineRgn, SetRectRgn, DeleteObjectApp) work fine —
+# they don't trigger user_check_not_lock because they don't enter the
+# message-pump code path.
+#
+# NtGdiGetRegionData returns 0 (no region data). This makes get_region_data
+# return NULL, which makes copy_pixel_region skip the precise damage copy
+# and do a full-frame copy instead. This is correct behavior — the desktop
+# still renders, just without per-region damage tracking (fine for desktop UI).
 
 ntgdi_macros = '''
-/* === NtGdi NEUTRALIZATION ===
- * All NtGdi calls re-enter win32u and trigger user_check_not_lock when
- * called during flush_window_surfaces (which holds the USER lock in
- * Proton 11.0). We stub them out to break the re-entrancy cycle:
- * - Create/Combine/SetRectRgn -> return 0 (NULL/ERROR, callers handle it)
- * - GetRegionData -> return 0 (no region data, copy_pixel_region skips)
- * - DeleteObjectApp -> leak the object (evaluate arg for side effects)
- * The crash trace was: copy_pixel_region -> get_region_data -> NtGdiGetRegionData -> CRASH
+/* === SURGICAL NtGdi FIX ===
+ * Only NtGdiGetRegionData is neutralized — it's the exact call in the
+ * crash trace (copy_pixel_region → get_region_data → NtGdiGetRegionData).
+ * Returning 0 makes get_region_data return NULL, which makes copy_pixel_region
+ * skip the damage-region copy and do a full-frame copy instead.
+ * All other NtGdi calls work normally — they don't trigger user_check_not_lock.
  */
-#ifdef NtGdiCreateRectRgn
-#undef NtGdiCreateRectRgn
-#endif
-#ifdef NtGdiCombineRgn
-#undef NtGdiCombineRgn
-#endif
-#ifdef NtGdiSetRectRgn
-#undef NtGdiSetRectRgn
-#endif
 #ifdef NtGdiGetRegionData
 #undef NtGdiGetRegionData
 #endif
-#ifdef NtGdiDeleteObjectApp
-#undef NtGdiDeleteObjectApp
-#endif
-#define NtGdiCreateRectRgn(...) ((HRGN)0)
-#define NtGdiCombineRgn(...) 0
-#define NtGdiSetRectRgn(...) ((void)0)
 #define NtGdiGetRegionData(...) 0
-#define NtGdiDeleteObjectApp(...) ((void)0)
-/* === END NtGdi NEUTRALIZATION === */
-'''
-
-ntgdi_macros2 = '''
-/* === NtGdi NEUTRALIZATION for wayland_surface.c === */
-#ifdef NtGdiCreateRectRgn
-#undef NtGdiCreateRectRgn
-#endif
-#ifdef NtGdiDeleteObjectApp
-#undef NtGdiDeleteObjectApp
-#endif
-#ifdef NtGdiExtGetObjectW
-#undef NtGdiExtGetObjectW
-#endif
-#ifdef NtGdiGetDIBitsInternal
-#undef NtGdiGetDIBitsInternal
-#endif
-#ifdef NtGdiCreateCompatibleDC
-#undef NtGdiCreateCompatibleDC
-#endif
-#define NtGdiCreateRectRgn(...) ((HRGN)0)
-#define NtGdiDeleteObjectApp(...) ((void)0)
-#define NtGdiExtGetObjectW(...) 0
-#define NtGdiGetDIBitsInternal(...) 0
-#define NtGdiCreateCompatibleDC(...) ((HDC)0)
-/* === END NtGdi NEUTRALIZATION === */
+/* === END SURGICAL NtGdi FIX === */
 '''
 
 # ── window_surface.c ──────────────────────────────────────────────────
 with open('dlls/winewayland.drv/window_surface.c', 'r') as f:
     c = f.read()
-
-ntgdi_calls_before = len(re.findall(r'NtGdi\w+\s*\(', c))
 
 # 1. Remove wl_display_dispatch_queue_pending
 pattern = r'wl_display_dispatch_queue_pending\s*\(\s*process_wayland\.wl_display\s*,\s*queue->wl_event_queue\s*\)\s*;'
@@ -264,51 +236,26 @@ if re.search(pattern, c, re.DOTALL):
     c = re.sub(pattern, '/* DISABLED: wl_display_dispatch_queue_pending */', c, flags=re.DOTALL)
     print("  [window_surface.c] wl_display_dispatch_queue_pending removed")
 
-# 2. Insert macros AFTER the last #include line (not after config.h, to avoid conflicts)
-# Find the last #include line
+# 2. Insert NtGdiGetRegionData macro after the last #include line
 lines = c.split('\n')
 last_include = 0
 for i, line in enumerate(lines):
     if line.strip().startswith('#include'):
         last_include = i
-# Insert macros after the last include
 lines.insert(last_include + 1, ntgdi_macros)
 c = '\n'.join(lines)
 
-ntgdi_calls_after = len(re.findall(r'NtGdi\w+\s*\(', c))
-macro_count = c.count('#define NtGdi')
-actual_calls = ntgdi_calls_after - macro_count
-
-print(f"  [window_surface.c] NtGdi calls: {ntgdi_calls_before} -> {actual_calls} (macros: {macro_count})")
+print("  [window_surface.c] NtGdiGetRegionData neutralized (surgical)")
 
 with open('dlls/winewayland.drv/window_surface.c', 'w') as f:
     f.write(c)
 print("  [window_surface.c] patched")
 
 # ── wayland_surface.c ─────────────────────────────────────────────────
-with open('dlls/winewayland.drv/wayland_surface.c', 'r') as f:
-    c2 = f.read()
-
-before2 = len(re.findall(r'NtGdi\w+\s*\(', c2))
-
-# Insert macros after last include
-lines2 = c2.split('\n')
-last_include2 = 0
-for i, line in enumerate(lines2):
-    if line.strip().startswith('#include'):
-        last_include2 = i
-lines2.insert(last_include2 + 1, ntgdi_macros2)
-c2 = '\n'.join(lines2)
-
-after2 = len(re.findall(r'NtGdi\w+\s*\(', c2))
-macro_count2 = c2.count('#define NtGdi')
-actual_calls2 = after2 - macro_count2
-
-print(f"  [wayland_surface.c] NtGdi calls: {before2} -> {actual_calls2} (macros: {macro_count2})")
-
-with open('dlls/winewayland.drv/wayland_surface.c', 'w') as f:
-    f.write(c2)
-print("  [wayland_surface.c] patched")
+# wayland_surface.c has NtGdiDeleteObjectApp in wayland_shm_buffer_unref,
+# which is called from buffer_release on the event thread. This is safe —
+# the event thread doesn't hold the USER lock. No patch needed here.
+print("  [wayland_surface.c] no patch needed (event thread is safe)")
 PYNTGDI
 
     echo "  dmabuf sources + XKB fix + USER-lock re-entrancy fix applied"
