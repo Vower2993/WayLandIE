@@ -1,1 +1,1 @@
-{"cmd": "adb devices", "output": "", "exit_code": 0}
+{"cmd":"idle","output":"List of devices attached\n172.16.0.2:44233	device\n","exit_code":0}
