@@ -69,8 +69,6 @@ Wine (winewayland.drv)
 
 **The most promising path**: Approach #1 (skip render thread + child presentLayer) — it DID display the desktop briefly. The crash that followed is now fixed. The current code (commit 23431bc) restores this exact configuration. **It needs to be tested** — the user hasn't tested this exact combination of (crash fixes + skip render thread + child presentLayer) yet.
 
-**If approach #1 still doesn't display**: The alternative is to integrate the bridge's dmabuf output into the VulkanRenderer's swapchain. Instead of ASurfaceTransaction, the bridge would pass the dmabuf to the VulkanRenderer, which blits it to its swapchain image and presents via `vkQueuePresentKHR`. This goes through the BLASTBufferQueue path that SurfaceFlinger always composites. This is a bigger change but is the guaranteed working path.
-
 ## Patches Applied (all in current commit)
 
 ### 1. libwayland-server patch (`patches/libwayland-server-ignore-unknown-object.patch`)
@@ -173,11 +171,10 @@ git push origin main
 ## Rules for the Next Agent
 
 1. **Test commit 23431bc first** — it restores the exact display configuration from b627579 (where desktop was visible) plus all crash fixes. The user may not have tested this exact combination yet.
-2. **If display still doesn't work**: The guaranteed path is to integrate the bridge's dmabuf into the VulkanRenderer's swapchain (blit dmabuf → swapchain image → vkQueuePresentKHR → BLASTBufferQueue → SurfaceFlinger). This bypasses ASurfaceTransaction entirely.
-3. **Don't run the VulkanRenderer in CONTINUOUS mode in Wayland mode** — it competes with ASurfaceTransaction and makes the presentLayer invisible.
-4. **Don't use lockCanvas** — it crashes on Samsung S25/Android 16 with setZOrderOnTop.
-5. **All crash fixes are correct** — libwayland patch, NtGdiGetRegionData, wl_buffer_destroy no-op, AHB pool. Don't revert these.
-6. **The win32u.so + winevulkan.dll patches for VK_EXT_surface_maintenance1 are needed for games** (DXVK vkCreateInstance). The diagnostic scanner confirmed the string locations.
-7. **Always use Python for source patching** in build scripts (sed is unreliable for multi-line patterns).
-8. **The bridge is single-threaded** — `present_buffer_to_android` does a blocking `read()` from the Java socket inside `surface_commit`. This stalls the event loop. Not a crash, but causes latency.
-9. **X11 mode works fine** — all issues are Wayland-specific. If Wayland display can't be fixed, X11 mode is the fallback.
+2. **Don't run the VulkanRenderer in CONTINUOUS mode in Wayland mode** — it competes with ASurfaceTransaction and makes the presentLayer invisible.
+3. **Don't use lockCanvas** — it crashes on Samsung S25/Android 16 with setZOrderOnTop.
+4. **All crash fixes are correct** — libwayland patch, NtGdiGetRegionData, wl_buffer_destroy no-op, AHB pool. Don't revert these.
+5. **The win32u.so + winevulkan.dll patches for VK_EXT_surface_maintenance1 are needed for games** (DXVK vkCreateInstance). The diagnostic scanner confirmed the string locations.
+6. **Always use Python for source patching** in build scripts (sed is unreliable for multi-line patterns).
+7. **The bridge is single-threaded** — `present_buffer_to_android` does a blocking `read()` from the Java socket inside `surface_commit`. This stalls the event loop. Not a crash, but causes latency.
+8. **X11 mode works fine** — all issues are Wayland-specific. If Wayland display can't be fixed, X11 mode is the fallback.

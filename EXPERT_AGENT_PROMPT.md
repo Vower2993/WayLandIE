@@ -32,31 +32,6 @@ Fix the **display visibility problem**: The Wayland bridge successfully renders 
 | VulkanRenderer CONTINUOUS mode + child presentLayer | BLASTBufferQueue competes with ASurfaceTransaction, presentLayer invisible |
 | VulkanRenderer WHEN_DIRTY for 1 frame | Timing issue, surface not ready |
 
-## The Two Approaches to Try
-
-### Approach A: Test Current State (commit 23431bc)
-The current commit restores the exact b627579 configuration (skip render thread + child presentLayer + setZOrderOnTop) PLUS all crash fixes. The user may not have tested this exact combination. If the desktop was visible in b627579 before the crash, it should be visible now that the crash is fixed.
-
-**If this works**: Done. Test games next.
-
-### Approach B: VulkanRenderer Integration (if Approach A fails)
-Instead of `ASurfaceTransaction`, route the bridge's dmabuf through the VulkanRenderer's swapchain:
-
-1. Bridge produces dmabuf (from SHM→AHB conversion)
-2. Bridge passes dmabuf fd to VulkanRenderer (via JNI callback or shared queue)
-3. VulkanRenderer imports dmabuf as `VkImage` (via `VK_KHR_external_memory_fd`)
-4. VulkanRenderer blits dmabuf VkImage → swapchain image
-5. VulkanRenderer calls `vkQueuePresentKHR` → BLASTBufferQueue → SurfaceFlinger
-
-This is the **guaranteed working path** because BLASTBufferQueue is the only buffer path that SurfaceFlinger always composites on this device. The `ASurfaceTransaction` path has failed across 10+ builds.
-
-**Implementation sketch**:
-- `WaylandBridgeServer.java`: Instead of calling `nativePresentAhbVkDmaBufFrame`, call a new method that passes the dmabuf to the `VulkanRenderer`
-- `VulkanRenderer.java`: Add a method to import dmabuf and blit to swapchain
-- `app/src/main/cpp/waylandie_display_native.c` or new file: Implement the Vulkan blit
-- `XServerSurfaceView.java`: Start the render thread in Wayland mode (it will blit bridge frames instead of X11 content)
-- The render thread blocks on a condition variable until the bridge provides a new dmabuf, then blits and presents
-
 ## Key Constraints
 
 - **Target device**: Samsung S25 Ultra, Android 16, Adreno 750
@@ -73,10 +48,8 @@ This is the **guaranteed working path** because BLASTBufferQueue is the only buf
 2. Read `HANDOFF.md` for full architecture and patch details
 3. Check current state: `git log --oneline -5`
 4. PAT is at `/home/z/.config/git/credentials`
-5. Build and test approach A first
-6. If A fails, implement approach B
-7. For each fix, do a mental runtime walkthrough before pushing
-8. Monitor CI: `curl -s -H "Authorization: token $PAT" "https://api.github.com/repos/Vower2993/WayLandIE/actions/runs?per_page=1" | python3 -c "import json,sys; r=json.load(sys.stdin)['workflow_runs'][0]; print(f'#{r[\"run_number\"]} {r[\"status\"]}/{r[\"conclusion\"]}')"`
+5. For each fix, do a mental runtime walkthrough before pushing
+6. Monitor CI: `curl -s -H "Authorization: token $PAT" "https://api.github.com/repos/Vower2993/WayLandIE/actions/runs?per_page=1" | python3 -c "import json,sys; r=json.load(sys.stdin)['workflow_runs'][0]; print(f'#{r[\"run_number\"]} {r[\"status\"]}/{r[\"conclusion\"]}')"`
 
 ## Success Criteria
 
