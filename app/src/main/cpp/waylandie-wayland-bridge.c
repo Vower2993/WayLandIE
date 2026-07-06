@@ -1129,7 +1129,9 @@ static int shm_ahb_pool_acquire(int width, int height,
             desc.format = AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM;
             desc.usage = AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN
                        | AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE
-                       | AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN;
+                       | AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN
+                       | AHARDWAREBUFFER_USAGE_COMPOSER_OVERLAY
+                       | AHARDWAREBUFFER_USAGE_GPU_COLOR_OUTPUT;
             int rc = AHardwareBuffer_allocate(&desc, &e->ahb);
             if (rc != 0 || e->ahb == NULL) {
                 pthread_mutex_unlock(&g_ahb_pool_mutex);
@@ -1272,7 +1274,9 @@ static int shm_to_ahb(struct shm_buffer_state *shm, int frame_index,
         desc.format = AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM;
         desc.usage = AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN
                    | AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE
-                   | AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN;
+                   | AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN
+                   | AHARDWAREBUFFER_USAGE_COMPOSER_OVERLAY
+                   | AHARDWAREBUFFER_USAGE_GPU_COLOR_OUTPUT;
         desc.rfu0 = 0;
         desc.rfu1 = 0;
 

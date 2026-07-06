@@ -55,7 +55,7 @@ public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Cal
     public void setWaylandMode(boolean wayland) {
         this.waylandMode = wayland;
         if (wayland) {
-            setZOrderOnTop(true);
+            setZOrderMediaOverlay(true);
         }
     }
 

@@ -5511,7 +5511,7 @@ Java_com_winlator_cmod_runtime_display_environment_components_WaylandBridgeServe
             native_ahb_vk_buffer_release);
     acquire_fence_fd = -1;
     release_context = NULL;
-    ASurfaceTransaction_setZOrder(transaction, surface_control, 10);
+    ASurfaceTransaction_setZOrder(transaction, surface_control, 0x7FFFFFFF);
     ASurfaceTransaction_setVisibility(
             transaction,
             surface_control,
