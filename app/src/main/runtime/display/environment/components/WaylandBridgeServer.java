@@ -83,14 +83,9 @@ public class WaylandBridgeServer {
             try { serverSocket.close(); } catch (IOException ignored) {}
             serverSocket = null;
         }
-        if (presentLayer != null) {
-            try {
-                new SurfaceControl.Transaction()
-                    .setVisibility(presentLayer, false).apply();
-            } catch (Exception ignored) {}
-            presentLayer.release();
-            presentLayer = null;
-        }
+        // Don't release presentLayer — it's the SurfaceView's own SurfaceControl,
+        // not ours to release. Just null the reference.
+        presentLayer = null;
     }
 
     private void acceptLoop() {
@@ -306,59 +301,39 @@ public class WaylandBridgeServer {
     }
 
     private void ensurePresentLayer(int w, int h) {
-        /* Create ONE presentLayer at the hostView's screen size, not the
-         * source buffer size. The source buffers (1024x128 taskbar, 768x512
-         * windows) are scaled to fit by SurfaceFlinger via setCrop in the
-         * native present code.
+        /* Use the SurfaceView's OWN SurfaceControl directly — no child layer.
          *
-         * CAUSE: The old code recreated the presentLayer on every dimension
-         * change (101 creations for 7 frames), preventing SurfaceFlinger
-         * from ever compositing a stable layer.
+         * Previous approach created a child presentLayer, but SurfaceFlinger
+         * wouldn't composite it because the parent SurfaceView had no buffer
+         * (render thread skipped in Wayland mode). Various fixes (dummy frame,
+         * top-level SurfaceControl, render thread for 1 frame) all had issues.
          *
-         * EFFECT: The presentLayer is created ONCE at the SurfaceView's
-         * dimensions and never recreated. All frames update the buffer on
-         * the same layer. SurfaceFlinger composites it stably.
+         * NEW APPROACH: Use hostView.getSurfaceControl() directly. The native
+         * present code calls ASurfaceTransaction_setBufferWithRelease on this
+         * SurfaceControl, which sets the buffer directly via SurfaceFlinger.
+         * No VulkanRenderer, no child layer, no dummy frame needed.
          *
-         * SIDE EFFECT: The desktop will appear stretched (source 1024x128
-         * → screen 2340x1080). This is acceptable for now — aspect-ratio
-         * correction can be added later.
-         *
-         * RISK: If the screen rotates, the presentLayer won't resize.
-         * Acceptable for now. */
-        if (presentLayer != null) return;  // Never recreate — one layer for the session
+         * The SurfaceView's SurfaceControl is already part of the window
+         * hierarchy and is composited by SurfaceFlinger. We just set buffers
+         * on it via ASurfaceTransaction (bypassing the BLASTBufferQueue which
+         * is idle since we skip the render thread).
+         */
+        if (presentLayer != null) return;
         if (hostView == null || hostView.getSurfaceControl() == null) {
-            Log.w(TAG, "Cannot create presentLayer — hostView SurfaceControl is null");
+            Log.w(TAG, "Cannot use SurfaceView SurfaceControl — it is null");
             return;
         }
-        /* Use the hostView's actual dimensions, not the source buffer size.
-         * Fall back to the source size if hostView dimensions are 0. */
         int layerW = hostView.getWidth();
         int layerH = hostView.getHeight();
         if (layerW <= 0 || layerH <= 0) {
             layerW = w;
             layerH = h;
         }
-        try {
-            // presentLayer is a CHILD of the SurfaceView's SurfaceControl.
-            // The SurfaceView's render thread renders one black frame to make
-            // the parent SurfaceControl active in SurfaceFlinger, so the child
-            // presentLayer composites on top.
-            presentLayer = new SurfaceControl.Builder()
-                .setName("waylandie-present")
-                .setParent(hostView.getSurfaceControl())
-                .setBufferSize(layerW, layerH)
-                .build();
-            width = layerW;
-            height = layerH;
-            new SurfaceControl.Transaction()
-                .setLayer(presentLayer, 10)
-                .setVisibility(presentLayer, true)
-                .setPosition(presentLayer, 0, 0)
-                .apply();
-            Log.i(TAG, "Created presentLayer: " + layerW + "x" + layerH + " (screen size, source=" + w + "x" + h + ")");
-        } catch (Exception e) {
-            Log.e(TAG, "Failed to create presentLayer", e);
-        }
+        // Use the SurfaceView's own SurfaceControl — no child needed
+        presentLayer = hostView.getSurfaceControl();
+        width = layerW;
+        height = layerH;
+        Log.i(TAG, "Using SurfaceView SurfaceControl directly: " + layerW + "x" + layerH + " (source=" + w + "x" + h + ")");
     }
 
     private static int parseIntField(String s, String key) {

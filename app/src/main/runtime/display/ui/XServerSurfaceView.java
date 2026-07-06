@@ -184,21 +184,11 @@ public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Cal
 
     private void startRenderThreadIfNeeded() {
         if (renderThread != null && renderThread.isAlive()) return;
+        // In Wayland mode, skip the VulkanRenderer entirely. The bridge's
+        // native present code sets buffers directly on the SurfaceView's
+        // SurfaceControl via ASurfaceTransaction — no VulkanRenderer needed.
         if (waylandMode) {
-            // In Wayland mode, start the render thread to render ONE frame
-            // (black) so the SurfaceView's SurfaceControl becomes "active" in
-            // SurfaceFlinger. Without this, the child presentLayer (created by
-            // WaylandBridgeServer) is never composited because SurfaceFlinger
-            // doesn't composite children of empty/inactive parents.
-            //
-            // After the first frame, the render thread idles (RENDERMODE_WHEN_DIRTY)
-            // and doesn't interfere with the presentLayer's frames.
-            android.util.Log.i("XServerSurfaceView", "Wayland mode — starting render thread for initial frame");
-            running = true;
-            renderMode = RENDERMODE_WHEN_DIRTY;
-            renderThread = new Thread(this::renderLoop, "VkRenderer");
-            renderThread.start();
-            requestRender(); // Request one frame
+            android.util.Log.i("XServerSurfaceView", "Wayland mode — skipping VulkanRenderer (bridge presents directly)");
             return;
         }
         running = true;
