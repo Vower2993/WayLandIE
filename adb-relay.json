@@ -1,1 +1,1 @@
-{"cmd": "adb shell echo hello_from_termux", "output": "", "exit_code": 0}
+{"cmd":"idle","output":"hello_from_termux\n","exit_code":0}
