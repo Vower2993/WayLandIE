@@ -152,50 +152,62 @@ public final class WaylandDriverInstaller {
             patchSurfaceExtension(new File(wineAarch64Unix, "winewayland.so"));
             patchSurfaceExtension(new File(prefix, "lib/wine/aarch64-unix/winewayland.so"));
 
-            // CRITICAL: Binary-patch win32u.so to neutralize
-            // VK_EXT_surface_maintenance1 + VK_EXT_swapchain_maintenance1.
+            // CRITICAL: Binary-patch to neutralize VK_EXT_surface_maintenance1.
             //
-            // win32u.so (Unix side) is NOT rebuilt from source — it ships
-            // pre-built in the Proton archive. It contains an auto-enable check:
-            //   if (has_VK_KHR_win32_surface && host.has_VK_EXT_surface_maintenance1)
-            //       has_VK_EXT_surface_maintenance1 = 1;
-            // The Turnip driver ADVERTISES this extension but doesn't support it,
-            // causing DXVK's vkCreateInstance to return -7 (VK_ERROR_INITIALIZATION_FAILED).
-            //
-            // We can't patch the binary code, but we CAN patch the extension NAME
-            // STRING in the .rodata section. When win32u compares the HOST driver's
-            // extension names against the string, the strcmp won't match, so
-            // host_extensions.has_VK_EXT_surface_maintenance1 stays 0, and the
-            // auto-enable doesn't fire.
-            //
-            // "VK_EXT_surface_maintenance1"  (28 chars) → "VK_EXT_surface_maintenance0" (28 chars)
-            // "VK_EXT_swapchain_maintenance1" (29 chars) → "VK_EXT_swapchain_maintenance0" (29 chars)
-            // Both are same-length replacements — no overflow.
-            //
-            // NOTE: The Unix companion is named win32u.so (UNIXLIB = win32u.so
-            // in Makefile.in), NOT win32u.dll.so.
-            File win32uSo = new File(wineAarch64Unix, "win32u.so");
-            patchExtensionString(win32uSo,
-                "VK_EXT_surface_maintenance1", "VK_EXT_surface_maintenance0");
-            patchExtensionString(win32uSo,
-                "VK_EXT_swapchain_maintenance1", "VK_EXT_swapchain_maintenance0");
-            // Also patch the prefix copy if it exists
-            File win32uSoPrefix = new File(prefix, "lib/wine/aarch64-unix/win32u.so");
-            patchExtensionString(win32uSoPrefix,
-                "VK_EXT_surface_maintenance1", "VK_EXT_surface_maintenance0");
-            patchExtensionString(win32uSoPrefix,
-                "VK_EXT_swapchain_maintenance1", "VK_EXT_swapchain_maintenance0");
-            // Also patch winevulkan.so — the auto-enable check may be here instead
-            File winevulkanSo = new File(wineAarch64Unix, "winevulkan.so");
-            patchExtensionString(winevulkanSo,
-                "VK_EXT_surface_maintenance1", "VK_EXT_surface_maintenance0");
-            patchExtensionString(winevulkanSo,
-                "VK_EXT_swapchain_maintenance1", "VK_EXT_swapchain_maintenance0");
-            File winevulkanSoPrefix = new File(prefix, "lib/wine/aarch64-unix/winevulkan.so");
-            patchExtensionString(winevulkanSoPrefix,
-                "VK_EXT_surface_maintenance1", "VK_EXT_surface_maintenance0");
-            patchExtensionString(winevulkanSoPrefix,
-                "VK_EXT_swapchain_maintenance1", "VK_EXT_swapchain_maintenance0");
+            // DIAGNOSTIC: First, scan ALL .so files to find where the string lives.
+            // The previous attempt only checked win32u.so but the string wasn't there.
+            // This scanner walks the entire winePath/lib/wine/ tree and logs every
+            // .so file that contains 'VK_EXT_surface_maintenance1'.
+            Log.i(TAG, "DIAGNOSTIC: scanning all .so files for VK_EXT_surface_maintenance1");
+            scanAllSoForString(winePath, "VK_EXT_surface_maintenance1");
+            scanAllSoForString(winePath, "VK_EXT_swapchain_maintenance1");
+            // Also scan the prefix
+            File prefixLib = new File(prefix, "lib/wine");
+            if (prefixLib.isDirectory()) {
+                scanAllSoForString(prefixLib, "VK_EXT_surface_maintenance1");
+                scanAllSoForString(prefixLib, "VK_EXT_swapchain_maintenance1");
+            }
+
+            // Now patch ALL .so files that contain the string.
+            // We scan win32u.so, winevulkan.so, and any other .so that has it.
+            File wineLibDir = new File(winePath, "lib/wine/aarch64-unix");
+            if (wineLibDir.isDirectory()) {
+                File[] soFiles = wineLibDir.listFiles((d, name) -> name.endsWith(".so"));
+                if (soFiles != null) {
+                    for (File so : soFiles) {
+                        patchExtensionString(so,
+                            "VK_EXT_surface_maintenance1", "VK_EXT_surface_maintenance0");
+                        patchExtensionString(so,
+                            "VK_EXT_swapchain_maintenance1", "VK_EXT_swapchain_maintenance0");
+                    }
+                }
+            }
+            // Also scan arm64ec-unix if it exists
+            File wineLibDirEc = new File(winePath, "lib/wine/arm64ec-unix");
+            if (wineLibDirEc.isDirectory()) {
+                File[] soFiles = wineLibDirEc.listFiles((d, name) -> name.endsWith(".so"));
+                if (soFiles != null) {
+                    for (File so : soFiles) {
+                        patchExtensionString(so,
+                            "VK_EXT_surface_maintenance1", "VK_EXT_surface_maintenance0");
+                        patchExtensionString(so,
+                            "VK_EXT_swapchain_maintenance1", "VK_EXT_swapchain_maintenance0");
+                    }
+                }
+            }
+            // Also scan prefix lib dir
+            File prefixLibDir = new File(prefix, "lib/wine/aarch64-unix");
+            if (prefixLibDir.isDirectory()) {
+                File[] soFiles = prefixLibDir.listFiles((d, name) -> name.endsWith(".so"));
+                if (soFiles != null) {
+                    for (File so : soFiles) {
+                        patchExtensionString(so,
+                            "VK_EXT_surface_maintenance1", "VK_EXT_surface_maintenance0");
+                        patchExtensionString(so,
+                            "VK_EXT_swapchain_maintenance1", "VK_EXT_swapchain_maintenance0");
+                    }
+                }
+            }
 
             // Do NOT patch DXVK DLLs — DXVK should request VK_KHR_win32_surface
             // (its natural behavior). Wine's wayland_map_instance_extensions
@@ -472,6 +484,52 @@ public final class WaylandDriverInstaller {
         // vkCreateInstance dispatches to the wrong Unix function → failure.
         // Both PE (system32) and Unix (winevulkan.so) sides MUST be from the
         // same proton_11.0 source.
+    }
+
+    /**
+     * DIAGNOSTIC: Recursively scans all .so/.dll/.drv files under a directory
+     * for a specific ASCII string. Logs every file that contains the string.
+     * Used to find which .so file contains VK_EXT_surface_maintenance1.
+     */
+    private static void scanAllSoForString(File rootDir, String searchStr) {
+        if (rootDir == null || !rootDir.isDirectory()) return;
+        byte[] search = searchStr.getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+        int totalFound = scanDirRecursive(rootDir, search, searchStr);
+        if (totalFound == 0) {
+            Log.i(TAG, "DIAGNOSTIC: '" + searchStr + "' NOT FOUND in any .so/.dll under " + rootDir.getAbsolutePath());
+        } else {
+            Log.i(TAG, "DIAGNOSTIC: '" + searchStr + "' found in " + totalFound + " file(s) under " + rootDir.getAbsolutePath());
+        }
+    }
+
+    private static int scanDirRecursive(File dir, byte[] search, String searchStr) {
+        File[] files = dir.listFiles();
+        if (files == null) return 0;
+        int found = 0;
+        for (File f : files) {
+            if (f.isDirectory()) {
+                found += scanDirRecursive(f, search, searchStr);
+            } else if (f.getName().endsWith(".so") || f.getName().endsWith(".dll") || f.getName().endsWith(".drv")) {
+                try {
+                    byte[] data = java.nio.file.Files.readAllBytes(f.toPath());
+                    int count = 0;
+                    for (int i = 0; i <= data.length - search.length; i++) {
+                        boolean match = true;
+                        for (int j = 0; j < search.length; j++) {
+                            if (data[i + j] != search[j]) { match = false; break; }
+                        }
+                        if (match) count++;
+                    }
+                    if (count > 0) {
+                        Log.i(TAG, "DIAGNOSTIC: '" + searchStr + "' found " + count + "x in " + f.getAbsolutePath() + " (" + data.length + " bytes)");
+                        found++;
+                    }
+                } catch (Exception e) {
+                    // Skip unreadable files
+                }
+            }
+        }
+        return found;
     }
 
     /**
