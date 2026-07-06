@@ -148,33 +148,24 @@ PYKB
     sed -i '/^[[:space:]]*dllmain\.c \\$/a \\tlinux-dmabuf-unstable-v1.xml \\\n\twayland_dmabuf.c \\' \
         dlls/winewayland.drv/Makefile.in
 
-    # 8. CRITICAL FIX: Remove wl_display_dispatch_queue_pending from
-    #    wayland_buffer_queue_get_free_buffer to prevent USER-lock re-entrancy.
+    # 8. SURGICAL FIX: Neutralize NtGdiGetRegionData to prevent USER-lock crash.
     #
-    # ROOT CAUSE of user_check_not_lock crash (confirmed via Wine source analysis):
+    # CRASH ANALYSIS (from multiple log sets):
+    # The user_check_not_lock crash happens during wayland_window_surface_flush
+    # when copy_pixel_region → get_region_data → NtGdiGetRegionData re-enters
+    # win32u's GDI subsystem while the USER lock is held.
     #
-    # The crash trace:
-    #   flush_window_surfaces (called while USER lock held by ancestor)
-    #     → wayland_window_surface_flush
-    #       → wayland_buffer_queue_get_free_buffer
-    #         → wl_display_dispatch_queue_pending  ← PROCESSES WAYLAND EVENTS
-    #           → buffer_release listener
-    #             → wayland_shm_buffer_unref
-    #               → NtGdiDeleteObjectApp  ← RE-ENTERS win32u (GDI)
-    #                 → user_check_not_lock CRASH
+    # FIX: Define NtGdiGetRegionData as a macro that returns 0 (no region data).
+    # This makes get_region_data return NULL, which makes copy_pixel_region
+    # skip the precise damage-region copy and do a full-frame copy instead.
+    # The desktop still renders — just without per-region damage tracking.
     #
-    # The problem: wayland_buffer_queue_get_free_buffer calls
-    # wl_display_dispatch_queue_pending to process buffer_release events.
-    # But buffer_release → wayland_shm_buffer_unref → NtGdiDeleteObjectApp
-    # re-enters win32u's GDI subsystem. When this happens while the USER
-    # lock is held (by an ancestor frame in the call stack), the re-entrant
-    # win32u call hits user_check_not_lock() and crashes.
-    #
-    # In upstream Wine, the message loop calls user_check_not_lock() BEFORE
-    # flush_window_surfaces to ensure the lock isn't held. But Proton 11.0
-    # has additional code paths (desktop/layered window painting) that call
-    # flush_window_surfaces while the USER lock IS held.
-    #
+    # NOTE: The wl_display_dispatch_queue_pending removal was REVERTED because
+    # it caused a use-after-free (surfaces destroyed while buffers still being
+    # attached → "unknown object (26), message attach" → compositor disconnect
+    # → crash). The dispatch is needed to process buffer_release events in time.
+    # The NtGdiGetRegionData neutralization alone is sufficient to prevent the
+    # re-entrancy crash.
     # FIX: Remove the wl_display_dispatch_queue_pending call from
     # wayland_buffer_queue_get_free_buffer. The dedicated Wayland event
     # thread (waylanddrv_unix_read_events) will process buffer_release
@@ -230,13 +221,12 @@ ntgdi_macros = '''
 with open('dlls/winewayland.drv/window_surface.c', 'r') as f:
     c = f.read()
 
-# 1. Remove wl_display_dispatch_queue_pending
-pattern = r'wl_display_dispatch_queue_pending\s*\(\s*process_wayland\.wl_display\s*,\s*queue->wl_event_queue\s*\)\s*;'
-if re.search(pattern, c, re.DOTALL):
-    c = re.sub(pattern, '/* DISABLED: wl_display_dispatch_queue_pending */', c, flags=re.DOTALL)
-    print("  [window_surface.c] wl_display_dispatch_queue_pending removed")
+# DO NOT remove wl_display_dispatch_queue_pending — it's needed to process
+# buffer_release events. Removing it causes a use-after-free (surfaces
+# destroyed while buffers still being attached → "unknown object" error
+# → compositor disconnect → crash).
 
-# 2. Insert NtGdiGetRegionData macro after the last #include line
+# Insert NtGdiGetRegionData macro after the last #include line
 lines = c.split('\n')
 last_include = 0
 for i, line in enumerate(lines):
