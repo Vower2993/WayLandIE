@@ -437,6 +437,9 @@ typedef struct VkRenderer {
     // Compositor present mode requested by Java (default FIFO). Validated against
     // device-supported modes in create_swapchain; falls back to FIFO if unavailable.
     VkPresentModeKHR target_present_mode;
+
+    // Wayland dmabuf present state (used by vk_wayland_present.c)
+    void* wl_present;
 } VkRenderer;
 
 // ============================================================

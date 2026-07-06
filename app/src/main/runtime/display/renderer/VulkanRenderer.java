@@ -53,6 +53,8 @@ public class VulkanRenderer
     private final XServer xServer;
 
     private long nativeHandle = 0;
+
+    public long getNativeHandle() { return nativeHandle; }
     private boolean supportProbed = false;
     private boolean loggedAhbSceneUse = false;
     // Must be set before attachSurface — nativeCreate reads it once at instance creation.
@@ -825,4 +827,6 @@ public class VulkanRenderer
     private static native void nativeSetFpsLimit(long handle, int fps);
     private static native void nativeSetPresentMode(long handle, int mode);
     private static native void nativeSetScaleFilter(long handle, int mode);
+    public static native boolean nativePresentDmaBufWayland(long handle,
+            int dmabufFd, int width, int height, int stride, int drmFormat);
 }

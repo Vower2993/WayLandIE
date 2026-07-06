@@ -146,6 +146,7 @@ add_library(winlator SHARED
         winlator/vk/vk_dispatch.c
         winlator/vk/vk_image.c
         winlator/vk/vk_renderer.c
+        winlator/vk/vk_wayland_present.c
 )
 
 add_dependencies(winlator winlator_shaders)

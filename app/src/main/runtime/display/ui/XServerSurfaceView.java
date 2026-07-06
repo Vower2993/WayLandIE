@@ -43,6 +43,13 @@ public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Cal
     private volatile int width;
     private volatile int height;
     private volatile boolean waylandMode;
+    // Wayland dmabuf frame (set by bridge, consumed by render thread)
+    private volatile int wlDmabufFd = -1;
+    private volatile int wlWidth = 0;
+    private volatile int wlHeight = 0;
+    private volatile int wlStride = 0;
+    private volatile int wlDrmFormat = 0;
+    private volatile boolean wlFrameAvailable = false;
 
     public XServerSurfaceView(Context context, XServer xServer) {
         super(context);
@@ -58,6 +65,17 @@ public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Cal
             setZOrderMediaOverlay(true);
             getHolder().setFormat(android.graphics.PixelFormat.TRANSLUCENT);
         }
+    }
+
+    /** Called by WaylandBridgeServer when a new dmabuf frame is ready. */
+    public void setWaylandDmaBufFrame(int fd, int w, int h, int stride, int drmFormat) {
+        wlDmabufFd = fd;
+        wlWidth = w;
+        wlHeight = h;
+        wlStride = stride;
+        wlDrmFormat = drmFormat;
+        wlFrameAvailable = true;
+        requestRender();
     }
 
     public VulkanRenderer getRenderer() {
@@ -185,14 +203,16 @@ public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Cal
 
     private void startRenderThreadIfNeeded() {
         if (renderThread != null && renderThread.isAlive()) return;
-        // In Wayland mode, SKIP the VulkanRenderer. The bridge's
-        // ASurfaceTransaction on the child presentLayer worked when the
-        // render thread was skipped (commit b627579 — desktop was visible
-        // for a split second). Running the VulkanRenderer in CONTINUOUS mode
-        // causes BLASTBufferQueue to compete with ASurfaceTransaction,
-        // making the presentLayer invisible.
         if (waylandMode) {
-            android.util.Log.i("XServerSurfaceView", "Wayland mode — skipping VulkanRenderer (presentLayer uses ASurfaceTransaction)");
+            // In Wayland mode, start the render thread. Instead of rendering
+            // X11 scenes, it will present dmabuf frames from the bridge via
+            // nativePresentDmaBufWayland (blits dmabuf → swapchain → presents
+            // via BLASTBufferQueue which SurfaceFlinger always composites).
+            android.util.Log.i("XServerSurfaceView", "Wayland mode — starting render thread for dmabuf→swapchain blit");
+            running = true;
+            renderMode = RENDERMODE_WHEN_DIRTY;
+            renderThread = new Thread(this::renderLoop, "VkRenderer");
+            renderThread.start();
             return;
         }
         running = true;
@@ -272,7 +292,17 @@ public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Cal
             if (event != null) {
                 try { event.run(); } catch (Throwable ignore) {}
             } else if (draw) {
-                try { renderer.onDrawFrame(); } catch (Throwable ignore) {}
+                if (waylandMode && wlFrameAvailable) {
+                    // Wayland mode: blit dmabuf → swapchain → present via BLASTBufferQueue
+                    try {
+                        wlFrameAvailable = false;
+                        VulkanRenderer.nativePresentDmaBufWayland(
+                            renderer.getNativeHandle(),
+                            wlDmabufFd, wlWidth, wlHeight, wlStride, wlDrmFormat);
+                    } catch (Throwable ignore) {}
+                } else {
+                    try { renderer.onDrawFrame(); } catch (Throwable ignore) {}
+                }
             }
         }
         renderer.onSurfaceDestroyed();

@@ -6,6 +6,7 @@ import android.net.LocalSocket;
 import android.util.Log;
 import android.view.SurfaceControl;
 import android.view.SurfaceView;
+import com.winlator.cmod.runtime.display.ui.XServerSurfaceView;
 import java.io.*;
 import java.nio.ByteBuffer;
 
@@ -260,45 +261,28 @@ public class WaylandBridgeServer {
                 }
             }
 
-            // Call native present
-            // targetWidth/targetHeight = the presentLayer's dimensions (screen size).
-            // The native code uses these for setCrop, which tells SurfaceFlinger
-            // to scale the source buffer to fill the presentLayer.
-            // CAUSE: The old code passed srcWidth/srcHeight as target, so the
-            // crop was the same as the source — no scaling, tiny 1024x128 region.
-            // EFFECT: Now we pass the presentLayer's width/height as target,
-            // so SurfaceFlinger scales the source buffer to fill the screen.
-            int targetW = presentLayer != null ? width : srcWidth;
-            int targetH = presentLayer != null ? height : srcHeight;
-            String result = nativePresentAhbVkDmaBufFrame(
-                    presentLayer,
-                    dmabufFd,
-                    srcWidth, srcHeight,
-                    format, modifier, 1,
-                    stride0, offset0, size,
-                    targetW, targetH,
-                    frameIndex++,
-                    tmpDir, hookLibDir,
-                    driverDir, effectiveDriverName);
-
-            Log.i(TAG, "Present result: " + result);
-
-            // Check if present passed
-            if (result != null && result.contains("status=pass")) {
-                // Dismiss the preloader dialog on the first successful frame.
-                // In Wayland mode, the XServer's onUpdateWindowContent never fires
-                // (no X11 windows), so the preloader would stay forever.
-                // This callback dismisses it when the first frame is presented.
-                if (frameIndex == 1) {
-                    Log.i(TAG, "First frame presented — dismissing preloader");
-                    if (preloaderDismissCallback != null) {
-                        preloaderDismissCallback.run();
-                    }
-                }
-                return "waylandie-bridge dmabuf-present status=pass";
-            } else {
-                return "waylandie-bridge dmabuf-present status=fail reason=" + result;
+            // In Wayland mode, pass the dmabuf to the VulkanRenderer for blit→swapchain→present.
+            // This goes through BLASTBufferQueue which SurfaceFlinger always composites.
+            // The old ASurfaceTransaction path was invisible on Samsung S25/Android 16.
+            if (hostView instanceof XServerSurfaceView) {
+                XServerSurfaceView wlView = (XServerSurfaceView) hostView;
+                wlView.setWaylandDmaBufFrame(dmabufFd, srcWidth, srcHeight, stride0, (int)format);
             }
+
+            String result = "status=pass wayland-blit-via-vulkanrenderer";
+            frameIndex++;
+
+            Log.i(TAG, "Present result: " + result + " frame=" + (frameIndex - 1) +
+                    " source=" + srcWidth + "x" + srcHeight);
+
+            // Dismiss the preloader dialog on the first successful frame.
+            if (frameIndex == 1) {
+                Log.i(TAG, "First frame presented — dismissing preloader");
+                if (preloaderDismissCallback != null) {
+                    preloaderDismissCallback.run();
+                }
+            }
+            return "waylandie-bridge dmabuf-present status=pass";
         } catch (Exception e) {
             Log.e(TAG, "dmabuf-present error", e);
             return "waylandie-bridge dmabuf-present status=fail reason=" + e.getMessage();
