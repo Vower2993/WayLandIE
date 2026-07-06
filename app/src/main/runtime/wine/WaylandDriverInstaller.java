@@ -152,15 +152,15 @@ public final class WaylandDriverInstaller {
             patchSurfaceExtension(new File(wineAarch64Unix, "winewayland.so"));
             patchSurfaceExtension(new File(prefix, "lib/wine/aarch64-unix/winewayland.so"));
 
-            // CRITICAL: Binary-patch win32u.dll.so to neutralize
+            // CRITICAL: Binary-patch win32u.so to neutralize
             // VK_EXT_surface_maintenance1 + VK_EXT_swapchain_maintenance1.
             //
-            // win32u.dll.so (Unix side) is NOT rebuilt from source — it ships
+            // win32u.so (Unix side) is NOT rebuilt from source — it ships
             // pre-built in the Proton archive. It contains an auto-enable check:
             //   if (has_VK_KHR_win32_surface && host.has_VK_EXT_surface_maintenance1)
             //       has_VK_EXT_surface_maintenance1 = 1;
             // The Turnip driver ADVERTISES this extension but doesn't support it,
-            // causing DXVK's vkCreateInstance to return -7.
+            // causing DXVK's vkCreateInstance to return -7 (VK_ERROR_INITIALIZATION_FAILED).
             //
             // We can't patch the binary code, but we CAN patch the extension NAME
             // STRING in the .rodata section. When win32u compares the HOST driver's
@@ -174,6 +174,17 @@ public final class WaylandDriverInstaller {
             //
             // NOTE: The Unix companion is named win32u.so (UNIXLIB = win32u.so
             // in Makefile.in), NOT win32u.dll.so.
+            File win32uSo = new File(wineAarch64Unix, "win32u.so");
+            patchExtensionString(win32uSo,
+                "VK_EXT_surface_maintenance1", "VK_EXT_surface_maintenance0");
+            patchExtensionString(win32uSo,
+                "VK_EXT_swapchain_maintenance1", "VK_EXT_swapchain_maintenance0");
+            // Also patch the prefix copy if it exists
+            File win32uSoPrefix = new File(prefix, "lib/wine/aarch64-unix/win32u.so");
+            patchExtensionString(win32uSoPrefix,
+                "VK_EXT_surface_maintenance1", "VK_EXT_surface_maintenance0");
+            patchExtensionString(win32uSoPrefix,
+                "VK_EXT_swapchain_maintenance1", "VK_EXT_swapchain_maintenance0");
 
             // Do NOT patch DXVK DLLs — DXVK should request VK_KHR_win32_surface
             // (its natural behavior). Wine's wayland_map_instance_extensions
