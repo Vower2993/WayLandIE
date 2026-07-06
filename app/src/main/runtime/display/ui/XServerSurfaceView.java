@@ -55,28 +55,18 @@ public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Cal
     public void setWaylandMode(boolean wayland) {
         this.waylandMode = wayland;
         if (wayland) {
-            setZOrderOnTop(true);
-
-            /* Push a dummy frame to the SurfaceView's Surface so SurfaceFlinger
-             * considers the parent SurfaceControl "active". Without this, the
-             * child presentLayer may not composite on some devices (Samsung S25/
-             * Android 16) because the parent has no buffer queue (render thread
-             * is skipped in Wayland mode).
+            /* Use setZOrderMediaOverlay instead of setZOrderOnTop.
+             * setZOrderOnTop puts the SurfaceView ON TOP of ALL other views,
+             * which can interfere with the preloader dialog and other UI.
+             * setZOrderMediaOverlay puts it on top of other SurfaceViews but
+             * below regular views — this allows the preloader to show on top
+             * and the presentLayer (child SurfaceControl) to composite.
              *
-             * surfaceCreated may have fired before setWaylandMode, so we also
-             * push the dummy frame here if the surface is already valid. */
-            SurfaceHolder h = getHolder();
-            if (h != null && h.getSurface() != null && h.getSurface().isValid()) {
-                try {
-                    android.graphics.Canvas c = h.lockCanvas();
-                    if (c != null) {
-                        c.drawColor(android.graphics.Color.BLACK);
-                        h.unlockCanvasAndPost(c);
-                    }
-                } catch (Exception e) {
-                    android.util.Log.w("XServerSurfaceView", "Dummy frame failed: " + e.getMessage());
-                }
-            }
+             * The dummy frame approach (lockCanvas/drawColor) was removed because
+             * it caused 'stuck at wine starting' on some devices — lockCanvas
+             * on a SurfaceView with setZOrderOnTop can deadlock or invalidate
+             * the surface on Samsung S25/Android 16. */
+            setZOrderMediaOverlay(true);
         }
     }
 
@@ -158,18 +148,9 @@ public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Cal
             // waylandie_display_native not loaded — X11 mode, ignore
         }
 
-        // In Wayland mode, push a dummy frame to the SurfaceView's Surface
-        // so SurfaceFlinger considers the parent SurfaceControl "active".
-        // Without this, the child presentLayer (created by WaylandBridgeServer)
-        // may not composite on some devices (Samsung S25/Android 16) because
-        // the parent has no buffer queue (render thread is skipped).
-        if (waylandMode) {
-            android.graphics.Canvas c = holder.lockCanvas();
-            if (c != null) {
-                c.drawColor(android.graphics.Color.BLACK);
-                holder.unlockCanvasAndPost(c);
-            }
-        }
+        // Dummy frame removed — was causing 'stuck at wine starting' on some
+        // devices because lockCanvas conflicts with setZOrderMediaOverlay.
+        // setZOrderMediaOverlay doesn't require the parent to have content.
 
         startRenderThreadIfNeeded();
     }

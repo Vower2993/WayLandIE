@@ -154,60 +154,28 @@ public final class WaylandDriverInstaller {
 
             // CRITICAL: Binary-patch to neutralize VK_EXT_surface_maintenance1.
             //
-            // DIAGNOSTIC: First, scan ALL .so files to find where the string lives.
-            // The previous attempt only checked win32u.so but the string wasn't there.
-            // This scanner walks the entire winePath/lib/wine/ tree and logs every
-            // .so file that contains 'VK_EXT_surface_maintenance1'.
+            // DIAGNOSTIC: Scan ALL .so files to find where the string lives.
             Log.i(TAG, "DIAGNOSTIC: scanning all .so files for VK_EXT_surface_maintenance1");
             scanAllSoForString(winePath, "VK_EXT_surface_maintenance1");
             scanAllSoForString(winePath, "VK_EXT_swapchain_maintenance1");
-            // Also scan the prefix
             File prefixLib = new File(prefix, "lib/wine");
             if (prefixLib.isDirectory()) {
                 scanAllSoForString(prefixLib, "VK_EXT_surface_maintenance1");
                 scanAllSoForString(prefixLib, "VK_EXT_swapchain_maintenance1");
             }
 
-            // Now patch ALL .so files that contain the string.
-            // We scan win32u.so, winevulkan.so, and any other .so that has it.
-            File wineLibDir = new File(winePath, "lib/wine/aarch64-unix");
-            if (wineLibDir.isDirectory()) {
-                File[] soFiles = wineLibDir.listFiles((d, name) -> name.endsWith(".so"));
-                if (soFiles != null) {
-                    for (File so : soFiles) {
-                        patchExtensionString(so,
-                            "VK_EXT_surface_maintenance1", "VK_EXT_surface_maintenance0");
-                        patchExtensionString(so,
-                            "VK_EXT_swapchain_maintenance1", "VK_EXT_swapchain_maintenance0");
-                    }
-                }
-            }
-            // Also scan arm64ec-unix if it exists
-            File wineLibDirEc = new File(winePath, "lib/wine/arm64ec-unix");
-            if (wineLibDirEc.isDirectory()) {
-                File[] soFiles = wineLibDirEc.listFiles((d, name) -> name.endsWith(".so"));
-                if (soFiles != null) {
-                    for (File so : soFiles) {
-                        patchExtensionString(so,
-                            "VK_EXT_surface_maintenance1", "VK_EXT_surface_maintenance0");
-                        patchExtensionString(so,
-                            "VK_EXT_swapchain_maintenance1", "VK_EXT_swapchain_maintenance0");
-                    }
-                }
-            }
-            // Also scan prefix lib dir
-            File prefixLibDir = new File(prefix, "lib/wine/aarch64-unix");
-            if (prefixLibDir.isDirectory()) {
-                File[] soFiles = prefixLibDir.listFiles((d, name) -> name.endsWith(".so"));
-                if (soFiles != null) {
-                    for (File so : soFiles) {
-                        patchExtensionString(so,
-                            "VK_EXT_surface_maintenance1", "VK_EXT_surface_maintenance0");
-                        patchExtensionString(so,
-                            "VK_EXT_swapchain_maintenance1", "VK_EXT_swapchain_maintenance0");
-                    }
-                }
-            }
+            // Patch only the files we KNOW should have the string.
+            // The diagnostic scan will tell us if we need to add more.
+            File win32uSo = new File(wineAarch64Unix, "win32u.so");
+            patchExtensionString(win32uSo,
+                "VK_EXT_surface_maintenance1", "VK_EXT_surface_maintenance0");
+            patchExtensionString(win32uSo,
+                "VK_EXT_swapchain_maintenance1", "VK_EXT_swapchain_maintenance0");
+            File winevulkanSo = new File(wineAarch64Unix, "winevulkan.so");
+            patchExtensionString(winevulkanSo,
+                "VK_EXT_surface_maintenance1", "VK_EXT_surface_maintenance0");
+            patchExtensionString(winevulkanSo,
+                "VK_EXT_swapchain_maintenance1", "VK_EXT_swapchain_maintenance0");
 
             // Do NOT patch DXVK DLLs — DXVK should request VK_KHR_win32_surface
             // (its natural behavior). Wine's wayland_map_instance_extensions
