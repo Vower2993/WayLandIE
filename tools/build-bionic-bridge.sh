@@ -249,6 +249,25 @@ fi
 
 cd "wayland-$WAYLAND_VERSION"
 
+# Apply the libwayland-server patch: make requests sent to / referencing
+# already-destroyed objects non-fatal (drop the request) instead of
+# disconnecting the client. This fixes the Wine winewayland.drv crash:
+#   unknown object (26), message attach(?oii)
+#   error in client communication
+# where Wine's GUI thread queues wl_surface.attach() to a wl_buffer that
+# the event thread destroyed concurrently. libwayland-server otherwise
+# treats this as a fatal protocol error and kills the client. This mirrors
+# X11/winex11.drv, where the equivalent (BadWindow/BadDrawable) is a
+# non-fatal error suppressed by XSetErrorHandler. See
+# patches/libwayland-server-ignore-unknown-object.patch.
+if [ -f "$REPO_ROOT/patches/libwayland-server-ignore-unknown-object.patch" ]; then
+    echo "  Applying libwayland-server ignore-unknown-object patch…"
+    patch -p1 < "$REPO_ROOT/patches/libwayland-server-ignore-unknown-object.patch"
+else
+    echo "FATAL: libwayland-server patch not found at $REPO_ROOT/patches/libwayland-server-ignore-unknown-object.patch"
+    exit 1
+fi
+
 # Meson cross-file — use the one we ship in tools/
 CROSS_FILE="$REPO_ROOT/tools/android-aarch64-cross.txt"
 if [ ! -f "$CROSS_FILE" ]; then

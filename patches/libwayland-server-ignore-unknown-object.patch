@@ -1,0 +1,57 @@
+--- a/src/wayland-server.c	2026-07-06 06:46:28.515057540 +0000
++++ b/src/wayland-server.c	2026-07-06 06:48:54.936830778 +0000
+@@ -381,10 +381,24 @@
+ 		resource = wl_map_lookup(&client->objects, p[0]);
+ 		resource_flags = wl_map_lookup_flags(&client->objects, p[0]);
+ 		if (resource == NULL) {
+-			wl_resource_post_error(client->display_resource,
+-					       WL_DISPLAY_ERROR_INVALID_OBJECT,
+-					       "invalid object %u", p[0]);
+-			break;
++			/*
++			 * Drop requests sent to already-destroyed objects (e.g. a
++			 * wl_surface.attach() to a surface destroyed concurrently on
++			 * another thread) instead of disconnecting the client. Consume
++			 * the whole message and continue. Mirrors X11, where a request
++			 * to a destroyed resource yields a non-fatal BadWindow error
++			 * rather than a disconnect. A sub-header size is still fatal to
++			 * avoid a no-progress loop.
++			 */
++			if (size < (int) sizeof p) {
++				wl_resource_post_error(client->display_resource,
++						       WL_DISPLAY_ERROR_INVALID_OBJECT,
++						       "invalid object %u", p[0]);
++				break;
++			}
++			wl_connection_consume(connection, size);
++			len = wl_connection_pending_input(connection);
++			continue;
+ 		}
+ 
+ 		object = &resource->object;
+@@ -421,14 +435,18 @@
+ 			break;
+ 		} else if (closure == NULL ||
+ 			   wl_closure_lookup_objects(closure, &client->objects) < 0) {
+-			wl_resource_post_error(client->display_resource,
+-					       WL_DISPLAY_ERROR_INVALID_METHOD,
+-					       "invalid arguments for %s@%u.%s",
+-					       object->interface->name,
+-					       object->id,
+-					       message->name);
+ 			wl_closure_destroy(closure);
+-			break;
++			/*
++			 * Drop requests that reference already-destroyed object
++			 * arguments (e.g. wl_surface.attach() with a wl_buffer destroyed
++			 * concurrently on another thread, logged as "unknown object
++			 * (%u), message %s(%s)") instead of killing the client.
++			 * wl_connection_demarshal() already consumed the message bytes,
++			 * so just continue. Mirrors X11's non-fatal BadWindow/BadDrawable
++			 * handling.
++			 */
++			len = wl_connection_pending_input(connection);
++			continue;
+ 		}
+ 
+ 		log_closure(resource, closure, false);

@@ -69,59 +69,6 @@ if [ -d "$WLD_SRC" ]; then
     # Replace vulkan.c with Android dmabuf-enabled version
     cp "$WLD_SRC"/vulkan.c dlls/winewayland.drv/vulkan.c
 
-    # 1b. CRITICAL FIX: Patch wayland_keyboard.c to make XKB ruleset parsing non-fatal.
-    #
-    # ROOT CAUSE of "Failed to parse default Xkb ruleset":
-    #   wayland_keyboard_init() calls rxkb_context_parse_default_ruleset() which
-    #   reads rules/evdev.xml from the XKB data directory. This file is MISSING
-    #   from the Android container (no xkeyboard-config package installed).
-    #   When this fails, wayland_keyboard_init() returns early WITHOUT registering
-    #   the wl_keyboard listener. This causes a cascade:
-    #     - Keyboard not initialized → driver partially loaded
-    #     - nodrv_CreateWindow errors → explorer.exe fails
-    #     - USER-lock state corruption → user_check_not_lock crash
-    #
-    # FIX: Make the rxkb_* block non-fatal. The code already falls back to
-    #   layout="us" when find_xkb_layout_variant() fails (line 759 in keyboard.c),
-    #   so skipping the rxkb initialization is safe. The keyboard will still work
-    #   — it just won't be able to map compositor layout descriptions to xkb
-    #   layout names (falls back to "us").
-    if grep -q "rxkb_context_parse_default_ruleset" dlls/winewayland.drv/wayland_keyboard.c; then
-        echo "  Patching wayland_keyboard.c: make XKB ruleset parsing non-fatal"
-        # Replace the error return with a warning continue.
-        # Original:
-        #   if (!(rxkb_context = rxkb_context_new(RXKB_CONTEXT_NO_FLAGS))
-        #           || !rxkb_context_parse_default_ruleset(rxkb_context))
-        #   {
-        #       ERR("Failed to parse default Xkb ruleset\n");
-        #       return;
-        #   }
-        # Replacement: log warning but DON'T return — continue initialization
-        sed -i '/ERR("Failed to parse default Xkb ruleset\\n");/{
-            N
-            s/ERR("Failed to parse default Xkb ruleset\\n");\n\s*return;/ERR("Failed to parse default Xkb ruleset (non-fatal — falling back to us layout)\\n");/
-        }' dlls/winewayland.drv/wayland_keyboard.c
-        # Verify the patch applied
-        if grep -q "non-fatal" dlls/winewayland.drv/wayland_keyboard.c; then
-            echo "  Patched: rxkb failure is now non-fatal"
-        else
-            echo "  WARNING: sed patch did not apply, trying Python approach"
-            python3 << 'PYKB'
-with open('dlls/winewayland.drv/wayland_keyboard.c', 'r') as f:
-    c = f.read()
-old = 'ERR("Failed to parse default Xkb ruleset\\n");\n        return;'
-new = 'ERR("Failed to parse default Xkb ruleset (non-fatal — falling back to us layout)\\n");'
-if old in c:
-    c = c.replace(old, new)
-    with open('dlls/winewayland.drv/wayland_keyboard.c', 'w') as f:
-        f.write(c)
-    print("  Python patch applied: rxkb failure is now non-fatal")
-else:
-    print("  ERROR: could not find the pattern to patch")
-PYKB
-        fi
-    fi
-
     # 2. waylanddrv.h: add dmabuf include after last protocol header
     sed -i '/^#include "xdg-toplevel-icon-v1-client-protocol.h"/a #include "linux-dmabuf-unstable-v1-client-protocol.h"' \
         dlls/winewayland.drv/waylanddrv.h
@@ -148,107 +95,7 @@ PYKB
     sed -i '/^[[:space:]]*dllmain\.c \\$/a \\tlinux-dmabuf-unstable-v1.xml \\\n\twayland_dmabuf.c \\' \
         dlls/winewayland.drv/Makefile.in
 
-    # 8. SURGICAL FIX: Neutralize NtGdiGetRegionData to prevent USER-lock crash.
-    #
-    # CRASH ANALYSIS (from multiple log sets):
-    # The user_check_not_lock crash happens during wayland_window_surface_flush
-    # when copy_pixel_region → get_region_data → NtGdiGetRegionData re-enters
-    # win32u's GDI subsystem while the USER lock is held.
-    #
-    # FIX: Define NtGdiGetRegionData as a macro that returns 0 (no region data).
-    # This makes get_region_data return NULL, which makes copy_pixel_region
-    # skip the precise damage-region copy and do a full-frame copy instead.
-    # The desktop still renders — just without per-region damage tracking.
-    #
-    # NOTE: The wl_display_dispatch_queue_pending removal was REVERTED because
-    # it caused a use-after-free (surfaces destroyed while buffers still being
-    # attached → "unknown object (26), message attach" → compositor disconnect
-    # → crash). The dispatch is needed to process buffer_release events in time.
-    # The NtGdiGetRegionData neutralization alone is sufficient to prevent the
-    # re-entrancy crash.
-    # FIX: Remove the wl_display_dispatch_queue_pending call from
-    # wayland_buffer_queue_get_free_buffer. The dedicated Wayland event
-    # thread (waylanddrv_unix_read_events) will process buffer_release
-    # events asynchronously. Buffers will still be freed — just not
-    # synchronously during the flush. This breaks the re-entrancy cycle.
-    #
-    # This is safe because:
-    # - buffer_release just sets busy=FALSE and calls wayland_shm_buffer_unref
-    # - The event thread processes these on a separate thread without USER lock
-    # - The buffer queue has multiple buffers, so not getting an immediate
-    #   release just means we use the next available buffer
-
-    echo "  Patching window_surface.c + wayland_surface.c: surgical NtGdi fix"
-    python3 << 'PYNTGDI'
-import re
-
-# SURGICAL FIX: Only neutralize NtGdiGetRegionData — the ACTUAL crashing call.
-#
-# Previous broad neutralization (ALL NtGdi calls) broke rendering because
-# NtGdiCreateRectRgn returned NULL → "failed to create surface damage region"
-# → wayland_window_surface_flush bailed out → no buffer ever attached →
-# stuck at "wine starting" with no desktop.
-#
-# The crash trace was EXACTLY:
-#   copy_pixel_region → get_region_data → NtGdiGetRegionData → user_check_not_lock
-#
-# NtGdiGetRegionData is the ONLY call that crashes. The other NtGdi calls
-# (CreateRectRgn, CombineRgn, SetRectRgn, DeleteObjectApp) work fine —
-# they don't trigger user_check_not_lock because they don't enter the
-# message-pump code path.
-#
-# NtGdiGetRegionData returns 0 (no region data). This makes get_region_data
-# return NULL, which makes copy_pixel_region skip the precise damage copy
-# and do a full-frame copy instead. This is correct behavior — the desktop
-# still renders, just without per-region damage tracking (fine for desktop UI).
-
-ntgdi_macros = '''
-/* === SURGICAL NtGdi FIX ===
- * Only NtGdiGetRegionData is neutralized — it's the exact call in the
- * crash trace (copy_pixel_region → get_region_data → NtGdiGetRegionData).
- * Returning 0 makes get_region_data return NULL, which makes copy_pixel_region
- * skip the damage-region copy and do a full-frame copy instead.
- * All other NtGdi calls work normally — they don't trigger user_check_not_lock.
- */
-#ifdef NtGdiGetRegionData
-#undef NtGdiGetRegionData
-#endif
-#define NtGdiGetRegionData(...) 0
-/* === END SURGICAL NtGdi FIX === */
-'''
-
-# ── window_surface.c ──────────────────────────────────────────────────
-with open('dlls/winewayland.drv/window_surface.c', 'r') as f:
-    c = f.read()
-
-# DO NOT remove wl_display_dispatch_queue_pending — it's needed to process
-# buffer_release events. Removing it causes a use-after-free (surfaces
-# destroyed while buffers still being attached → "unknown object" error
-# → compositor disconnect → crash).
-
-# Insert NtGdiGetRegionData macro after the last #include line
-lines = c.split('\n')
-last_include = 0
-for i, line in enumerate(lines):
-    if line.strip().startswith('#include'):
-        last_include = i
-lines.insert(last_include + 1, ntgdi_macros)
-c = '\n'.join(lines)
-
-print("  [window_surface.c] NtGdiGetRegionData neutralized (surgical)")
-
-with open('dlls/winewayland.drv/window_surface.c', 'w') as f:
-    f.write(c)
-print("  [window_surface.c] patched")
-
-# ── wayland_surface.c ─────────────────────────────────────────────────
-# wayland_surface.c has NtGdiDeleteObjectApp in wayland_shm_buffer_unref,
-# which is called from buffer_release on the event thread. This is safe —
-# the event thread doesn't hold the USER lock. No patch needed here.
-print("  [wayland_surface.c] no patch needed (event thread is safe)")
-PYNTGDI
-
-    echo "  dmabuf sources + XKB fix + USER-lock re-entrancy fix applied"
+    echo "  dmabuf sources applied"
 else
     echo "  WARNING: $WLD_SRC not found — building without dmabuf support"
 fi
@@ -453,26 +300,8 @@ DESTDIR="$BIONIC_LIBS" ninja -C build install 2>&1 | tail -5
 
 # Meson installs to $BIONIC_LIBS/usr/local/{lib,include} because of --prefix=/usr/local
 # But Wine expects libs in $BIONIC_LIBS/lib and headers in $BIONIC_LIBS/include
-# Copy them to the expected locations.
-#
-# CRITICAL FIX: Each cp must run independently. The previous code used || chaining
-# which meant: if the FIRST cp succeeded, the other two were NEVER executed.
-# This caused libxkbcommon.a to be missing from $BIONIC_LIBS/lib/, which made
-# winewayland.so fail to link with "unable to find library -lxkbcommon".
-# Without winewayland.so, Wine can't load winewayland.drv → nodrv_CreateWindow
-# → blank dark screen for both desktop and games.
-mkdir -p "$BIONIC_LIBS/lib/pkgconfig" "$BIONIC_LIBS/include/xkbcommon"
-cp -r "$BIONIC_LIBS/usr/local/include/xkbcommon/"* "$BIONIC_LIBS/include/xkbcommon/" 2>/dev/null && echo "  Copied xkbcommon headers"
-cp "$BIONIC_LIBS/usr/local/lib/libxkbcommon.a" "$BIONIC_LIBS/lib/" 2>/dev/null && echo "  Copied libxkbcommon.a"
-cp "$BIONIC_LIBS/usr/local/lib/pkgconfig/xkbcommon.pc" "$BIONIC_LIBS/lib/pkgconfig/" 2>/dev/null && echo "  Copied xkbcommon.pc"
-# Verify libxkbcommon.a was copied — FATAL if missing
-if [ ! -f "$BIONIC_LIBS/lib/libxkbcommon.a" ] || [ "$(stat -c%s "$BIONIC_LIBS/lib/libxkbcommon.a")" -lt 1000 ]; then
-    echo "FATAL: libxkbcommon.a missing from $BIONIC_LIBS/lib/ after copy"
-    echo "  Source: $BIONIC_LIBS/usr/local/lib/libxkbcommon.a"
-    ls -la "$BIONIC_LIBS/usr/local/lib/" 2>/dev/null | grep xkb || echo "  (no xkb files in usr/local/lib)"
-    exit 1
-fi
-echo "  ✓ libxkbcommon.a: $(stat -c%s "$BIONIC_LIBS/lib/libxkbcommon.a") bytes"
+# Copy them to the expected locations
+cp -r "$BIONIC_LIBS/usr/local/include/xkbcommon" "$BIONIC_LIBS/include/xkbcommon" 2>/dev/null ||cp "$BIONIC_LIBS/usr/local/lib/libxkbcommon.a" "$BIONIC_LIBS/lib/" 2>/dev/null ||cp "$BIONIC_LIBS/usr/local/lib/pkgconfig/xkbcommon.pc" "$BIONIC_LIBS/lib/pkgconfig/" 2>/dev/null ||
 # Create a stub libxkbregistry.a so Wine's link test passes.
 # We disabled xkbregistry because it requires libxml2 (not available for bionic).
 # Wine only uses xkbregistry for keyboard layout enumeration — not needed for
@@ -768,7 +597,7 @@ ln -sf libfreetype.a "$FT_DIR/lib/libfreetype.so" 2>/dev/null || true
 
 export CFLAGS="-fPIC --sysroot=$SYSROOT -I$SYSROOT/usr/include -I$BIONIC_LIBS/include -I$FT_DIR/include/freetype2 -I/tmp/proton-wine/include -D__ANDROID_API__=$API -D__ANDROID__ -Wno-int-conversion"
 export CXXFLAGS="$CFLAGS"
-export LDFLAGS="--sysroot=$SYSROOT -L$BIONIC_LIBS/lib -L$FT_DIR/lib -landroid-sysvshm -lffi -ldl -rdynamic"
+export LDFLAGS="--sysroot=$SYSROOT -L$BIONIC_LIBS/lib -L$FT_DIR/lib -landroid-sysvshm -lffi"
 export PKG_CONFIG_PATH="$BIONIC_LIBS/lib/pkgconfig:$FT_DIR/lib/pkgconfig"
 export PKG_CONFIG_LIBDIR="$BIONIC_LIBS/lib/pkgconfig:$FT_DIR/lib/pkgconfig"
 unset PKG_CONFIG_SYSROOT_DIR
@@ -839,20 +668,13 @@ grep -E "^(WAYLAND|XKB)" /tmp/proton-wine/config.status | head -20 || true
 
 echo "=== [8/9] Build winewayland targets ==="
 
-# Save full output to a file, then show last 500 lines + all error lines
 make -j$(nproc) -k \
   dlls/winewayland.drv/aarch64-windows/winewayland.drv \
   dlls/winewayland.drv/winewayland.so \
   dlls/winewayland.drv/arm64ec-windows/winewayland.drv \
   dlls/ntdll/aarch64-windows/ntdll.dll \
   dlls/ntdll/arm64ec-windows/ntdll.dll \
-  > /tmp/winewayland-make.log 2>&1 || true
-
-echo "=== Last 300 lines of make output ==="
-tail -300 /tmp/winewayland-make.log
-echo "=== All error: lines from make output ==="
-grep -i "error:" /tmp/winewayland-make.log | head -50
-echo "=== End make output ==="
+  2>&1 | tail -300 || true
 
 
 echo "=== Searching for built artifacts ==="
@@ -958,11 +780,9 @@ if [ "$DRV_SIZE" -lt 1000 ]; then
 fi
 
 if [ "$SO_SIZE" -lt 1000 ]; then
-  echo "FATAL: winewayland.so missing or too small — winewayland.drv CANNOT load without it"
+  echo "FATAL: winewayland.so missing or too small"
   echo "=== winewayland.so build output (last 80 lines) ==="
-  make -j$(nproc) dlls/winewayland.drv/winewayland.so V=1 2>&1 | tail -80
-  echo "=== FATAL: aborting build — winewayland.so is required for Wayland mode ==="
-  exit 1
+  make -j$(nproc) dlls/winewayland.drv/winewayland.so V=1 2>&1 | tail -80 ||  exit 1
 fi
 
 

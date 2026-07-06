@@ -3734,12 +3734,11 @@ static int find_free_ahb_vk_slot_with_wait_locked(long long *slot_wait_us) {
 }
 
 static VkClearValue ahb_vk_clear_value(long long frame_index, int slot_index) {
-    /* Clear to black (not blue) so if the blit is delayed or fails, the user
-     * sees a brief black flash instead of a jarring blue/white flash. */
+    float phase = (float)((frame_index % 180LL) / 179.0);
     VkClearValue clear_value;
-    clear_value.color.float32[0] = 0.0f;
-    clear_value.color.float32[1] = 0.0f;
-    clear_value.color.float32[2] = 0.0f;
+    clear_value.color.float32[0] = 0.05f + (0.30f * phase);
+    clear_value.color.float32[1] = 0.08f + (0.10f * (float)slot_index);
+    clear_value.color.float32[2] = 0.42f + (0.35f * (1.0f - phase));
     clear_value.color.float32[3] = 1.0f;
     return clear_value;
 }
