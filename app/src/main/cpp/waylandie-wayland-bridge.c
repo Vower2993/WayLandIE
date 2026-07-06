@@ -1072,7 +1072,6 @@ struct shm_ahb_pool_dim_slot {
 };
 
 static struct shm_ahb_pool_dim_slot g_ahb_pool[SHM_AHB_POOL_MAX_DIMS];
-static int g_ahb_pool_init_done = 0;
 static pthread_mutex_t g_ahb_pool_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static struct shm_ahb_pool_dim_slot *find_or_create_dim_slot(int width, int height) {
@@ -1196,6 +1195,7 @@ static int shm_to_ahb(struct shm_buffer_state *shm, int frame_index,
                        struct shm_ahb_handle *out) {
     out->ahb = NULL;
     out->dmabuf_fd = -1;
+    out->from_pool = 0;
     memset(&out->temp_buffer, 0, sizeof(out->temp_buffer));
 
     if (shm == NULL || shm->kind != BUFFER_KIND_SHM) return -1;
@@ -1313,6 +1313,11 @@ static int shm_to_ahb(struct shm_buffer_state *shm, int frame_index,
     if (lock_rc != 0 || dst == NULL) {
         printf("wayland-shm-ahb frame=%d status=fail reason=ahb-lock rc=%d\n",
                frame_index, lock_rc);
+        /* Close fallback's fresh dup fd before releasing (pool fd is cached, don't close) */
+        if (pool_rc != 0 && pool_fd >= 0) {
+            close(pool_fd);
+            g_diag.dmabuf_fds_closed++;
+        }
         shm_ahb_pool_release(out->ahb);  // return to pool for reuse
         out->ahb = NULL;
         return -1;

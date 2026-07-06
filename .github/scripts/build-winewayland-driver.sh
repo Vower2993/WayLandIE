@@ -110,13 +110,8 @@ if [ -d "$WLD_SRC" ]; then
     # The proxy is cleaned up when the wl_surface is destroyed or when Wine
     # exits.
     echo "  Patching wayland_surface.c: defer wl_buffer_destroy"
-    sed -i 's/wl_buffer_destroy(\([^)]*\));/\/* LEAK: wl_buffer_destroy deferred to prevent wl_proxy_unref race *\/ (void)\1;/g' \
-        dlls/winewayland.drv/wayland_surface.c 2>/dev/null
-    if grep -q "LEAK: wl_buffer_destroy deferred" dlls/winewayland.drv/wayland_surface.c; then
-        echo "  Patched: wl_buffer_destroy is now a no-op (prevents use-after-free)"
-    else
-        echo "  WARNING: wl_buffer_destroy patch did not apply via sed, trying Python"
-        python3 << 'PYWBD'
+    # Always use Python (handles multi-line calls that sed misses)
+    python3 << 'PYWBD'
 import re
 with open('dlls/winewayland.drv/wayland_surface.c', 'r') as f:
     c = f.read()
@@ -131,9 +126,8 @@ with open('dlls/winewayland.drv/wayland_surface.c', 'w') as f:
 if before > 0 and after < before:
     print("  Python patch applied: wl_buffer_destroy is now a no-op")
 else:
-    print("  WARNING: no wl_buffer_destroy calls found")
+    print("  WARNING: no wl_buffer_destroy calls found in wayland_surface.c")
 PYWBD
-    fi
 
     # 7. Makefile.in: add new source files
     sed -i '/^[[:space:]]*dllmain\.c \\$/a \\tlinux-dmabuf-unstable-v1.xml \\\n\twayland_dmabuf.c \\' \
