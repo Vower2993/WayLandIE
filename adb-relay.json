@@ -1,1 +1,1 @@
-{"cmd":"adb shell pm list packages | grep ludashi","output":"","exit_code":0}
+{"cmd":"idle","output":"ERROR: command not allowed: {\"cmd\":\"adb shell pm list packages | grep lud\n","exit_code":1}
