@@ -55,18 +55,7 @@ public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Cal
     public void setWaylandMode(boolean wayland) {
         this.waylandMode = wayland;
         if (wayland) {
-            /* Use setZOrderMediaOverlay instead of setZOrderOnTop.
-             * setZOrderOnTop puts the SurfaceView ON TOP of ALL other views,
-             * which can interfere with the preloader dialog and other UI.
-             * setZOrderMediaOverlay puts it on top of other SurfaceViews but
-             * below regular views — this allows the preloader to show on top
-             * and the presentLayer (child SurfaceControl) to composite.
-             *
-             * The dummy frame approach (lockCanvas/drawColor) was removed because
-             * it caused 'stuck at wine starting' on some devices — lockCanvas
-             * on a SurfaceView with setZOrderOnTop can deadlock or invalidate
-             * the surface on Samsung S25/Android 16. */
-            setZOrderMediaOverlay(true);
+            setZOrderOnTop(true);
         }
     }
 
@@ -195,12 +184,21 @@ public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Cal
 
     private void startRenderThreadIfNeeded() {
         if (renderThread != null && renderThread.isAlive()) return;
-        // In Wayland mode, DXVK presents directly to the ANativeWindow via
-        // vkCreateXlibSurfaceKHR. The VulkanRenderer would create its own
-        // swapchain on the same Surface, causing a conflict. Skip the render
-        // thread — DXVK is the sole presenter.
         if (waylandMode) {
-            android.util.Log.i("XServerSurfaceView", "Wayland mode — skipping VulkanRenderer render thread");
+            // In Wayland mode, start the render thread to render ONE frame
+            // (black) so the SurfaceView's SurfaceControl becomes "active" in
+            // SurfaceFlinger. Without this, the child presentLayer (created by
+            // WaylandBridgeServer) is never composited because SurfaceFlinger
+            // doesn't composite children of empty/inactive parents.
+            //
+            // After the first frame, the render thread idles (RENDERMODE_WHEN_DIRTY)
+            // and doesn't interfere with the presentLayer's frames.
+            android.util.Log.i("XServerSurfaceView", "Wayland mode — starting render thread for initial frame");
+            running = true;
+            renderMode = RENDERMODE_WHEN_DIRTY;
+            renderThread = new Thread(this::renderLoop, "VkRenderer");
+            renderThread.start();
+            requestRender(); // Request one frame
             return;
         }
         running = true;
