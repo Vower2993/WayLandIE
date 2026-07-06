@@ -191,36 +191,89 @@ PYKB
     python3 << 'PYNTGDI'
 import re
 
+# The macros must be placed AFTER all #include lines, so they don't conflict
+# with Wine's function declarations. We also #undef first to avoid redefinition warnings.
+
+ntgdi_macros = '''
+/* === NtGdi NEUTRALIZATION ===
+ * All NtGdi calls re-enter win32u and trigger user_check_not_lock when
+ * called during flush_window_surfaces (which holds the USER lock in
+ * Proton 11.0). We stub them out to break the re-entrancy cycle:
+ * - Create/Combine/SetRectRgn -> return 0 (NULL/ERROR, callers handle it)
+ * - GetRegionData -> return 0 (no region data, copy_pixel_region skips)
+ * - DeleteObjectApp -> leak the object (evaluate arg for side effects)
+ * The crash trace was: copy_pixel_region -> get_region_data -> NtGdiGetRegionData -> CRASH
+ */
+#ifdef NtGdiCreateRectRgn
+#undef NtGdiCreateRectRgn
+#endif
+#ifdef NtGdiCombineRgn
+#undef NtGdiCombineRgn
+#endif
+#ifdef NtGdiSetRectRgn
+#undef NtGdiSetRectRgn
+#endif
+#ifdef NtGdiGetRegionData
+#undef NtGdiGetRegionData
+#endif
+#ifdef NtGdiDeleteObjectApp
+#undef NtGdiDeleteObjectApp
+#endif
+#define NtGdiCreateRectRgn(...) ((HRGN)0)
+#define NtGdiCombineRgn(...) 0
+#define NtGdiSetRectRgn(...) ((void)0)
+#define NtGdiGetRegionData(...) 0
+#define NtGdiDeleteObjectApp(...) ((void)0)
+/* === END NtGdi NEUTRALIZATION === */
+'''
+
+ntgdi_macros2 = '''
+/* === NtGdi NEUTRALIZATION for wayland_surface.c === */
+#ifdef NtGdiCreateRectRgn
+#undef NtGdiCreateRectRgn
+#endif
+#ifdef NtGdiDeleteObjectApp
+#undef NtGdiDeleteObjectApp
+#endif
+#ifdef NtGdiExtGetObjectW
+#undef NtGdiExtGetObjectW
+#endif
+#ifdef NtGdiGetDIBitsInternal
+#undef NtGdiGetDIBitsInternal
+#endif
+#ifdef NtGdiCreateCompatibleDC
+#undef NtGdiCreateCompatibleDC
+#endif
+#define NtGdiCreateRectRgn(...) ((HRGN)0)
+#define NtGdiDeleteObjectApp(...) ((void)0)
+#define NtGdiExtGetObjectW(...) 0
+#define NtGdiGetDIBitsInternal(...) 0
+#define NtGdiCreateCompatibleDC(...) ((HDC)0)
+/* === END NtGdi NEUTRALIZATION === */
+'''
+
 # ── window_surface.c ──────────────────────────────────────────────────
 with open('dlls/winewayland.drv/window_surface.c', 'r') as f:
     c = f.read()
 
 ntgdi_calls_before = len(re.findall(r'NtGdi\w+\s*\(', c))
 
-# 1. Remove wl_display_dispatch_queue_pending (prevents event dispatch during flush)
+# 1. Remove wl_display_dispatch_queue_pending
 pattern = r'wl_display_dispatch_queue_pending\s*\(\s*process_wayland\.wl_display\s*,\s*queue->wl_event_queue\s*\)\s*;'
 if re.search(pattern, c, re.DOTALL):
     c = re.sub(pattern, '/* DISABLED: wl_display_dispatch_queue_pending */', c, flags=re.DOTALL)
     print("  [window_surface.c] wl_display_dispatch_queue_pending removed")
 
-# 2. Define macros that stub out ALL NtGdi calls — they re-enter win32u and
-#    trigger user_check_not_lock when called during flush_window_surfaces.
-#    The crash trace: copy_pixel_region → get_region_data → NtGdiGetRegionData → CRASH
-macros = '''
-/* NtGdi NEUTRALIZATION: All NtGdi calls re-enter win32u and trigger
- * user_check_not_lock when called during flush_window_surfaces (which
- * holds the USER lock in Proton 11.0). We stub them out:
- * - Create/Combine/SetRectRgn -> return 0 (NULL/ERROR, callers handle it)
- * - GetRegionData -> return 0 (no region data, copy_pixel_region skips)
- * - DeleteObjectApp -> leak the object (evaluate arg for side effects) */
-#define NtGdiCreateRectRgn(...) ((HRGN)0)
-#define NtGdiCombineRgn(...) 0
-#define NtGdiSetRectRgn(...) ((void)0)
-#define NtGdiGetRegionData(...) 0
-#define NtGdiDeleteObjectApp(x) ((void)(x))
-'''
-
-c = c.replace('#include "config.h"', '#include "config.h"\n' + macros, 1)
+# 2. Insert macros AFTER the last #include line (not after config.h, to avoid conflicts)
+# Find the last #include line
+lines = c.split('\n')
+last_include = 0
+for i, line in enumerate(lines):
+    if line.strip().startswith('#include'):
+        last_include = i
+# Insert macros after the last include
+lines.insert(last_include + 1, ntgdi_macros)
+c = '\n'.join(lines)
 
 ntgdi_calls_after = len(re.findall(r'NtGdi\w+\s*\(', c))
 macro_count = c.count('#define NtGdi')
@@ -238,16 +291,14 @@ with open('dlls/winewayland.drv/wayland_surface.c', 'r') as f:
 
 before2 = len(re.findall(r'NtGdi\w+\s*\(', c2))
 
-macros2 = '''
-/* NtGdi NEUTRALIZATION for wayland_surface.c — same rationale as window_surface.c */
-#define NtGdiCreateRectRgn(...) ((HRGN)0)
-#define NtGdiDeleteObjectApp(x) ((void)(x))
-#define NtGdiExtGetObjectW(...) 0
-#define NtGdiGetDIBitsInternal(...) 0
-#define NtGdiCreateCompatibleDC(...) ((HDC)0)
-'''
-
-c2 = c2.replace('#include "config.h"', '#include "config.h"\n' + macros2, 1)
+# Insert macros after last include
+lines2 = c2.split('\n')
+last_include2 = 0
+for i, line in enumerate(lines2):
+    if line.strip().startswith('#include'):
+        last_include2 = i
+lines2.insert(last_include2 + 1, ntgdi_macros2)
+c2 = '\n'.join(lines2)
 
 after2 = len(re.findall(r'NtGdi\w+\s*\(', c2))
 macro_count2 = c2.count('#define NtGdi')
