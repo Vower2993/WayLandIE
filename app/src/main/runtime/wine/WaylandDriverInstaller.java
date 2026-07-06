@@ -164,17 +164,28 @@ public final class WaylandDriverInstaller {
                 scanAllSoForString(prefixLib, "VK_EXT_swapchain_maintenance1");
             }
 
-            // Patch only the files we KNOW should have the string.
-            // The diagnostic scan will tell us if we need to add more.
+            // Patch files that DIAGNOSTIC found containing the string.
+            // CI #326 results: win32u.so (1x), winevulkan.dll aarch64 (7x), winevulkan.dll i386 (4x)
             File win32uSo = new File(wineAarch64Unix, "win32u.so");
             patchExtensionString(win32uSo,
                 "VK_EXT_surface_maintenance1", "VK_EXT_surface_maintenance0");
             patchExtensionString(win32uSo,
                 "VK_EXT_swapchain_maintenance1", "VK_EXT_swapchain_maintenance0");
-            File winevulkanSo = new File(wineAarch64Unix, "winevulkan.so");
-            patchExtensionString(winevulkanSo,
+            // Patch winevulkan.dll — PE side, has 7 occurrences (aarch64) + 4 (i386)
+            File winevulkanDllAarch64 = new File(wineAarch64Windows, "winevulkan.dll");
+            patchExtensionString(winevulkanDllAarch64,
                 "VK_EXT_surface_maintenance1", "VK_EXT_surface_maintenance0");
-            patchExtensionString(winevulkanSo,
+            patchExtensionString(winevulkanDllAarch64,
+                "VK_EXT_swapchain_maintenance1", "VK_EXT_swapchain_maintenance0");
+            File winevulkanDllSys32 = new File(prefix, "drive_c/windows/system32/winevulkan.dll");
+            patchExtensionString(winevulkanDllSys32,
+                "VK_EXT_surface_maintenance1", "VK_EXT_surface_maintenance0");
+            patchExtensionString(winevulkanDllSys32,
+                "VK_EXT_swapchain_maintenance1", "VK_EXT_swapchain_maintenance0");
+            File winevulkanDllArm64ec = new File(winePath, "lib/wine/arm64ec-windows/winevulkan.dll");
+            patchExtensionString(winevulkanDllArm64ec,
+                "VK_EXT_surface_maintenance1", "VK_EXT_surface_maintenance0");
+            patchExtensionString(winevulkanDllArm64ec,
                 "VK_EXT_swapchain_maintenance1", "VK_EXT_swapchain_maintenance0");
 
             // Do NOT patch DXVK DLLs — DXVK should request VK_KHR_win32_surface

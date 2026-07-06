@@ -339,9 +339,11 @@ public class WaylandBridgeServer {
             layerH = h;
         }
         try {
+            // Top-level SurfaceControl (no parent) — composited independently.
+            // Was child of SurfaceView's SurfaceControl which has no buffer in
+            // Wayland mode, so SurfaceFlinger didn't composite it.
             presentLayer = new SurfaceControl.Builder()
                 .setName("waylandie-present")
-                .setParent(hostView.getSurfaceControl())
                 .setBufferSize(layerW, layerH)
                 .build();
             width = layerW;
