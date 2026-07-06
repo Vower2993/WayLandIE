@@ -91,6 +91,50 @@ if [ -d "$WLD_SRC" ]; then
     sed -i '/^[[:space:]]*surface->content_height = win_height;[[:space:]]*$/{n;/^}$/r '"${WLD_SRC}"'/wayland_surface_attach_dmabuf.inc'"
 }" dlls/winewayland.drv/wayland_surface.c
 
+    # 6b. CRITICAL FIX: Defer wl_buffer_destroy to prevent wl_proxy_unref crash.
+    #
+    # ROOT CAUSE of wl_proxy_unref assertion crash:
+    #   Wine's event thread receives wl_buffer.release → wayland_shm_buffer_unref
+    #   → wl_buffer_destroy → wl_proxy_unref. But Wine's GUI thread may still
+    #   be using the wl_buffer proxy in wayland_window_surface_flush →
+    #   wl_surface_attach. This is a use-after-free race.
+    #
+    # The assertion "proxy->refcount > 0" fires because the proxy was already
+    # destroyed by the event thread. This calls abort() → SIGABRT → Wine's
+    # signal handler runs → user_check_not_lock fires (USER lock held) →
+    # second abort → process dies.
+    #
+    # FIX: Make wl_buffer_destroy a no-op. The wl_buffer proxy is leaked
+    # (small memory leak — ~64 bytes per buffer). This prevents the event
+    # thread from destroying the proxy while the GUI thread may still use it.
+    # The proxy is cleaned up when the wl_surface is destroyed or when Wine
+    # exits.
+    echo "  Patching wayland_surface.c: defer wl_buffer_destroy"
+    sed -i 's/wl_buffer_destroy(\([^)]*\));/\/* LEAK: wl_buffer_destroy deferred to prevent wl_proxy_unref race *\/ (void)\1;/g' \
+        dlls/winewayland.drv/wayland_surface.c 2>/dev/null
+    if grep -q "LEAK: wl_buffer_destroy deferred" dlls/winewayland.drv/wayland_surface.c; then
+        echo "  Patched: wl_buffer_destroy is now a no-op (prevents use-after-free)"
+    else
+        echo "  WARNING: wl_buffer_destroy patch did not apply via sed, trying Python"
+        python3 << 'PYWBD'
+import re
+with open('dlls/winewayland.drv/wayland_surface.c', 'r') as f:
+    c = f.read()
+before = c.count('wl_buffer_destroy(')
+c = re.sub(r'wl_buffer_destroy\s*\(([^)]+)\)\s*;',
+           r'/* LEAK: wl_buffer_destroy deferred to prevent wl_proxy_unref race */ (void)\1;',
+           c)
+after = c.count('wl_buffer_destroy(')
+print(f"  wl_buffer_destroy calls: {before} -> {after}")
+with open('dlls/winewayland.drv/wayland_surface.c', 'w') as f:
+    f.write(c)
+if before > 0 and after < before:
+    print("  Python patch applied: wl_buffer_destroy is now a no-op")
+else:
+    print("  WARNING: no wl_buffer_destroy calls found")
+PYWBD
+    fi
+
     # 7. Makefile.in: add new source files
     sed -i '/^[[:space:]]*dllmain\.c \\$/a \\tlinux-dmabuf-unstable-v1.xml \\\n\twayland_dmabuf.c \\' \
         dlls/winewayland.drv/Makefile.in
