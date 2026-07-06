@@ -51,6 +51,13 @@ void waylandie_surface_transaction_set_buffer(
         AHardwareBuffer *buffer,
         int acquire_fence_fd);
 
+// Wraps ASurfaceTransaction_setDestinationFrame (API 34+) or falls back
+// to setCrop on older NDK. Ensures SurfaceFlinger knows the dest size.
+void waylandie_surface_transaction_set_destination_frame(
+        ASurfaceTransaction *transaction,
+        ASurfaceControl *surface_control,
+        int32_t left, int32_t top, int32_t right, int32_t bottom);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif

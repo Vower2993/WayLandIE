@@ -5533,6 +5533,11 @@ Java_com_winlator_cmod_runtime_display_environment_components_WaylandBridgeServe
             1.0f);
     ASurfaceTransaction_setPosition(transaction, surface_control, 0, 0);
     waylandie_surface_transaction_set_crop(transaction, surface_control, &crop);
+    /* Set destination frame explicitly — tells SurfaceFlinger the exact
+     * output rectangle so it doesn't default to 0x0 or buffer-native size */
+    waylandie_surface_transaction_set_destination_frame(
+            transaction, surface_control,
+            0, 0, (int32_t)target_width, (int32_t)target_height);
     ASurfaceTransaction_setDamageRegion(transaction, surface_control, &crop, 1);
 
     if (slot_wait_us > 0) {

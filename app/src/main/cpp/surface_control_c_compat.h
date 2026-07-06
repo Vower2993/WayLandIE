@@ -93,6 +93,13 @@ void waylandie_surface_transaction_set_buffer(
         AHardwareBuffer *buffer,
         int acquire_fence_fd);
 
+// Destination frame wrapper (uses setDestinationFrame on API 34+,
+// falls back to setCrop on older NDK)
+void waylandie_surface_transaction_set_destination_frame(
+        ASurfaceTransaction *transaction,
+        ASurfaceControl *surface_control,
+        int32_t left, int32_t top, int32_t right, int32_t bottom);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif

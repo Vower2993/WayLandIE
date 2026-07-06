@@ -34,4 +34,22 @@ void waylandie_surface_transaction_set_buffer(
     ASurfaceTransaction_setBuffer(transaction, surface_control, buffer, acquire_fence_fd);
 }
 
+void waylandie_surface_transaction_set_destination_frame(
+        ASurfaceTransaction *transaction,
+        ASurfaceControl *surface_control,
+        int32_t left, int32_t top, int32_t right, int32_t bottom) {
+    if (transaction == nullptr || surface_control == nullptr) {
+        return;
+    }
+    // NDK r34+ has ASurfaceTransaction_setDestinationFrame.
+    // On older NDK (r26), this is a no-op — the crop + buffer size is used.
+#if __ANDROID_API__ >= 34
+    ASurfaceTransaction_setDestinationFrame(transaction, surface_control, left, top, right, bottom);
+#else
+    // Fallback: set position + scale via crop on older NDK
+    ARect dest = {left, top, right, bottom};
+    ASurfaceTransaction_setCrop(transaction, surface_control, dest);
+#endif
+}
+
 }  // extern "C"

@@ -56,6 +56,7 @@ public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Cal
         this.waylandMode = wayland;
         if (wayland) {
             setZOrderMediaOverlay(true);
+            getHolder().setFormat(android.graphics.PixelFormat.TRANSLUCENT);
         }
     }
 
