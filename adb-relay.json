@@ -1,1 +1,1 @@
-{"cmd":"idle","output":"ERROR: command not allowed: {\nidle\n  \"output\": \"\",\n  \"exit_co\n","exit_code":1}
+{"cmd":"adb devices","output":"","exit_code":0}
