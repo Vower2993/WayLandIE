@@ -83,9 +83,14 @@ public class WaylandBridgeServer {
             try { serverSocket.close(); } catch (IOException ignored) {}
             serverSocket = null;
         }
-        // Don't release presentLayer — it's the SurfaceView's own SurfaceControl,
-        // not ours to release. Just null the reference.
-        presentLayer = null;
+        if (presentLayer != null) {
+            try {
+                new SurfaceControl.Transaction()
+                    .setVisibility(presentLayer, false).apply();
+            } catch (Exception ignored) {}
+            presentLayer.release();
+            presentLayer = null;
+        }
     }
 
     private void acceptLoop() {
@@ -301,26 +306,9 @@ public class WaylandBridgeServer {
     }
 
     private void ensurePresentLayer(int w, int h) {
-        /* Use the SurfaceView's OWN SurfaceControl directly — no child layer.
-         *
-         * Previous approach created a child presentLayer, but SurfaceFlinger
-         * wouldn't composite it because the parent SurfaceView had no buffer
-         * (render thread skipped in Wayland mode). Various fixes (dummy frame,
-         * top-level SurfaceControl, render thread for 1 frame) all had issues.
-         *
-         * NEW APPROACH: Use hostView.getSurfaceControl() directly. The native
-         * present code calls ASurfaceTransaction_setBufferWithRelease on this
-         * SurfaceControl, which sets the buffer directly via SurfaceFlinger.
-         * No VulkanRenderer, no child layer, no dummy frame needed.
-         *
-         * The SurfaceView's SurfaceControl is already part of the window
-         * hierarchy and is composited by SurfaceFlinger. We just set buffers
-         * on it via ASurfaceTransaction (bypassing the BLASTBufferQueue which
-         * is idle since we skip the render thread).
-         */
         if (presentLayer != null) return;
         if (hostView == null || hostView.getSurfaceControl() == null) {
-            Log.w(TAG, "Cannot use SurfaceView SurfaceControl — it is null");
+            Log.w(TAG, "Cannot create presentLayer — hostView SurfaceControl is null");
             return;
         }
         int layerW = hostView.getWidth();
@@ -329,11 +317,26 @@ public class WaylandBridgeServer {
             layerW = w;
             layerH = h;
         }
-        // Use the SurfaceView's own SurfaceControl — no child needed
-        presentLayer = hostView.getSurfaceControl();
-        width = layerW;
-        height = layerH;
-        Log.i(TAG, "Using SurfaceView SurfaceControl directly: " + layerW + "x" + layerH + " (source=" + w + "x" + h + ")");
+        try {
+            // Child of SurfaceView's SurfaceControl. The VulkanRenderer runs
+            // in CONTINUOUS mode to keep the parent active, so the child
+            // presentLayer composites on top.
+            presentLayer = new SurfaceControl.Builder()
+                .setName("waylandie-present")
+                .setParent(hostView.getSurfaceControl())
+                .setBufferSize(layerW, layerH)
+                .build();
+            width = layerW;
+            height = layerH;
+            new SurfaceControl.Transaction()
+                .setLayer(presentLayer, 10)
+                .setVisibility(presentLayer, true)
+                .setPosition(presentLayer, 0, 0)
+                .apply();
+            Log.i(TAG, "Created presentLayer: " + layerW + "x" + layerH + " (source=" + w + "x" + h + ")");
+        } catch (Exception e) {
+            Log.e(TAG, "Failed to create presentLayer", e);
+        }
     }
 
     private static int parseIntField(String s, String key) {
