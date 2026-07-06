@@ -96,6 +96,61 @@ if [ -d "$WLD_SRC" ]; then
         dlls/winewayland.drv/Makefile.in
 
     echo "  dmabuf sources applied"
+
+    # 8. Fix: Neutralize NtGdiGetRegionData to prevent USER-lock re-entrancy crash.
+    #
+    # CRASH TRACE (confirmed across multiple log sets):
+    #   wayland_window_surface_flush
+    #     → wayland_shm_buffer_copy_data
+    #       → copy_pixel_region
+    #         → get_region_data
+    #           → NtGdiGetRegionData  ← RE-ENTERS win32u → user_check_not_lock CRASH
+    #
+    # NtGdiGetRegionData re-enters win32u's GDI subsystem. When called during
+    # flush_window_surfaces (which holds the USER lock in Proton 11.0), the
+    # re-entrant call hits user_check_not_lock() and crashes.
+    #
+    # FIX: Define NtGdiGetRegionData as a macro returning 0 (no region data).
+    # This makes get_region_data return NULL, which makes copy_pixel_region
+    # skip the precise damage-region copy and do a full-frame copy instead.
+    # The desktop still renders — just without per-region damage tracking.
+    #
+    # IMPORTANT: Only NtGdiGetRegionData is neutralized. Other NtGdi calls
+    # (CreateRectRgn, CombineRgn, SetRectRgn, DeleteObjectApp) must work
+    # normally — neutralizing them breaks rendering (causes "failed to create
+    # surface damage region" → no buffer attached → stuck at "wine starting").
+    echo "  Applying NtGdiGetRegionData neutralization patch"
+    python3 << 'PYNTGDI'
+with open('dlls/winewayland.drv/window_surface.c', 'r') as f:
+    c = f.read()
+
+ntgdi_macros = '''
+/* === NtGdiGetRegionData NEUTRALIZATION ===
+ * NtGdiGetRegionData re-enters win32u and triggers user_check_not_lock
+ * when called during flush_window_surfaces (USER lock held in Proton 11.0).
+ * Returning 0 makes get_region_data return NULL → copy_pixel_region does
+ * a full-frame copy instead of per-region damage. Desktop still renders.
+ */
+#ifdef NtGdiGetRegionData
+#undef NtGdiGetRegionData
+#endif
+#define NtGdiGetRegionData(...) 0
+/* === END NtGdiGetRegionData NEUTRALIZATION === */
+'''
+
+# Insert after the last #include line
+lines = c.split('\n')
+last_include = 0
+for i, line in enumerate(lines):
+    if line.strip().startswith('#include'):
+        last_include = i
+lines.insert(last_include + 1, ntgdi_macros)
+c = '\n'.join(lines)
+
+with open('dlls/winewayland.drv/window_surface.c', 'w') as f:
+    f.write(c)
+print("  [window_surface.c] NtGdiGetRegionData neutralized")
+PYNTGDI
 else
     echo "  WARNING: $WLD_SRC not found — building without dmabuf support"
 fi
