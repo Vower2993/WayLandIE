@@ -73,14 +73,16 @@ public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Cal
     public void setWaylandDmaBufFrame(int fd, int w, int h, int stride, int drmFormat) {
         // Close previous fd if not consumed
         if (wlDmabufFd >= 0) {
-            try { android.os.ParcelFileDescriptor.adoptFd(wlDmabufFd).close(); } catch (Exception ignored) {}
+            try { closeFd(wlDmabufFd); } catch (Exception ignored) {}
+            wlDmabufFd = -1;
         }
         // Dup the fd — the caller closes the original after we return
         int dupFd = -1;
         try {
-            android.os.ParcelFileDescriptor pfd = android.os.ParcelFileDescriptor.dup(fd);
-            dupFd = pfd.getFd();
-            pfd.detachFd(); // detach so pfd.close() won't close it
+            android.os.ParcelFileDescriptor srcPfd = android.os.ParcelFileDescriptor.adoptFd(fd);
+            android.os.ParcelFileDescriptor dupPfd = android.os.ParcelFileDescriptor.dup(srcPfd.getFileDescriptor());
+            srcPfd.detachFd(); // don't close the original — caller owns it
+            dupFd = dupPfd.detachFd(); // take ownership of the dup'd fd
         } catch (Exception e) {
             android.util.Log.w("XServerSurfaceView", "Failed to dup dmabuf fd: " + e.getMessage());
         }
@@ -91,6 +93,14 @@ public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Cal
         wlDrmFormat = drmFormat;
         wlFrameAvailable = true;
         requestRender();
+    }
+
+    private static void closeFd(int fd) {
+        if (fd < 0) return;
+        try {
+            android.os.ParcelFileDescriptor pfd = android.os.ParcelFileDescriptor.adoptFd(fd);
+            pfd.close();
+        } catch (Exception ignored) {}
     }
 
     public VulkanRenderer getRenderer() {
@@ -318,9 +328,8 @@ public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Cal
                             fd, wlWidth, wlHeight, wlStride, wlDrmFormat);
                     } catch (Throwable ignore) {}
                     // Close the dup'd fd after the native code has consumed it
-                    // (nativePresentDmaBufWayland calls dup() internally)
                     if (fd >= 0) {
-                        try { android.os.ParcelFileDescriptor.adoptFd(fd).close(); } catch (Exception ignored) {}
+                        closeFd(fd);
                     }
                 } else {
                     try { renderer.onDrawFrame(); } catch (Throwable ignore) {}
