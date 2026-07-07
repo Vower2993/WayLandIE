@@ -1803,7 +1803,7 @@ static bool scene_starts_with_sgsr1(const VkScene* s) {
     return s->effect_count > 0 && s->effects[0].type == VK_EFFECT_SGSR1;
 }
 
-static void wait_inflight_frames(VkRenderer* r) {
+void wait_inflight_frames(VkRenderer* r) {
     VkFence fences[VK_FRAMES_IN_FLIGHT];
     uint32_t count = 0;
     for (uint32_t i = 0; i < VK_FRAMES_IN_FLIGHT; i++) {
