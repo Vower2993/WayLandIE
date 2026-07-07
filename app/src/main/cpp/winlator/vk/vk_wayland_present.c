@@ -11,16 +11,15 @@
  * rendering path (nativeRenderFrame) in Wayland mode.
  */
 
-#include "vk_driver.h"
 #include "vk_state.h"
+#include "vk_driver.h"
 #include "vk_dispatch.h"
 #include <android/log.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
-/* Forward declarations for static functions in vk_renderer.c */
-extern void wait_inflight_frames(VkRenderer* r);
+/* wait_inflight_frames is defined in vk_renderer.c, declared in vk_driver.h */
 
 #define VK_WL_TAG "WaylandVkPresent"
 #define VK_WL_LOGI(...) __android_log_print(ANDROID_LOG_INFO, VK_WL_TAG, __VA_ARGS__)
