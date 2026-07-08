@@ -213,7 +213,7 @@ public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Cal
     private void startRenderThreadIfNeeded() {
         if (renderThread != null && renderThread.isAlive()) return;
         if (waylandMode) {
-            android.util.Log.i("XServerSurfaceView", "Wayland mode — starting render thread");
+            android.util.Log.i("XServerSurfaceView", "Wayland mode — render thread CONTINUOUSLY");
             running = true;
             renderMode = RENDERMODE_CONTINUOUSLY;
             renderThread = new Thread(this::renderLoop, "VkRenderer");

@@ -62,6 +62,11 @@ public class WaylandBridgeServer {
         this.context = ctx != null ? ctx.getApplicationContext() : null;
         running = true;
         try {
+            // Close stale socket from previous launch before creating a new one.
+            if (serverSocket != null) {
+                try { serverSocket.close(); } catch (IOException ignored) {}
+                serverSocket = null;
+            }
             serverSocket = new LocalServerSocket(SOCKET_NAME);
             Log.i(TAG, "Listening on abstract socket: " + SOCKET_NAME);
         } catch (IOException e) {
