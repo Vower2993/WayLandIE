@@ -5927,3 +5927,23 @@ Java_com_winlator_cmod_runtime_display_environment_components_WaylandBridgeServe
         setenv("WAYLANDIE_ANATIVE_WINDOW", buf, 1);
     }
 }
+
+/* Native dup() — used by XServerSurfaceView.setWaylandDmaBufFrame
+ * to duplicate a dmabuf fd without triggering fdsan errors.
+ * Returns new fd (>=0) on success, -1 on error. */
+JNIEXPORT jint JNICALL
+Java_com_winlator_cmod_runtime_display_ui_XServerSurfaceView_nativeDupFd(
+        JNIEnv* env, jclass clazz, jint fd) {
+    (void)env; (void)clazz;
+    if (fd < 0) return -1;
+    return (jint)dup((int)fd);
+}
+
+/* Native close() — used by XServerSurfaceView.closeFd
+ * to close a fd without ParcelFileDescriptor fdsan tracking. */
+JNIEXPORT void JNICALL
+Java_com_winlator_cmod_runtime_display_ui_XServerSurfaceView_nativeCloseFd(
+        JNIEnv* env, jclass clazz, jint fd) {
+    (void)env; (void)clazz;
+    if (fd >= 0) close((int)fd);
+}

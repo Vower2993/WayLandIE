@@ -69,22 +69,22 @@ public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Cal
 
     /** Called by WaylandBridgeServer when a new dmabuf frame is ready.
      *  The caller will close the original fd after this returns, so we
-     *  must dup it to keep it alive for the render thread. */
+     *  must dup it to keep it alive for the render thread.
+     *
+     *  FIX: Previous code used ParcelFileDescriptor.adoptFd(fd) which crashes with
+     *  fdsan: "fd is owned by ParcelFileDescriptor, was expected to be unowned"
+     *  because fd was already owned by the pfd in WaylandBridgeServer.handleClient.
+     *  Use native dup() syscall instead — no ParcelFileDescriptor ownership tracking. */
     public void setWaylandDmaBufFrame(int fd, int w, int h, int stride, int drmFormat) {
         // Close previous fd if not consumed
         if (wlDmabufFd >= 0) {
-            try { closeFd(wlDmabufFd); } catch (Exception ignored) {}
+            closeFd(wlDmabufFd);
             wlDmabufFd = -1;
         }
-        // Dup the fd — the caller closes the original after we return
-        int dupFd = -1;
-        try {
-            android.os.ParcelFileDescriptor srcPfd = android.os.ParcelFileDescriptor.adoptFd(fd);
-            android.os.ParcelFileDescriptor dupPfd = android.os.ParcelFileDescriptor.dup(srcPfd.getFileDescriptor());
-            srcPfd.detachFd(); // don't close the original — caller owns it
-            dupFd = dupPfd.detachFd(); // take ownership of the dup'd fd
-        } catch (Exception e) {
-            android.util.Log.w("XServerSurfaceView", "Failed to dup dmabuf fd: " + e.getMessage());
+        // Dup the fd via native dup() — no ParcelFileDescriptor, no fdsan
+        int dupFd = nativeDupFd(fd);
+        if (dupFd < 0) {
+            android.util.Log.e("XServerSurfaceView", "nativeDupFd failed for fd=" + fd);
         }
         wlDmabufFd = dupFd;
         wlWidth = w;
@@ -95,13 +95,17 @@ public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Cal
         requestRender();
     }
 
+    /** Native dup() syscall. Returns new fd or -1 on error. */
+    private static native int nativeDupFd(int fd);
+
     private static void closeFd(int fd) {
         if (fd < 0) return;
-        try {
-            android.os.ParcelFileDescriptor pfd = android.os.ParcelFileDescriptor.adoptFd(fd);
-            pfd.close();
-        } catch (Exception ignored) {}
+        // Use native close to avoid ParcelFileDescriptor fdsan issues
+        nativeCloseFd(fd);
     }
+
+    /** Native close() syscall. */
+    private static native void nativeCloseFd(int fd);
 
     public VulkanRenderer getRenderer() {
         return renderer;
@@ -323,10 +327,18 @@ public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Cal
                     wlDmabufFd = -1;
                     wlFrameAvailable = false;
                     try {
-                        VulkanRenderer.nativePresentDmaBufWayland(
+                        boolean ok = VulkanRenderer.nativePresentDmaBufWayland(
                             renderer.getNativeHandle(),
                             fd, wlWidth, wlHeight, wlStride, wlDrmFormat);
-                    } catch (Throwable ignore) {}
+                        if (!ok) {
+                            android.util.Log.e("XServerSurfaceView",
+                                "nativePresentDmaBufWayland FAILED fd=" + fd +
+                                " " + wlWidth + "x" + wlHeight);
+                        }
+                    } catch (Throwable e) {
+                        android.util.Log.e("XServerSurfaceView",
+                            "nativePresentDmaBufWayland EXCEPTION", e);
+                    }
                     // Close the dup'd fd after the native code has consumed it
                     if (fd >= 0) {
                         closeFd(fd);
