@@ -155,6 +155,7 @@ import com.winlator.cmod.runtime.display.environment.components.SteamClientCompo
 import com.winlator.cmod.runtime.display.environment.components.SysVSharedMemoryComponent;
 import com.winlator.cmod.runtime.display.environment.components.XServerComponent;
 import com.winlator.cmod.runtime.display.environment.components.WaylandBridgeComponent;
+import com.winlator.cmod.runtime.display.environment.components.GamescopeComponent;
 import com.winlator.cmod.runtime.display.environment.components.WaylandBridgeServer;
 import com.winlator.cmod.runtime.display.xserver.Atom;
 import com.winlator.cmod.runtime.display.xserver.Pointer;
@@ -281,6 +282,10 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
     private boolean launchedFromPinnedShortcut = false;
     private String graphicsDriver = Container.DEFAULT_GRAPHICS_DRIVER;
     private String displayMode = Container.DEFAULT_DISPLAY_MODE;
+    // Set to true in setupXEnvironment() when displayMode == "gamescope".
+    // Read after guestProgramLauncherComponent is created to call
+    // setGamescopeEnabled(true) on it.
+    private boolean gamescopeModeRequested = false;
     private boolean isZeroCopyBuffer = Container.DEFAULT_ZERO_COPY_BUFFER;
     private HashMap<String, String> graphicsDriverConfig;
     private String audioDriver = Container.DEFAULT_AUDIO_DRIVER;
@@ -6095,8 +6100,9 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
                 String wineStartCmd = getWineStartCommand(guestProgramLauncherComponent);
                 String guestExecutable;
 
-            if ("wayland".equals(displayMode)) {
-                // Wayland mode: use "wine explorer /desktop=shell" — the same as X11 mode.
+            if ("wayland".equals(displayMode) || "gamescope".equals(displayMode)) {
+                // Wayland mode (and gamescope mode, which is Wayland + nested gamescope):
+                // use "wine explorer /desktop=shell" — the same as X11 mode.
                 //
                 // WHY: explorer.exe's load_graphics_driver() function is REQUIRED to:
                 //   1. Read Graphics=wayland,x11 from HKCU\Software\Wine\Drivers
@@ -6236,8 +6242,8 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
         }
 
         // Wine cannot enumerate Android network interfaces; Steam treats that as offline.
-        // Start WaylandIE bridge only when display mode is "wayland"
-        if ("wayland".equals(displayMode)) {
+        // Start WaylandIE bridge only when display mode is "wayland" or "gamescope"
+        if ("wayland".equals(displayMode) || "gamescope".equals(displayMode)) {
             Log.i("XServerDisplayActivity", "Wayland mode enabled — starting bridge");
             // CRITICAL: Ensure winewayland.drv is in system32 AND winewayland.so
             // is in Wine's install dir BEFORE Wine starts. Without the .so companion,
@@ -6266,6 +6272,30 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
                 Log.e("XServerDisplayActivity", "Failed to ensure Wayland driver installed", e);
             }
             environment.addComponent(new WaylandBridgeComponent());
+
+            // In gamescope mode, add GamescopeComponent AFTER WaylandBridgeComponent.
+            // Gamescope connects to wayland-0 (bridge) as a client and exposes its
+            // own gamescope-0 socket for Wine. Must start AFTER the bridge socket
+            // is bound, and BEFORE GuestProgramLauncherComponent (which launches Wine).
+            if ("gamescope".equals(displayMode)) {
+                Log.i("XServerDisplayActivity", "Gamescope mode enabled — starting GamescopeComponent");
+                GamescopeComponent gamescopeComponent = new GamescopeComponent();
+                // TODO: read these from shortcut settings / container config so
+                // users can tune per-game. For now, sensible defaults: render
+                // 720p, composite to 1080p, FSR sharpness 30.
+                gamescopeComponent.setResolutions(1280, 720, 2400, 1080);
+                gamescopeComponent.setSharpness(30);
+                environment.addComponent(gamescopeComponent);
+                // Tell the guest launcher to wrap Wine's launch with gamescope.
+                // The flag is read in execGuestProgram() to set WAYLAND_DISPLAY=gamescope-0
+                // for Wine. The actual gamescope binary is started by GamescopeComponent
+                // above — GuestProgramLauncherComponent just launches Wine directly.
+                // (We set this flag here so it's picked up when the launcher's start()
+                // method runs later in the component lifecycle.)
+                // Note: guestProgramLauncherComponent is created below at line ~6651.
+                // We'll set the flag after it's created.
+                gamescopeModeRequested = true;
+            }
         }
         environment.addComponent(new NetworkInfoUpdateComponent());
 
@@ -6537,8 +6567,13 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
             exit();
         });
 
-        // Set Wayland env vars only when display mode is "wayland"
-        if ("wayland".equals(displayMode)) {
+        // Set Wayland env vars when display mode is "wayland" OR "gamescope".
+        // In gamescope mode, gamescope itself connects to wayland-0 (bridge), and
+        // Wine connects to gamescope-0 (gamescope's internal display). The
+        // WAYLAND_DISPLAY=gamescope-0 override for Wine is handled in
+        // GuestProgramLauncherComponent.execGuestProgram() based on the
+        // gamescopeEnabled flag.
+        if ("wayland".equals(displayMode) || "gamescope".equals(displayMode)) {
             String wlOverrides = envVars.get("WINEDLLOVERRIDES");
             if (wlOverrides == null) wlOverrides = "";
             // winewayland.drv is a BUILTIN graphics driver — it loads via
@@ -6627,6 +6662,22 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
             envVars.put("WAYLANDIE_DMABUF_LAYER_ENABLE", "1");
             envVars.put("WAYLANDIE_BRIDGE_SOCKET", "waylandie.display.bridge.v1");
 
+            // In gamescope mode, route game presentation through gamescope via
+            // VK_KHR_wayland_surface. This makes DXVK's swapchain bind to a
+            // Wayland surface on gamescope-0 (WAYLAND_DISPLAY=gamescope-0, set
+            // by GuestProgramLauncherComponent). gamescope receives the dmabuf,
+            // composites (FSR upscaling + frame pacing), and presents to the
+            // bridge (wayland-0).
+            //
+            // If Turnip doesn't support VK_KHR_wayland_surface, vulkan.c falls
+            // back to PATH A (xlib_surface → adrenotools → SurfaceFlinger).
+            // This is safe — the game still renders, just without gamescope.
+            if ("gamescope".equals(displayMode)) {
+                envVars.put("WAYLANDIE_GAME_VIA_BRIDGE", "1");
+                Log.i("XServerDisplayActivity", "Gamescope mode: WAYLANDIE_GAME_VIA_BRIDGE=1 — "
+                    + "game presentation will route through gamescope via VK_KHR_wayland_surface");
+            }
+
             // === GLOBAL DIAGNOSTIC TRACING ===
             // Reduce WINEDEBUG to ONLY waylanddrv — the +vulkan channel floods the
             // 80KB logcat buffer with init_physical_device extension listing lines,
@@ -6647,6 +6698,20 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
 
             Log.i("XServerDisplayActivity", "WaylandIE dmabuf layer enabled — diagnostic tracing ON");
         }
+
+        // Propagate gamescope mode flag to the guest launcher. When this flag
+        // is true, execGuestProgram() will:
+        //   1. Set WAYLAND_DISPLAY=gamescope-0 for Wine (instead of wayland-0)
+        //   2. NOT wrap the Wine command with `libgamescope.so --` — gamescope
+        //      is already running as a separate process (started by
+        //      GamescopeComponent above) and Wine just connects to its
+        //      gamescope-0 socket as a Wayland client.
+        if (gamescopeModeRequested) {
+            guestProgramLauncherComponent.setGamescopeEnabled(true);
+            Log.i("XServerDisplayActivity",
+                "Gamescope mode: guestProgramLauncherComponent.setGamescopeEnabled(true)");
+        }
+
         environment.addComponent(guestProgramLauncherComponent);
 
         FEXCoreManager.ensureAppConfigOverrides(this);
@@ -6679,8 +6744,10 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
         FrameLayout rootView = xServerDisplayFrame;
         xServerView = new XServerSurfaceView(this, xServer);
 
-        // Start Wayland bridge server only when display mode is "wayland"
-        if ("wayland".equals(displayMode)) {
+        // Start Wayland bridge server when display mode is "wayland" OR "gamescope".
+        // In gamescope mode, the bridge is the parent compositor (wayland-0) that
+        // gamescope itself connects to as a client.
+        if ("wayland".equals(displayMode) || "gamescope".equals(displayMode)) {
             xServerView.setWaylandMode(true);
             waylandBridgeServer = new WaylandBridgeServer();
             // In Wayland mode, dismiss the preloader when the first frame

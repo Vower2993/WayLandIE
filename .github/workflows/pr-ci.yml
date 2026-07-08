@@ -27,12 +27,12 @@ jobs:
       fail-fast: false
       matrix:
         flavor:
-          # Single-target: Pubg only for faster iteration (~5 min vs 13 min)
+          # Single-target: Ludashi only for faster iteration (~5 min vs 13 min)
           # Re-enable other variants once the display pipeline is working.
-          - name: Pubg
-            artifactName: apk-pubg
-            gradleTask: assemblePubgDebug
-            apkPath: app/build/outputs/apk/pubg/debug/pubg.apk
+          - name: Ludashi
+            artifactName: apk-ludashi
+            gradleTask: assembleLudashiDebug
+            apkPath: app/build/outputs/apk/ludashi/debug/ludashi.apk
 
     steps:
     - name: Clone repository
@@ -219,6 +219,14 @@ jobs:
         upload_dir="artifacts/${{ matrix.flavor.artifactName }}"
         mkdir -p "$upload_dir"
         cp ${{ matrix.flavor.apkPath }} "$upload_dir/WinNative-Debug-${{ matrix.flavor.name }}-${{ steps.label.outputs.name }}.apk"
+
+    - name: Inspect APK native libs
+      run: |
+        echo "=== APK lib/ contents ==="
+        unzip -l ${{ matrix.flavor.apkPath }} | grep "lib/arm64-v8a/" | sort
+        echo ""
+        echo "=== Checking for critical libs ==="
+        unzip -l ${{ matrix.flavor.apkPath }} | grep -E "libc\+\+_shared|libgamescope|libwaylandie" || echo "WARNING: critical libs NOT found in APK!"
 
     - name: Upload APK
       uses: actions/upload-artifact@v7

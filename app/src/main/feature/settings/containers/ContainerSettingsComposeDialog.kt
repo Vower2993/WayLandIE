@@ -90,7 +90,7 @@ class ContainerSettingsComposeDialog @JvmOverloads constructor(
     private val context = activity
     private val dialog: Dialog
     private val state = GameSettingsStateHolder()
-    private var displayModeValues: List<String> = listOf("x11", "wayland")
+    private var displayModeValues: List<String> = listOf("x11", "wayland", "gamescope")
     private val manager = ContainerManager(context)
     private val contentsManager = ContentsManager(context)
     private var isArm64EC = false

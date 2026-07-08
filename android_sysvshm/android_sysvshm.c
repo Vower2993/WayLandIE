@@ -1,4 +1,6 @@
 #include <stdio.h>
+#include <string.h>
+#include <fcntl.h>
 #include <unistd.h>
 #include <stdlib.h>
 #include <pthread.h>
@@ -6,6 +8,7 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <sys/syscall.h>
 #include <errno.h>
 
 #include "sys/shm.h"
@@ -252,5 +255,143 @@ int shmctl(int shmid, int cmd, struct shmid_ds* buf) {
         pthread_mutex_unlock(&mutex);
         return 0;
     }
+    return -1;
+}
+/* ===========================================================================
+ * POSIX shm_open / shm_unlink shim for Android bionic libc
+ *
+ * Bionic does NOT implement shm_open()/shm_unlink() — without this shim
+ * every wlroots-derived compositor (incl. gamescope) segfaults within
+ * milliseconds of startup on Android. Backed by memfd_create() (raw
+ * syscall — bionic only exposes the wrapper on API 30+, raw syscall
+ * works on all NDK targets including our API 33 baseline).
+ *
+ * Strategy: maintain a name -> fd registry so shm_unlink + a second
+ * shm_open with the same name behave like POSIX. The fds themselves
+ * are anonymous memfds, so they never appear on a /dev/shm filesystem.
+ * shm_unlink() just marks the registry entry as unlinked; the fd stays
+ * live until last close — matching wlroots/gamescope usage patterns
+ * (they always shm_unlink immediately after shm_open to get anon fd).
+ * =========================================================================== */
+
+#ifndef MFD_CLOEXEC
+#define MFD_CLOEXEC       0x0001U
+#endif
+#ifndef MFD_ALLOW_SEALING
+#define MFD_ALLOW_SEALING 0x0002U
+#endif
+
+#ifndef __NR_memfd_create
+#define __NR_memfd_create 279  /* aarch64 */
+#endif
+
+typedef struct {
+    char  name[256];
+    int   fd;
+    int   refcount;
+    int   unlinked;
+} posix_shm_entry_t;
+
+static posix_shm_entry_t *posix_shm_registry = NULL;
+static size_t posix_shm_registry_count = 0;
+/* Reuses the global `mutex` declared earlier in this file. */
+
+static int memfd_create_raw(const char *name, unsigned int flags) {
+    return (int)syscall(__NR_memfd_create, name, flags);
+}
+
+static const char *normalize_shm_name(const char *name) {
+    if (!name) return "anon";
+    while (*name == '/') name++;
+    if (*name == '\0') return "anon";
+    return name;
+}
+
+int shm_open(const char *name, int oflag, mode_t mode) {
+    (void)mode;  /* memfd_create ignores mode */
+    const char *norm = normalize_shm_name(name);
+    int existing_idx = -1;
+
+    pthread_mutex_lock(&mutex);
+    for (size_t i = 0; i < posix_shm_registry_count; i++) {
+        if (posix_shm_registry[i].fd >= 0 &&
+            !posix_shm_registry[i].unlinked &&
+            strcmp(posix_shm_registry[i].name, norm) == 0) {
+            existing_idx = (int)i;
+            break;
+        }
+    }
+
+    if (existing_idx >= 0) {
+        if ((oflag & O_CREAT) && (oflag & O_EXCL)) {
+            pthread_mutex_unlock(&mutex);
+            errno = EEXIST;
+            return -1;
+        }
+        int new_fd = fcntl(posix_shm_registry[existing_idx].fd, F_DUPFD_CLOEXEC, 0);
+        if (new_fd >= 0) {
+            posix_shm_registry[existing_idx].refcount++;
+        } else {
+            errno = EMFILE;
+        }
+        pthread_mutex_unlock(&mutex);
+        return new_fd;
+    }
+
+    if (!(oflag & O_CREAT)) {
+        pthread_mutex_unlock(&mutex);
+        errno = ENOENT;
+        return -1;
+    }
+
+    int fd = memfd_create_raw(norm, MFD_CLOEXEC | MFD_ALLOW_SEALING);
+    if (fd < 0) {
+        pthread_mutex_unlock(&mutex);
+        errno = ENOMEM;
+        return -1;
+    }
+
+    size_t idx = posix_shm_registry_count;
+    posix_shm_entry_t *new_arr = realloc(
+        posix_shm_registry,
+        (posix_shm_registry_count + 1) * sizeof(posix_shm_entry_t));
+    if (!new_arr) {
+        close(fd);
+        pthread_mutex_unlock(&mutex);
+        errno = ENOMEM;
+        return -1;
+    }
+    posix_shm_registry = new_arr;
+    posix_shm_registry[idx].fd = fd;
+    posix_shm_registry[idx].refcount = 1;
+    posix_shm_registry[idx].unlinked = 0;
+    strncpy(posix_shm_registry[idx].name, norm,
+            sizeof(posix_shm_registry[idx].name) - 1);
+    posix_shm_registry[idx].name[sizeof(posix_shm_registry[idx].name) - 1] = '\0';
+    posix_shm_registry_count++;
+
+    pthread_mutex_unlock(&mutex);
+    return fd;
+}
+
+int shm_unlink(const char *name) {
+    const char *norm = normalize_shm_name(name);
+
+    pthread_mutex_lock(&mutex);
+    for (size_t i = 0; i < posix_shm_registry_count; i++) {
+        if (posix_shm_registry[i].fd >= 0 &&
+            !posix_shm_registry[i].unlinked &&
+            strcmp(posix_shm_registry[i].name, norm) == 0) {
+            posix_shm_registry[i].unlinked = 1;
+            if (posix_shm_registry[i].refcount <= 0) {
+                close(posix_shm_registry[i].fd);
+                posix_shm_registry[i].fd = -1;
+            }
+            pthread_mutex_unlock(&mutex);
+            return 0;
+        }
+    }
+    pthread_mutex_unlock(&mutex);
+    errno = ENOENT;
     return -1;
 }

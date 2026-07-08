@@ -185,6 +185,10 @@ android {
         }
         jniLibs {
             useLegacyPackaging = true
+            // libgamescope.so (pre-built in jniLibs/) needs libc++_shared.so.
+            // CMake also produces libc++_shared.so for the CMake-built libs.
+            // Pick the first one (jniLibs/) to avoid duplicate-file build error.
+            pickFirsts += "lib/arm64-v8a/libc++_shared.so"
             excludes += [
                     "lib/arm64-v8a/libltdl.so",
                     "lib/arm64-v8a/libpulseaudio.so",

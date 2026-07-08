@@ -228,9 +228,11 @@
     <string-array name="display_mode_entries">
         <item>@string/display_mode_x11</item>
         <item>@string/display_mode_wayland</item>
+        <item>@string/display_mode_gamescope</item>
     </string-array>
     <string-array name="display_mode_values">
         <item>x11</item>
         <item>wayland</item>
+        <item>gamescope</item>
     </string-array>
 </resources>
