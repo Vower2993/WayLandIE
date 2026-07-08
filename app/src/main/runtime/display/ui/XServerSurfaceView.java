@@ -12,14 +12,7 @@ import com.winlator.cmod.runtime.display.xserver.XServer;
 import java.util.ArrayDeque;
 import java.util.Deque;
 
-/**
- * SurfaceView that drives a {@link VulkanRenderer} on a dedicated render thread.
- *
- * <p>This is the Vulkan replacement for the previous {@code GLSurfaceView}-backed
- * {@code XServerView}. It preserves the public API the rest of the codebase relies on:
- * {@link #queueEvent(Runnable)}, {@link #requestRender()}, {@link #setRenderMode(int)},
- * {@link #onResume()}, {@link #onPause()}, {@link #getRenderer()}.
- */
+/** SurfaceView that drives a VulkanRenderer on a dedicated render thread. */
 @SuppressLint("ViewConstructor")
 public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Callback {
     public static final int RENDERMODE_WHEN_DIRTY  = 0;
@@ -67,21 +60,9 @@ public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Cal
         }
     }
 
-    /** Called by WaylandBridgeServer when a new dmabuf frame is ready.
-     *  The caller will close the original fd after this returns, so we
-     *  must dup it to keep it alive for the render thread.
-     *
-     *  FIX: Previous code used ParcelFileDescriptor.adoptFd(fd) which crashes with
-     *  fdsan: "fd is owned by ParcelFileDescriptor, was expected to be unowned"
-     *  because fd was already owned by the pfd in WaylandBridgeServer.handleClient.
-     *  Use native dup() syscall instead — no ParcelFileDescriptor ownership tracking. */
+    /** Dup the dmabuf fd via native dup() to avoid fdsan ownership conflicts. */
     public void setWaylandDmaBufFrame(int fd, int w, int h, int stride, int drmFormat) {
-        // Close previous fd if not consumed
-        if (wlDmabufFd >= 0) {
-            closeFd(wlDmabufFd);
-            wlDmabufFd = -1;
-        }
-        // Dup the fd via native dup() — no ParcelFileDescriptor, no fdsan
+        if (wlDmabufFd >= 0) { closeFd(wlDmabufFd); wlDmabufFd = -1; }
         int dupFd = nativeDupFd(fd);
         if (dupFd < 0) {
             android.util.Log.e("XServerSurfaceView", "nativeDupFd failed for fd=" + fd);
@@ -100,7 +81,6 @@ public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Cal
 
     private static void closeFd(int fd) {
         if (fd < 0) return;
-        // Use native close to avoid ParcelFileDescriptor fdsan issues
         nativeCloseFd(fd);
     }
 
@@ -233,11 +213,7 @@ public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Cal
     private void startRenderThreadIfNeeded() {
         if (renderThread != null && renderThread.isAlive()) return;
         if (waylandMode) {
-            // In Wayland mode, start the render thread. Instead of rendering
-            // X11 scenes, it will present dmabuf frames from the bridge via
-            // nativePresentDmaBufWayland (blits dmabuf → swapchain → presents
-            // via BLASTBufferQueue which SurfaceFlinger always composites).
-            android.util.Log.i("XServerSurfaceView", "Wayland mode — starting render thread for dmabuf→swapchain blit");
+            android.util.Log.i("XServerSurfaceView", "Wayland mode — starting render thread");
             running = true;
             renderMode = RENDERMODE_CONTINUOUSLY;
             renderThread = new Thread(this::renderLoop, "VkRenderer");
@@ -322,7 +298,6 @@ public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Cal
                 try { event.run(); } catch (Throwable ignore) {}
             } else if (draw) {
                 if (waylandMode && wlFrameAvailable) {
-                    // Wayland mode: blit dmabuf → swapchain → present via BLASTBufferQueue
                     int fd = wlDmabufFd;
                     wlDmabufFd = -1;
                     wlFrameAvailable = false;
@@ -339,7 +314,6 @@ public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Cal
                         android.util.Log.e("XServerSurfaceView",
                             "nativePresentDmaBufWayland EXCEPTION", e);
                     }
-                    // Close the dup'd fd after the native code has consumed it
                     if (fd >= 0) {
                         closeFd(fd);
                     }

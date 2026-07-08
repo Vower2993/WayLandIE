@@ -1,15 +1,4 @@
-/* vk_wayland_present.c — Wayland dmabuf → swapchain blit + present.
- *
- * This file provides nativePresentDmaBufWayland() which imports a dmabuf
- * fd as a VkImage, blits it to the VulkanRenderer's swapchain image, and
- * presents via vkQueuePresentKHR. This goes through the BLASTBufferQueue
- * path that SurfaceFlinger always composites — unlike ASurfaceTransaction
- * which was invisible on Samsung S25/Android 16.
- *
- * The function is called from the render thread (VkRenderer) when a
- * dmabuf is available from the Wayland bridge. It replaces the X11 scene
- * rendering path (nativeRenderFrame) in Wayland mode.
- */
+/* vk_wayland_present.c — blit dmabuf to VulkanRenderer swapchain and present. */
 
 #include "vk_state.h"
 #include "vk_driver.h"
@@ -38,7 +27,7 @@ struct VkWaylandPresent {
     int initialized;
 };
 
-/* Get or create the Wayland present state on the renderer */
+/* Get or create Wayland present state. */
 static struct VkWaylandPresent* get_wl_present(VkRenderer* r) {
     if (!r->wl_present) {
         r->wl_present = calloc(1, sizeof(struct VkWaylandPresent));
@@ -48,14 +37,14 @@ static struct VkWaylandPresent* get_wl_present(VkRenderer* r) {
     return (struct VkWaylandPresent*)r->wl_present;
 }
 
-/* Import a dmabuf fd as a VkImage using VK_KHR_external_memory_fd */
+/* Import dmabuf as VkImage. */
 static VkResult import_dmabuf_image(VkRenderer* r, struct VkWaylandPresent* wl,
                                      int dmabuf_fd, uint32_t width, uint32_t height,
                                      uint32_t stride, uint32_t drm_format) {
     VkDevice device = r->device;
     VkPhysicalDevice phys = r->physical_device;
 
-    /* Destroy previous image if dimensions changed */
+    /* Destroy previous image if dimensions changed. */
     if (wl->src_image != VK_NULL_HANDLE && (wl->last_width != width || wl->last_height != height)) {
         vkDestroyImage(device, wl->src_image, NULL);
         vkFreeMemory(device, wl->src_memory, NULL);
@@ -63,9 +52,9 @@ static VkResult import_dmabuf_image(VkRenderer* r, struct VkWaylandPresent* wl,
         wl->src_memory = VK_NULL_HANDLE;
     }
 
-    /* Create image if not cached */
+    /* Create image if not cached. */
     if (wl->src_image == VK_NULL_HANDLE) {
-        /* Determine VkFormat from DRM format */
+        /* Determine VkFormat from DRM format. */
         VkFormat vk_format = VK_FORMAT_R8G8B8A8_UNORM;
         if (drm_format == 0x34325241U /* ARGB8888 */) vk_format = VK_FORMAT_B8G8R8A8_UNORM;
         else if (drm_format == 0x34324241U /* ABGR8888 */) vk_format = VK_FORMAT_R8G8B8A8_UNORM;
@@ -93,11 +82,11 @@ static VkResult import_dmabuf_image(VkRenderer* r, struct VkWaylandPresent* wl,
             return res;
         }
 
-        /* Get memory requirements */
+        /* Get memory requirements. */
         VkMemoryRequirements mem_reqs;
         vkGetImageMemoryRequirements(device, wl->src_image, &mem_reqs);
 
-        /* Find memory type */
+        /* Find memory type. */
         VkPhysicalDeviceMemoryProperties mem_props;
         vkGetPhysicalDeviceMemoryProperties(phys, &mem_props);
         uint32_t mem_type = 0;
@@ -109,7 +98,7 @@ static VkResult import_dmabuf_image(VkRenderer* r, struct VkWaylandPresent* wl,
             }
         }
 
-        /* Import the dmabuf fd */
+        /* Import the dmabuf fd. */
         VkImportMemoryFdInfoKHR import_info = {VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR};
         import_info.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
         import_info.fd = dup(dmabuf_fd);  /* vkAllocateMemory takes ownership */
@@ -152,8 +141,7 @@ static VkResult import_dmabuf_image(VkRenderer* r, struct VkWaylandPresent* wl,
     return VK_SUCCESS;
 }
 
-/* Main entry: called from Java via JNI to present a dmabuf through the
- * VulkanRenderer's swapchain. Returns JNI_TRUE on success. */
+/* Main entry: present a dmabuf through the VulkanRenderer's swapchain. */
 JNIEXPORT jboolean JNICALL
 Java_com_winlator_cmod_runtime_display_renderer_VulkanRenderer_nativePresentDmaBufWayland(
         JNIEnv* env, jclass clazz, jlong handle,
@@ -180,14 +168,14 @@ Java_com_winlator_cmod_runtime_display_renderer_VulkanRenderer_nativePresentDmaB
     struct VkWaylandPresent* wl = get_wl_present(r);
     if (!wl) return JNI_FALSE;
 
-    /* Import dmabuf as VkImage */
+    /* Import dmabuf as VkImage. */
     VkResult res = import_dmabuf_image(r, wl, dmabuf_fd, width, height, stride, drm_format);
     if (res != VK_SUCCESS) {
         VK_WL_LOGE("nativePresentDmaBufWayland: import_dmabuf_image failed res=%d", res);
         return JNI_FALSE;
     }
 
-    /* Acquire swapchain image */
+    /* Acquire swapchain image. */
     VkFrame* f = &r->frames[r->frame_index % VK_FRAMES_IN_FLIGHT];
     r->frame_index++;
     wait_inflight_frames(r);
@@ -203,12 +191,12 @@ Java_com_winlator_cmod_runtime_display_renderer_VulkanRenderer_nativePresentDmaB
     VkSemaphore render_finished = r->swapchain_render_finished[image_index];
     vkResetFences(r->device, 1, &f->in_flight);
 
-    /* Record blit command buffer */
+    /* Record blit command buffer. */
     VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(f->cmd, &bi);
 
-    /* Transition source image to TRANSFER_SRC */
+    /* Transition source to TRANSFER_SRC. */
     VkImageMemoryBarrier src_barrier = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
     src_barrier.srcAccessMask = 0;
     src_barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
@@ -221,7 +209,7 @@ Java_com_winlator_cmod_runtime_display_renderer_VulkanRenderer_nativePresentDmaB
     src_barrier.subresourceRange.levelCount = 1;
     src_barrier.subresourceRange.layerCount = 1;
 
-    /* Transition swapchain image to TRANSFER_DST */
+    /* Transition swapchain to TRANSFER_DST. */
     VkImageMemoryBarrier dst_barrier = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
     dst_barrier.srcAccessMask = 0;
     dst_barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;

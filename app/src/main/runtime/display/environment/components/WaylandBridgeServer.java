@@ -10,13 +10,7 @@ import com.winlator.cmod.runtime.display.ui.XServerSurfaceView;
 import java.io.*;
 import java.nio.ByteBuffer;
 
-/**
- * Listens on abstract socket 'waylandie.display.bridge.v1' for dmabuf-present
- * commands from the bionic bridge process. Receives dmabuf fd via SCM_RIGHTS,
- * then calls nativePresentAhbVkDmaBufFrame to present it via SurfaceControl.
- *
- * Full pipeline: Wine (winewayland.drv) → dmabuf → Bridge → AHB → SurfaceFlinger
- */
+/** Receives dmabuf frames from the bridge and presents via SurfaceControl. */
 public class WaylandBridgeServer {
     private static final String TAG = "WaylandBridgeServer";
     private static final String SOCKET_NAME = "waylandie.display.bridge.v1";
@@ -261,12 +255,7 @@ public class WaylandBridgeServer {
                 }
             }
 
-            // Present the dmabuf via ASurfaceTransaction on a child SurfaceControl.
-            // The VkRenderer swapchain path (via Turnip driver) doesn't connect to
-            // Android's BLASTBufferQueue — vkQueuePresentKHR returns VK_SUCCESS but
-            // frames never reach SurfaceFlinger. The ASurfaceTransaction path
-            // presents directly to SurfaceFlinger via SurfaceControl, which always works.
-            // (The previous "invisible" issue was caused by the fdsan crash, now fixed.)
+            // Present via ASurfaceTransaction — Turnip swapchain doesn't reach SurfaceFlinger.
             String result = nativePresentAhbVkDmaBufFrame(
                     presentLayer,
                     dmabufFd,
