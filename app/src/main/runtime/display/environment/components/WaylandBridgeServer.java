@@ -261,15 +261,22 @@ public class WaylandBridgeServer {
                 }
             }
 
-            // In Wayland mode, pass the dmabuf to the VulkanRenderer for blit→swapchain→present.
-            // This goes through BLASTBufferQueue which SurfaceFlinger always composites.
-            // The old ASurfaceTransaction path was invisible on Samsung S25/Android 16.
-            if (hostView instanceof XServerSurfaceView) {
-                XServerSurfaceView wlView = (XServerSurfaceView) hostView;
-                wlView.setWaylandDmaBufFrame(dmabufFd, srcWidth, srcHeight, stride0, (int)format);
-            }
-
-            String result = "status=pass wayland-blit-via-vulkanrenderer";
+            // Present the dmabuf via ASurfaceTransaction on a child SurfaceControl.
+            // The VkRenderer swapchain path (via Turnip driver) doesn't connect to
+            // Android's BLASTBufferQueue — vkQueuePresentKHR returns VK_SUCCESS but
+            // frames never reach SurfaceFlinger. The ASurfaceTransaction path
+            // presents directly to SurfaceFlinger via SurfaceControl, which always works.
+            // (The previous "invisible" issue was caused by the fdsan crash, now fixed.)
+            String result = nativePresentAhbVkDmaBufFrame(
+                    presentLayer,
+                    dmabufFd,
+                    srcWidth, srcHeight,
+                    format, modifier, 1,
+                    stride0, offset0, size,
+                    width, height,
+                    frameIndex,
+                    tmpDir, hookLibDir,
+                    driverDir, effectiveDriverName);
             frameIndex++;
 
             Log.i(TAG, "Present result: " + result + " frame=" + (frameIndex - 1) +
