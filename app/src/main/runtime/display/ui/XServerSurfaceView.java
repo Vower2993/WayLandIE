@@ -239,7 +239,7 @@ public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Cal
             // via BLASTBufferQueue which SurfaceFlinger always composites).
             android.util.Log.i("XServerSurfaceView", "Wayland mode — starting render thread for dmabuf→swapchain blit");
             running = true;
-            renderMode = RENDERMODE_WHEN_DIRTY;
+            renderMode = RENDERMODE_CONTINUOUSLY;
             renderThread = new Thread(this::renderLoop, "VkRenderer");
             renderThread.start();
             return;
