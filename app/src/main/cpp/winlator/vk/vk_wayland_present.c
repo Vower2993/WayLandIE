@@ -161,14 +161,31 @@ Java_com_winlator_cmod_runtime_display_renderer_VulkanRenderer_nativePresentDmaB
         jint stride, jint drm_format) {
     (void)env; (void)clazz;
     VkRenderer* r = (VkRenderer*)(intptr_t)handle;
-    if (!r || !r->surface_ready || dmabuf_fd < 0) return JNI_FALSE;
+    if (!r) {
+        VK_WL_LOGE("nativePresentDmaBufWayland: null renderer handle");
+        return JNI_FALSE;
+    }
+    if (!r->surface_ready) {
+        VK_WL_LOGE("nativePresentDmaBufWayland: surface_ready=false swapchain=%p", (void*)r->swapchain);
+        return JNI_FALSE;
+    }
+    if (dmabuf_fd < 0) {
+        VK_WL_LOGE("nativePresentDmaBufWayland: invalid dmabuf_fd=%d", dmabuf_fd);
+        return JNI_FALSE;
+    }
+
+    VK_WL_LOGI("nativePresentDmaBufWayland: fd=%d %dx%d stride=%d fmt=0x%x",
+               dmabuf_fd, width, height, stride, drm_format);
 
     struct VkWaylandPresent* wl = get_wl_present(r);
     if (!wl) return JNI_FALSE;
 
     /* Import dmabuf as VkImage */
     VkResult res = import_dmabuf_image(r, wl, dmabuf_fd, width, height, stride, drm_format);
-    if (res != VK_SUCCESS) return JNI_FALSE;
+    if (res != VK_SUCCESS) {
+        VK_WL_LOGE("nativePresentDmaBufWayland: import_dmabuf_image failed res=%d", res);
+        return JNI_FALSE;
+    }
 
     /* Acquire swapchain image */
     VkFrame* f = &r->frames[r->frame_index % VK_FRAMES_IN_FLIGHT];
@@ -280,8 +297,13 @@ Java_com_winlator_cmod_runtime_display_renderer_VulkanRenderer_nativePresentDmaB
     pi.pImageIndices = &image_index;
 
     pthread_mutex_lock(&r->queue_mutex);
-    vkQueuePresentKHR(r->graphics_queue, &pi);
+    res = vkQueuePresentKHR(r->graphics_queue, &pi);
     pthread_mutex_unlock(&r->queue_mutex);
+    if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR) {
+        VK_WL_LOGE("vkQueuePresentKHR: %d", res);
+        return JNI_FALSE;
+    }
 
+    VK_WL_LOGI("nativePresentDmaBufWayland: SUCCESS image_index=%u", image_index);
     return JNI_TRUE;
 }
