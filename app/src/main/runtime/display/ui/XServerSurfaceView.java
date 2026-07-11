@@ -213,9 +213,9 @@ public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Cal
     private void startRenderThreadIfNeeded() {
         if (renderThread != null && renderThread.isAlive()) return;
         if (waylandMode) {
-            android.util.Log.i("XServerSurfaceView", "Wayland mode — render thread CONTINUOUSLY");
+            android.util.Log.i("XServerSurfaceView", "Wayland mode — render thread WHEN_DIRTY (no X11 rendering)");
             running = true;
-            renderMode = RENDERMODE_CONTINUOUSLY;
+            renderMode = RENDERMODE_WHEN_DIRTY;
             renderThread = new Thread(this::renderLoop, "VkRenderer");
             renderThread.start();
             return;
@@ -317,7 +317,7 @@ public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Cal
                     if (fd >= 0) {
                         closeFd(fd);
                     }
-                } else {
+                } else if (!waylandMode) {
                     try { renderer.onDrawFrame(); } catch (Throwable ignore) {}
                 }
             }
