@@ -190,6 +190,14 @@ public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Cal
             height = h;
             eventQueue.add(() -> renderer.onSurfaceChanged(w, h));
             surfaceReady = true;
+            // In Wayland mode, present ONE frame to activate the SurfaceView's
+            // BLASTBufferQueue. SurfaceFlinger won't composite child SurfaceControls
+            // (presentLayer) until the parent has at least one buffer.
+            if (waylandMode) {
+                eventQueue.add(() -> {
+                    try { renderer.onDrawFrame(); } catch (Throwable ignore) {}
+                });
+            }
             renderRequested = true;
             renderLock.notifyAll();
         }
