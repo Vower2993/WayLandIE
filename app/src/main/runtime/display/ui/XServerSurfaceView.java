@@ -165,10 +165,6 @@ public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Cal
             // waylandie_display_native not loaded — X11 mode, ignore
         }
 
-        // Dummy frame removed — was causing 'stuck at wine starting' on some
-        // devices because lockCanvas conflicts with setZOrderMediaOverlay.
-        // setZOrderMediaOverlay doesn't require the parent to have content.
-
         startRenderThreadIfNeeded();
     }
 
@@ -190,16 +186,23 @@ public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Cal
             height = h;
             eventQueue.add(() -> renderer.onSurfaceChanged(w, h));
             surfaceReady = true;
-            // In Wayland mode, present ONE frame to activate the SurfaceView's
-            // BLASTBufferQueue. SurfaceFlinger won't composite child SurfaceControls
-            // (presentLayer) until the parent has at least one buffer.
-            if (waylandMode) {
-                eventQueue.add(() -> {
-                    try { renderer.onDrawFrame(); } catch (Throwable ignore) {}
-                });
-            }
             renderRequested = true;
             renderLock.notifyAll();
+        }
+        // In Wayland mode, draw ONE transparent frame via lockCanvas to activate
+        // the SurfaceView's BLASTBufferQueue. SurfaceFlinger won't composite child
+        // SurfaceControls (presentLayer) until the parent has at least one buffer.
+        // Can't use VkRenderer.onDrawFrame() because the Turnip driver's swapchain
+        // doesn't connect to Android's BLASTBufferQueue.
+        if (waylandMode) {
+            try {
+                android.graphics.Canvas c = holder.lockCanvas();
+                c.drawColor(android.graphics.Color.TRANSPARENT);
+                holder.unlockCanvasAndPost(c);
+                android.util.Log.i("XServerSurfaceView", "Wayland: lockCanvas transparent frame posted");
+            } catch (Exception e) {
+                android.util.Log.e("XServerSurfaceView", "Wayland: lockCanvas failed", e);
+            }
         }
     }
 
