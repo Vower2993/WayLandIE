@@ -373,6 +373,12 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/bionic-libs/lib/libwayland-server.a")
     target_compile_definitions(vk_layer_waylandie_dmabuf PRIVATE
         _GNU_SOURCE
         __ANDROID_MIN_SDK_VERSION__=31
+        VK_USE_PLATFORM_WIN32_KHR=1
+        VK_USE_PLATFORM_XLIB_KHR=1
+    )
+
+    target_include_directories(vk_layer_waylandie_dmabuf PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/vulkan_layer/stub_includes
     )
 
     target_compile_options(vk_layer_waylandie_dmabuf PRIVATE
