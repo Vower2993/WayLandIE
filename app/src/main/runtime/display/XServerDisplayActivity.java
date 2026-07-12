@@ -8033,7 +8033,27 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
             // X11 mode: keep winhandler.exe (it manages window focus for
             // multi-window X11 games).
             if ("wayland".equals(displayMode)) {
-                return args;
+                // CRITICAL: Strip quotes from the game path.
+                //
+                // GuestProgramLauncherComponent executes the command via
+                // Runtime.exec(String), which splits on spaces but does NOT
+                // strip double-quotes. So "D:\LIMBO\limbo.exe" (with quotes)
+                // is passed to explorer.exe as a literal string including
+                // the quote characters. Explorer tries to open the file
+                // "D:\LIMBO\limbo.exe" (with quotes) → file not found →
+                // game never launches → explorer sits idle with only the
+                // taskbar rendered → black screen with no game.
+                //
+                // 41d5ea6 used unquoted UNIX paths
+                // (/storage/emulated/0/.../limbo.exe) so this bug didn't
+                // manifest. The WinNative build quotes all paths, which
+                // breaks Runtime.exec(String).
+                //
+                // Stripping quotes is safe because Runtime.exec(String)
+                // splits on spaces — if the path had spaces, it would be
+                // broken regardless. The path MUST NOT have spaces for
+                // Runtime.exec(String) to work at all.
+                return args.replace("\"", "");
             }
             // Use "start /wait" to make wine wait for the child process.
             // Without /wait, winhandler.exe exits after launching the game,
