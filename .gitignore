@@ -53,3 +53,5 @@ signing.properties
 References/
 *.hprof
 android_sysvshm/build64/
+WayLandIE/
+upload/
