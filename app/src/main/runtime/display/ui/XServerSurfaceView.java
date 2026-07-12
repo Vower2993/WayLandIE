@@ -56,7 +56,6 @@ public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Cal
         this.waylandMode = wayland;
         if (wayland) {
             setZOrderMediaOverlay(true);
-            getHolder().setFormat(android.graphics.PixelFormat.TRANSLUCENT);
         }
     }
 
@@ -189,21 +188,6 @@ public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Cal
             renderRequested = true;
             renderLock.notifyAll();
         }
-        // In Wayland mode, draw ONE transparent frame via lockCanvas to activate
-        // the SurfaceView's BLASTBufferQueue. SurfaceFlinger won't composite child
-        // SurfaceControls (presentLayer) until the parent has at least one buffer.
-        // Can't use VkRenderer.onDrawFrame() because the Turnip driver's swapchain
-        // doesn't connect to Android's BLASTBufferQueue.
-        if (waylandMode) {
-            try {
-                android.graphics.Canvas c = holder.lockCanvas();
-                c.drawColor(android.graphics.Color.TRANSPARENT);
-                holder.unlockCanvasAndPost(c);
-                android.util.Log.i("XServerSurfaceView", "Wayland: lockCanvas transparent frame posted");
-            } catch (Exception e) {
-                android.util.Log.e("XServerSurfaceView", "Wayland: lockCanvas failed", e);
-            }
-        }
     }
 
     @Override
@@ -224,9 +208,9 @@ public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Cal
     private void startRenderThreadIfNeeded() {
         if (renderThread != null && renderThread.isAlive()) return;
         if (waylandMode) {
-            android.util.Log.i("XServerSurfaceView", "Wayland mode — render thread WHEN_DIRTY (no X11 rendering)");
+            android.util.Log.i("XServerSurfaceView", "Wayland mode — render thread CONTINUOUSLY (parent activation)");
             running = true;
-            renderMode = RENDERMODE_WHEN_DIRTY;
+            renderMode = RENDERMODE_CONTINUOUSLY;
             renderThread = new Thread(this::renderLoop, "VkRenderer");
             renderThread.start();
             return;
@@ -328,7 +312,7 @@ public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Cal
                     if (fd >= 0) {
                         closeFd(fd);
                     }
-                } else if (!waylandMode) {
+                } else {
                     try { renderer.onDrawFrame(); } catch (Throwable ignore) {}
                 }
             }
