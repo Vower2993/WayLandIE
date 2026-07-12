@@ -154,9 +154,14 @@ public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Cal
             width = 0;
             height = 0;
         }
-        renderer.attachSurface(holder.getSurface());
-        // In Wayland mode, pass the ANativeWindow to winewayland.drv for
-        // vkCreateXlibSurfaceKHR (adrenotools wrapper supports xlib_surface)
+        // In Wayland mode, skip VkRenderer entirely — no swapchain, no BLASTBufferQueue.
+        // The SurfaceView is used purely as a container for the presentLayer (child SurfaceControl).
+        // ASurfaceTransaction presents dmabuf content to presentLayer directly.
+        // Creating a VkRenderer swapchain would create an empty BLASTBufferQueue that
+        // prevents SurfaceFlinger from compositing the child presentLayer.
+        if (!waylandMode) {
+            renderer.attachSurface(holder.getSurface());
+        }
         try {
             com.winlator.cmod.runtime.display.environment.components.WaylandBridgeServer
                     .nativeSetAnativeWindow(holder.getSurface());
@@ -179,7 +184,7 @@ public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Cal
             return;
         }
 
-        renderer.notifySurfaceChanged(w, h);
+        if (!waylandMode) renderer.notifySurfaceChanged(w, h);
         synchronized (renderLock) {
             width = w;
             height = h;
