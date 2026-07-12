@@ -10,10 +10,9 @@
 # First run: ~30 minutes (rootfs build is slow due to QEMU emulation)
 # Cached runs: ~10 minutes (rootfs reused)
 
-name: Build Self-Contained APK
+name: Build Original WayLandIE
 
 on:
-  workflow_dispatch:
   workflow_dispatch:
 
 jobs:
