@@ -315,10 +315,10 @@ public final class WaylandDriverInstaller {
             long stackReserveOffset;
             int fieldSize;
             if (magic == 0x020B) { // PE32+ (64-bit)
-                stackReserveOffset = eLfanew + 24 + 72;
+                stackReserveOffset = eLfanew + 24 + 56;
                 fieldSize = 8;
             } else if (magic == 0x010B) { // PE32 (32-bit)
-                stackReserveOffset = eLfanew + 24 + 72;
+                stackReserveOffset = eLfanew + 24 + 48;
                 fieldSize = 4;
             } else {
                 return false; // Unknown PE format
