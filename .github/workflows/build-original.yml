@@ -14,6 +14,14 @@ name: Build Original WayLandIE
 
 on:
   workflow_dispatch:
+    inputs:
+      commit_sha:
+        description: 'Commit SHA on original-wayland to build (empty = branch HEAD)'
+        required: false
+        default: ''
+  push:
+    branches:
+      - 'build-test-*'
 
 jobs:
   build:
@@ -22,9 +30,42 @@ jobs:
       JAVA_HOME: /usr/lib/jvm/temurin-17-jdk-amd64
       JAVA_HOME_17_X64: /usr/lib/jvm/temurin-17-jdk-amd64
     steps:
+      - name: Resolve target commit SHA
+        id: resolve_sha
+        run: |
+          # Determine which commit on original-wayland to build.
+          # Priority:
+          #   1. workflow_dispatch input "commit_sha"
+          #   2. branch name suffix (push trigger): build-test-<sha>
+          #   3. default: original-wayland HEAD
+          INPUT_SHA="${{ github.event.inputs.commit_sha }}"
+          BRANCH="${GITHUB_REF_NAME:-}"
+          if [ -n "$INPUT_SHA" ]; then
+            TARGET_SHA="$INPUT_SHA"
+            echo "Source: workflow_dispatch input"
+          elif echo "$BRANCH" | grep -qE '^build-test-[0-9a-f]+$'; then
+            TARGET_SHA="${BRANCH#build-test-}"
+            echo "Source: push branch $BRANCH"
+          else
+            TARGET_SHA=""
+            echo "Source: default (original-wayland HEAD)"
+          fi
+          if [ -n "$TARGET_SHA" ]; then
+            # Validate SHA format
+            if ! echo "$TARGET_SHA" | grep -qE '^[0-9a-f]{7,40}$'; then
+              echo "::error::Invalid commit SHA: $TARGET_SHA"
+              exit 1
+            fi
+            echo "Target SHA: $TARGET_SHA"
+            echo "sha=$TARGET_SHA" >> $GITHUB_OUTPUT
+          else
+            echo "Target SHA: (original-wayland HEAD)"
+            echo "sha=" >> $GITHUB_OUTPUT
+          fi
+
       - uses: actions/checkout@v4
         with:
-          ref: original-wayland
+          ref: ${{ steps.resolve_sha.outputs.sha || 'original-wayland' }}
           fetch-depth: 0
 
       - name: Set up JDK 17
@@ -350,7 +391,7 @@ jobs:
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: waylandie-self-contained-apk
+          name: waylandie-apk-${{ steps.resolve_sha.outputs.sha || 'original-wayland-head' }}
           path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
           retention-days: 30
