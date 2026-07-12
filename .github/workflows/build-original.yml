@@ -1,0 +1,49 @@
+name: Build Original WayLandIE
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    env:
+      JAVA_HOME: /usr/lib/jvm/temurin-17-jdk-amd64
+      JAVA_HOME_17_X64: /usr/lib/jvm/temurin-17-jdk-amd64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: original-wayland
+          fetch-depth: 0
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up QEMU binfmt for arm64 cross-build
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-user-static debootstrap binfmt-support zstd
+          sudo update-binfmts --enable qemu-aarch64 || true
+
+      - name: Cache imagefs tarball
+        id: cache-imagefs
+        uses: actions/cache@v4
+        with:
+          path: app/src/main/assets/imagefs.tar.zst
+          key: imagefs-v1-${{ hashFiles('tools/build-imagefs.sh') }}
+
+      - name: Build imagefs
+        if: steps.cache-imagefs.outputs.cache-hit != 'true'
+        run: bash tools/build-imagefs.sh
+
+      - name: Build APK
+        run: ./gradlew assembleDebug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: waylandie-original-apk
+          path: app/build/outputs/apk/debug/*.apk
+          retention-days: 7
