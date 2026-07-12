@@ -31,12 +31,12 @@ jobs:
         id: cache-imagefs
         uses: actions/cache@v4
         with:
-          path: app/src/main/assets/imagefs.tar.zst
+          path: app/src/main/assets/imagefs/imagefs.tar.zst
           key: imagefs-v1-${{ hashFiles('tools/build-imagefs.sh') }}
 
       - name: Build imagefs
         if: steps.cache-imagefs.outputs.cache-hit != 'true'
-        run: bash tools/build-imagefs.sh
+        run: sudo bash tools/build-imagefs.sh
 
       - name: Build APK
         run: ./gradlew assembleDebug
