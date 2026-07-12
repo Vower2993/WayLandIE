@@ -394,7 +394,6 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/bionic-libs/lib/libwayland-server.a")
         ${android-lib-layer}
         vulkan
         dl
-        pthread
     )
 else()
     message(STATUS "bionic-libs NOT found — skipping waylandie targets (will use X11 fallback)")
