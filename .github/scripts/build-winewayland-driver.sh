@@ -925,6 +925,16 @@ ls -la "$PROTON_OUT/lib/libfreetype.so.6" 2>/dev/null || echo "  libfreetype.so.
 echo "=== Building vulkan-1.dll PE proxy (DAC zero-copy) ==="
 PROXY_SRC="$WORKSPACE/app/src/main/cpp/vulkan-1-proxy/vulkan-1-proxy.c"
 if [ -f "$PROXY_SRC" ]; then
+  # Download Vulkan headers (llvm-mingw doesn't include them)
+  VULKAN_HEADERS_DIR="/tmp/vulkan-headers"
+  if [ ! -d "$VULKAN_HEADERS_DIR" ]; then
+    echo "  Downloading Vulkan headers..."
+    wget -q "https://github.com/KhronosGroup/Vulkan-Headers/archive/refs/tags/v1.3.283.zip" -O /tmp/vulkan-headers.zip
+    unzip -q /tmp/vulkan-headers.zip -d /tmp/
+    mv /tmp/Vulkan-Headers-1.3.283 "$VULKAN_HEADERS_DIR"
+  fi
+  VULKAN_INCLUDE="$VULKAN_HEADERS_DIR/include"
+
   # Compile as ARM64 PE DLL with llvm-mingw
   # The proxy intercepts Vulkan calls INSIDE the Wine process, bypassing
   # adrenotools' isolated linker namespace that blocks VK_LAYER_PATH.
@@ -932,6 +942,7 @@ if [ -f "$PROXY_SRC" ]; then
     -shared \
     -o "$PROTON_OUT/lib/wine/aarch64-windows/vulkan-1.dll" \
     "$PROXY_SRC" \
+    -I"$VULKAN_INCLUDE" \
     -lkernel32 \
     -Wl,--enable-stdcall-fixup \
     -Wl,-subsystem,windows \
