@@ -6594,6 +6594,13 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
             //     wlOverrides += (wlOverrides.isEmpty() ? "" : ";") + "explorer.exe=";
             // }
             // Do NOT add winex11.drv= — let it load as fallback
+            // Add vulkan-1=native to load our PE proxy DLL (DAC zero-copy)
+            // This makes Wine load our custom vulkan-1.dll from system32
+            // instead of the built-in winevulkan version. The proxy intercepts
+            // DXVK's Vulkan calls and routes them through the DAC pipeline.
+            if (!wlOverrides.contains("vulkan-1")) {
+                wlOverrides += (wlOverrides.isEmpty() ? "" : ";") + "vulkan-1=native";
+            }
             envVars.put("WINEDLLOVERRIDES", wlOverrides);
             Log.i("XServerDisplayActivity", "Wayland WINEDLLOVERRIDES: " + wlOverrides);
 

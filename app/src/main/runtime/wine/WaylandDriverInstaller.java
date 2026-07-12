@@ -456,13 +456,21 @@ public final class WaylandDriverInstaller {
         copyIfExists(prefix, "lib/wine/aarch64-windows/winewayland.drv", system32);
         copyIfExists(prefix, "lib/wine/aarch64-windows/libarm64ecfex.dll", system32);
         copyIfExists(prefix, "lib/wine/aarch64-windows/ntdll.dll", system32);
-        // CRITICAL: Copy source-built winevulkan.dll to system32.
-        // The system32/winevulkan.dll is loaded by 64-bit games (e.g. ROTTR).
-        // If it's Proton 9.0's original (from the archive), its dispatch table
-        // enum doesn't match our proton_11.0 source-built winevulkan.so →
-        // vkCreateInstance dispatches to the wrong Unix function → failure.
-        // Both PE (system32) and Unix (winevulkan.so) sides MUST be from the
-        // same proton_11.0 source.
+        // Copy vulkan-1.dll PE proxy to system32.
+        // This proxy intercepts Vulkan calls from DXVK INSIDE the Wine process,
+        // bypassing adrenotools' isolated linker namespace. The proxy:
+        //   1. Translates VK_KHR_win32_surface → VK_KHR_xlib_surface
+        //   2. Creates exportable staging images (DXVK renders into these)
+        //   3. Sends dmabuf fds to the bridge (zero-blit DAC presentation)
+        // WINEDLLOVERRIDES=vulkan-1=native must be set to load this over the
+        // built-in winevulkan vulkan-1.dll.
+        File vulkan1Proxy = new File(prefix, "lib/wine/aarch64-windows/vulkan-1.dll");
+        if (vulkan1Proxy.exists() && vulkan1Proxy.length() > 1000) {
+            copyIfExists(prefix, "lib/wine/aarch64-windows/vulkan-1.dll", system32);
+            Log.i(TAG, "Installed vulkan-1.dll PE proxy to system32 (" + vulkan1Proxy.length() + " bytes)");
+        } else {
+            Log.w(TAG, "vulkan-1.dll PE proxy not found in driver zip — DAC zero-copy disabled");
+        }
     }
 
     /**

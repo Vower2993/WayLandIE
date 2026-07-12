@@ -921,6 +921,38 @@ $CC -shared -fPIC \
   2>&1 || { echo "WARNING: Failed to build libfreetype.so.6 — continuing without it"; }
 ls -la "$PROTON_OUT/lib/libfreetype.so.6" 2>/dev/null || echo "  libfreetype.so.6 not built"
 
+# === Build vulkan-1.dll PE proxy (DAC zero-copy interception) ===
+echo "=== Building vulkan-1.dll PE proxy (DAC zero-copy) ==="
+PROXY_SRC="$WORKSPACE/app/src/main/cpp/vulkan-1-proxy/vulkan-1-proxy.c"
+if [ -f "$PROXY_SRC" ]; then
+  # Compile as ARM64 PE DLL with llvm-mingw
+  # The proxy intercepts Vulkan calls INSIDE the Wine process, bypassing
+  # adrenotools' isolated linker namespace that blocks VK_LAYER_PATH.
+  "$LLVM_MINGW_DIR/bin/aarch64-w64-mingw32-clang" \
+    -shared \
+    -o "$PROTON_OUT/lib/wine/aarch64-windows/vulkan-1.dll" \
+    "$PROXY_SRC" \
+    -lkernel32 \
+    -Wl,--enable-stdcall-fixup \
+    -Wl,-subsystem,windows \
+    -O2 \
+    -Wno-unused-function \
+    2>&1 || { echo "WARNING: Failed to build vulkan-1.dll PE proxy — continuing without it"; }
+
+  VULKAN1_SIZE=$(stat -c%s "$PROTON_OUT/lib/wine/aarch64-windows/vulkan-1.dll" 2>/dev/null || echo 0)
+  if [ "$VULKAN1_SIZE" -gt 1000 ]; then
+    echo "vulkan-1.dll PE proxy: $VULKAN1_SIZE bytes"
+    # Also copy to arm64ec-windows dir (Wine prefix may use either arch)
+    mkdir -p "$PROTON_OUT/lib/wine/arm64ec-windows"
+    cp "$PROTON_OUT/lib/wine/aarch64-windows/vulkan-1.dll" \
+       "$PROTON_OUT/lib/wine/arm64ec-windows/vulkan-1.dll"
+  else
+    echo "WARNING: vulkan-1.dll PE proxy not built or too small"
+  fi
+else
+  echo "WARNING: vulkan-1-proxy.c not found — skipping PE proxy build"
+fi
+
 ( cd "$PROTON_OUT" && zip -r "$WORKSPACE/app/src/main/assets/winewayland-driver.zip" lib/ )
 
 echo "=== zip contents ==="
