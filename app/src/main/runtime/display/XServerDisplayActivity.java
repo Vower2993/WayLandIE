@@ -6597,27 +6597,17 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
             envVars.put("WINEDLLOVERRIDES", wlOverrides);
             Log.i("XServerDisplayActivity", "Wayland WINEDLLOVERRIDES: " + wlOverrides);
 
-            // CRITICAL: Clear DISPLAY in Wayland mode.
-            //
-            // The working 41d5ea6 build did NOT set DISPLAY at all — Wine was
-            // forced to use winewayland.drv for ALL rendering (desktop + game +
-            // cursor). This produced full-desktop dmabuf frames (3200x1536).
-            //
-            // The current build sets DISPLAY=:0 (for Xvfb), which causes Wine
-            // to render the DESKTOP to X11 instead of Wayland. Only tiny UI
-            // elements (cursors, 1280x128) make it through the Wayland bridge.
-            // The result: black screen with sound playing in the background.
-            //
-            // Clearing DISPLAY forces Wine to use winewayland.drv exclusively,
-            // matching the 41d5ea6 architecture. The bridge receives the full
-            // desktop as SHM→dmabuf and presents it via SurfaceControl.
-            //
-            // The previous comment said "DISPLAY=''  prevented explorer from
-            // reading display config" — but 41d5ea6 proved this is NOT a real
-            // issue. winewayland.drv provides display config via wl_output,
-            // so explorer doesn't need X11 for display config.
-            envVars.put("DISPLAY", "");
-            Log.i("XServerDisplayActivity", "Wayland mode: cleared DISPLAY to force Wayland-only rendering");
+            // Keep DISPLAY=:0 (set by GuestProgramLauncherComponent.java:907).
+            // Clearing DISPLAY causes nodrv_CreateWindow — explorer can't read
+            // display config without X11. Confirmed by b35bbec build (2026-07-12):
+            //   00d0:err:winediag:nodrv_CreateWindow Application tried to create
+            //   a window, but no driver could be loaded.
+            //   00d0:err:winediag:nodrv_CreateWindow The explorer process failed
+            //   to start.
+            // So DISPLAY=:0 must stay. The real fix for the black screen is
+            // launching the game via 'explorer /desktop=shell,WxH' so the
+            // desktop window is created on the Wayland surface — see
+            // GuestProgramLauncherComponent where the wine command is built.
 
             // Enable the WaylandIE dmabuf forwarding in winevulkan.so.
             // Our custom thunks (winevulkan_dmabuf.c, compiled into winevulkan.so)
@@ -8029,6 +8019,22 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
         }
 
         if (!args.isEmpty() && !args.startsWith("winhandler.exe") && !args.startsWith("explorer")) {
+            // Wayland mode: bypass winhandler.exe and launch the game directly
+            // as an explorer desktop child. winhandler.exe launches the game as
+            // a SEPARATE top-level process that renders to X11 (DISPLAY=:0),
+            // bypassing the explorer Wayland desktop. The game window never
+            // reaches the Wayland bridge → black screen with sound.
+            //
+            // 41d5ea6 (the last working Wayland build) launched the game
+            // directly: 'wine explorer /desktop=shell,WxH /path/to/game.exe'
+            // The game rendered INSIDE the explorer desktop window, which
+            // winewayland.drv sent to the bridge as a 3200x1536 dmabuf frame.
+            //
+            // X11 mode: keep winhandler.exe (it manages window focus for
+            // multi-window X11 games).
+            if ("wayland".equals(displayMode)) {
+                return args;
+            }
             // Use "start /wait" to make wine wait for the child process.
             // Without /wait, winhandler.exe exits after launching the game,
             // causing wine to shut down before the game can initialize.
