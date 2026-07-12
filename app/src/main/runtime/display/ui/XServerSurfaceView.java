@@ -55,7 +55,7 @@ public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Cal
     public void setWaylandMode(boolean wayland) {
         this.waylandMode = wayland;
         if (wayland) {
-            setZOrderMediaOverlay(true);
+            setZOrderOnTop(true);
         }
     }
 
@@ -208,11 +208,7 @@ public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Cal
     private void startRenderThreadIfNeeded() {
         if (renderThread != null && renderThread.isAlive()) return;
         if (waylandMode) {
-            android.util.Log.i("XServerSurfaceView", "Wayland mode — render thread CONTINUOUSLY (parent activation)");
-            running = true;
-            renderMode = RENDERMODE_CONTINUOUSLY;
-            renderThread = new Thread(this::renderLoop, "VkRenderer");
-            renderThread.start();
+            android.util.Log.i("XServerSurfaceView", "Wayland mode — skipping VulkanRenderer render thread");
             return;
         }
         running = true;

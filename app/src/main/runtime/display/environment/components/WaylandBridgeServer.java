@@ -61,8 +61,14 @@ public class WaylandBridgeServer {
         this.hostView = view;
         this.context = ctx != null ? ctx.getApplicationContext() : null;
         running = true;
+        // Release stale presentLayer from previous session — its parent
+        // SurfaceControl may have been destroyed, making it orphaned.
+        if (presentLayer != null) {
+            try { presentLayer.release(); } catch (Exception ignored) {}
+            presentLayer = null;
+        }
+        frameIndex = 0;
         try {
-            // Close stale socket from previous launch before creating a new one.
             if (serverSocket != null) {
                 try { serverSocket.close(); } catch (IOException ignored) {}
                 serverSocket = null;
