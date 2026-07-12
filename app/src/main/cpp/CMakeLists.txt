@@ -335,6 +335,61 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/bionic-libs/lib/libwayland-server.a")
         ${CMAKE_CURRENT_SOURCE_DIR}/bionic-libs/lib/libffi.a
         -Wl,--no-whole-archive
     )
+
+    # ------------------------------------------------------------------
+    # Target 3: libvk_layer_waylandie_dmabuf.so (Vulkan implicit layer)
+    #
+    # This is the Trojan-Blit Vulkan layer that intercepts:
+    #   - vkCreateInstance: strips layer info, translates VK_KHR_win32_surface
+    #     → VK_KHR_xlib_surface (Turnip supports xlib, not win32)
+    #   - vkCreateSwapchainKHR: creates real swapchain + exportable staging
+    #     images (Image B) per swapchain image
+    #   - vkQueuePresentKHR: blits real_image → staging_image (GPU blit),
+    #     exports staging as dmabuf fd, sends to bridge via socket
+    #
+    # The layer is installed as an implicit Vulkan layer by
+    # WaylandDriverInstaller.installDmabufLayer() and enabled at runtime
+    # via WAYLANDIE_DMABUF_LAYER_ENABLE=1 env var.
+    #
+    # Without this layer, DXVK's vkCreateInstance fails because the HOST
+    # driver (Turnip) doesn't support VK_KHR_win32_surface. The layer
+    # translates it to VK_KHR_xlib_surface which Turnip DOES support.
+    # ------------------------------------------------------------------
+    add_library(vk_layer_waylandie_dmabuf SHARED
+        vulkan_layer/waylandie_dmabuf_layer.c
+    )
+
+    set_target_properties(vk_layer_waylandie_dmabuf PROPERTIES
+        PREFIX "lib"
+        OUTPUT_NAME "vk_layer_waylandie_dmabuf"
+        SUFFIX ".so"
+    )
+
+    target_include_directories(vk_layer_waylandie_dmabuf PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/vulkan_layer
+    )
+
+    target_compile_definitions(vk_layer_waylandie_dmabuf PRIVATE
+        _GNU_SOURCE
+        __ANDROID_MIN_SDK_VERSION__=31
+    )
+
+    target_compile_options(vk_layer_waylandie_dmabuf PRIVATE
+        -fPIC -O2 -Wno-unused-function -Wno-implicit-function-declaration
+        -D__ANDROID_MIN_SDK_VERSION__=31
+        -include ${CMAKE_CURRENT_SOURCE_DIR}/android_api_override.h
+    )
+
+    find_library(log-lib-layer log)
+    find_library(android-lib-layer android)
+    target_link_libraries(vk_layer_waylandie_dmabuf
+        ${log-lib-layer}
+        ${android-lib-layer}
+        vulkan
+        dl
+        pthread
+    )
 else()
     message(STATUS "bionic-libs NOT found — skipping waylandie targets (will use X11 fallback)")
 endif()
