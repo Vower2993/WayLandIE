@@ -6597,26 +6597,27 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
             envVars.put("WINEDLLOVERRIDES", wlOverrides);
             Log.i("XServerDisplayActivity", "Wayland WINEDLLOVERRIDES: " + wlOverrides);
 
-            // Keep DISPLAY=:0 (set by GuestProgramLauncherComponent.java:907).
-            // Do NOT clear it. DISPLAY=:0 is needed for:
-            //   1. Explorer.exe probes Xvfb to read display config (resolution,
-            //      color depth) via lock_display_devices. Without DISPLAY, this
-            //      fails with "Failed to read display config" → explorer can't
-            //      initialize display settings → can't load graphics driver →
-            //      nodrv_CreateWindow.
-            //   2. Wine's USER_LoadDriver uses the display config to set up
-            //      the display device GUID before loading the graphics driver.
+            // CRITICAL: Clear DISPLAY in Wayland mode.
             //
-            // To prevent winex11.drv from creating a desktop (which would
-            // conflict with winewayland.drv), we set Graphics="wayland" ONLY
-            // (not "wayland,x11") in WaylandDriverInstaller. With Graphics="wayland",
-            // USER_LoadDriver only tries winewayland.drv — winex11.drv is never
-            // loaded even though DISPLAY=:0 is set.
+            // The working 41d5ea6 build did NOT set DISPLAY at all — Wine was
+            // forced to use winewayland.drv for ALL rendering (desktop + game +
+            // cursor). This produced full-desktop dmabuf frames (3200x1536).
             //
-            // CAUSE AND EFFECT:
-            // CAUSE: DISPLAY="" prevented explorer from reading display config
-            // EFFECT: Keep DISPLAY=:0 + Graphics="wayland" only → explorer reads
-            //   config from Xvfb, loads winewayland.drv exclusively, no x11 conflict
+            // The current build sets DISPLAY=:0 (for Xvfb), which causes Wine
+            // to render the DESKTOP to X11 instead of Wayland. Only tiny UI
+            // elements (cursors, 1280x128) make it through the Wayland bridge.
+            // The result: black screen with sound playing in the background.
+            //
+            // Clearing DISPLAY forces Wine to use winewayland.drv exclusively,
+            // matching the 41d5ea6 architecture. The bridge receives the full
+            // desktop as SHM→dmabuf and presents it via SurfaceControl.
+            //
+            // The previous comment said "DISPLAY=''  prevented explorer from
+            // reading display config" — but 41d5ea6 proved this is NOT a real
+            // issue. winewayland.drv provides display config via wl_output,
+            // so explorer doesn't need X11 for display config.
+            envVars.put("DISPLAY", "");
+            Log.i("XServerDisplayActivity", "Wayland mode: cleared DISPLAY to force Wayland-only rendering");
 
             // Enable the WaylandIE dmabuf forwarding in winevulkan.so.
             // Our custom thunks (winevulkan_dmabuf.c, compiled into winevulkan.so)
