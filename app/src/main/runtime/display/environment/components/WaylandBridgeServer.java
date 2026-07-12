@@ -70,18 +70,17 @@ public class WaylandBridgeServer {
             presentLayer = null;
         }
         frameIndex = 0;
-        try {
-            if (serverSocket != null) {
-                try { serverSocket.close(); } catch (IOException ignored) {}
-                serverSocket = null;
-            }
-            serverSocket = new LocalServerSocket(SOCKET_NAME);
-            Log.i(TAG, "Listening on abstract socket: " + SOCKET_NAME);
-        } catch (IOException e) {
-            Log.e(TAG, "Failed to create server socket", e);
-            return;
+        // Close any existing server socket from a previous start() call.
+        if (serverSocket != null) {
+            try { serverSocket.close(); } catch (IOException ignored) {}
+            serverSocket = null;
         }
+        // Start the bind+accept thread. The thread retries binding with
+        // exponential backoff if the abstract socket is still held by a
+        // stale process from a previous session ("Address already in use").
+        // This matches the 41d5ea6 BridgeLocalServer pattern.
         acceptThread = new Thread(this::acceptLoop, "wl-bridge-server");
+        acceptThread.setDaemon(true);
         acceptThread.start();
     }
 
@@ -90,6 +89,10 @@ public class WaylandBridgeServer {
         if (serverSocket != null) {
             try { serverSocket.close(); } catch (IOException ignored) {}
             serverSocket = null;
+        }
+        if (acceptThread != null) {
+            acceptThread.interrupt();
+            acceptThread = null;
         }
         if (presentLayer != null) {
             try {
@@ -101,16 +104,62 @@ public class WaylandBridgeServer {
         }
     }
 
+    /**
+     * Bind+accept loop with exponential backoff.
+     *
+     * Ported from 41d5ea6's BridgeLocalServer.run(). When the abstract socket
+     * is still held by a stale process (common after force-close → relaunch),
+     * the bind fails with "Address already in use". Instead of giving up,
+     * we retry with exponential backoff (100ms → 5s) until the OS releases
+     * the socket. Once bound, we accept connections in a loop. If the accept
+     * loop fails, we close and re-bind.
+     */
     private void acceptLoop() {
+        long retryDelayMs = 100L;
         while (running) {
             try {
-                LocalSocket client = serverSocket.accept();
-                Log.i(TAG, "Bridge client connected");
-                handleClient(client);
+                serverSocket = new LocalServerSocket(SOCKET_NAME);
+                Log.i(TAG, "Listening on abstract socket: " + SOCKET_NAME);
+                retryDelayMs = 100L;  // Reset backoff on successful bind
+                while (running) {
+                    try {
+                        LocalSocket client = serverSocket.accept();
+                        Log.i(TAG, "Bridge client connected");
+                        // Handle each client in a separate thread so multiple
+                        // bridge connections (input-stream + dmabuf-present)
+                        // can be served simultaneously.
+                        Thread clientThread = new Thread(
+                                () -> handleClient(client),
+                                "wl-bridge-client");
+                        clientThread.setDaemon(true);
+                        clientThread.start();
+                    } catch (IOException e) {
+                        if (running) {
+                            Log.w(TAG, "Accept error: " + e.getMessage());
+                        }
+                    }
+                }
             } catch (IOException e) {
-                if (running) Log.w(TAG, "Accept error: " + e.getMessage());
+                if (running) {
+                    Log.w(TAG, "Bind failed (will retry in " + retryDelayMs
+                            + "ms): " + e.getMessage());
+                    try {
+                        Thread.sleep(retryDelayMs);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    }
+                    // Exponential backoff: double each retry, cap at 5s.
+                    retryDelayMs = Math.min(retryDelayMs * 2, 5000L);
+                }
+            } finally {
+                if (serverSocket != null) {
+                    try { serverSocket.close(); } catch (IOException ignored) {}
+                    serverSocket = null;
+                }
             }
         }
+        Log.i(TAG, "Bridge server thread exiting");
     }
 
     private void handleClient(LocalSocket client) {
