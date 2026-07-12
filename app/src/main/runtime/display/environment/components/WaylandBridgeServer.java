@@ -1,6 +1,8 @@
 package com.winlator.cmod.runtime.display.environment.components;
 
 import android.content.Context;
+import android.graphics.PixelFormat;
+import android.graphics.Rect;
 import android.net.LocalServerSocket;
 import android.net.LocalSocket;
 import android.util.Log;
@@ -309,20 +311,30 @@ public class WaylandBridgeServer {
             layerH = h;
         }
         try {
-            // Child of SurfaceView's SurfaceControl. The VulkanRenderer runs
-            // in CONTINUOUS mode to keep the parent active, so the child
-            // presentLayer composites on top.
+            // Match the working 41d5ea6 LinuxWindowActivity.ensurePresentLayer():
+            //   - setFormat(RGBA_8888) + setOpaque(true) — required for the native
+            //     present code's ASurfaceTransaction_setBufferTransparency(TRANSLUCENT)
+            //     + setBufferAlpha(NUDGE_ALPHA) to composite correctly
+            //   - setHidden(false) — visible from creation
+            //   - Transaction: setAlpha(1.0) + setBufferSize + setCrop — full-frame crop
+            //     so SurfaceFlinger composites the entire buffer
             presentLayer = new SurfaceControl.Builder()
-                .setName("waylandie-present")
+                .setName("WayLandIELinuxWindowLayer:waylandie-present")
                 .setParent(hostView.getSurfaceControl())
                 .setBufferSize(layerW, layerH)
+                .setFormat(PixelFormat.RGBA_8888)
+                .setOpaque(true)
+                .setHidden(false)
                 .build();
             width = layerW;
             height = layerH;
             new SurfaceControl.Transaction()
                 .setLayer(presentLayer, 10)
                 .setVisibility(presentLayer, true)
-                .setPosition(presentLayer, 0, 0)
+                .setAlpha(presentLayer, 1.0f)
+                .setPosition(presentLayer, 0.0f, 0.0f)
+                .setBufferSize(presentLayer, layerW, layerH)
+                .setCrop(presentLayer, new Rect(0, 0, layerW, layerH))
                 .apply();
             Log.i(TAG, "Created presentLayer: " + layerW + "x" + layerH + " (source=" + w + "x" + h + ")");
         } catch (Exception e) {

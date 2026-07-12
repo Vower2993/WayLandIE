@@ -6691,19 +6691,13 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
                 }
             });
             waylandBridgeServer.start(xServerView, this);
-            // Pass the ANativeWindow to winevulkan NOW — surfaceCreated fired
-            // before setupUI, so WaylandBridgeServer wasn't loaded yet and
-            // nativeSetAnativeWindow was silently skipped. Call it here after
-            // the bridge server (and its native library) is loaded.
-            if (xServerView.getHolder().getSurface() != null &&
-                    xServerView.getHolder().getSurface().isValid()) {
-                try {
-                    waylandBridgeServer.nativeSetAnativeWindow(xServerView.getHolder().getSurface());
-                    Log.i("XServerDisplayActivity", "Set ANativeWindow for Vulkan surface (from setupUI)");
-                } catch (UnsatisfiedLinkError e) {
-                    Log.e("XServerDisplayActivity", "Failed to set ANativeWindow", e);
-                }
-            }
+            // NOTE: do NOT call nativeSetAnativeWindow here.
+            // The working 41d5ea6 build does NOT set WAYLANDIE_ANATIVE_WINDOW.
+            // Setting it makes Wine render directly to the Android Surface via
+            // vkCreateAndroidSurfaceKHR — competing with the bridge dmabuf path.
+            // Without it, Wine uses vkCreateWaylandSurfaceKHR on wayland-0,
+            // the bridge receives SHM, converts to dmabuf, and Java presents via
+            // ASurfaceTransaction. This is the single-path architecture that works.
         }
         final VulkanRenderer renderer = xServerView.getRenderer();
         // Match guest libvulkan so imported AHB tiling matches the producer.

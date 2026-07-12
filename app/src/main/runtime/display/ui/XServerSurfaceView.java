@@ -54,9 +54,12 @@ public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Cal
 
     public void setWaylandMode(boolean wayland) {
         this.waylandMode = wayland;
-        if (wayland) {
-            setZOrderOnTop(true);
-        }
+        // NOTE: do NOT call setZOrderOnTop(true) — the working 41d5ea6 build
+        // does not use it. setZOrderOnTop puts the SurfaceView's surface above
+        // all other windows in the container, which prevents the child
+        // presentLayer (parented to this SurfaceView's SurfaceControl) from
+        // compositing correctly above TouchpadView/InputControlsView overlays.
+        // The default Z-ordering (below overlays) is what 41d5ea6 uses.
     }
 
     /** Dup the dmabuf fd via native dup() to avoid fdsan ownership conflicts. */
@@ -162,12 +165,13 @@ public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Cal
         if (!waylandMode) {
             renderer.attachSurface(holder.getSurface());
         }
-        try {
-            com.winlator.cmod.runtime.display.environment.components.WaylandBridgeServer
-                    .nativeSetAnativeWindow(holder.getSurface());
-        } catch (UnsatisfiedLinkError e) {
-            // waylandie_display_native not loaded — X11 mode, ignore
-        }
+        // NOTE: do NOT call nativeSetAnativeWindow in Wayland mode.
+        // The working 41d5ea6 build does NOT set the WAYLANDIE_ANATIVE_WINDOW env var.
+        // Setting it makes Wine's winewayland.drv use vkCreateAndroidSurfaceKHR on the
+        // Android Surface directly — competing with the bridge dmabuf path and causing
+        // a black screen. Without it, Wine uses vkCreateWaylandSurfaceKHR on the
+        // wl_surface (WAYLAND_DISPLAY=wayland-0), the bridge receives the buffer,
+        // converts SHM→dmabuf, and sends it to Java via the socket. Single path, no conflict.
 
         startRenderThreadIfNeeded();
     }
