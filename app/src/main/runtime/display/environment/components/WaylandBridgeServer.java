@@ -1,5 +1,9 @@
 package com.winlator.cmod.runtime.display.environment.components;
 
+// WaylandBridgeServer — receives dmabuf frames from the bridge binary and
+// presents them via SurfaceControl. Also handles the input-stream protocol
+// (long-lived connection for input events) and protocol handshake commands.
+
 import android.content.Context;
 import android.graphics.PixelFormat;
 import android.graphics.Rect;
@@ -11,6 +15,7 @@ import android.view.SurfaceView;
 import com.winlator.cmod.runtime.display.ui.XServerSurfaceView;
 import java.io.*;
 import java.nio.ByteBuffer;
+import java.util.Locale;
 
 /** Receives dmabuf frames from the bridge and presents via SurfaceControl. */
 public class WaylandBridgeServer {
@@ -19,6 +24,7 @@ public class WaylandBridgeServer {
 
     private LocalServerSocket serverSocket;
     private Thread acceptThread;
+    private java.util.concurrent.CountDownLatch socketBoundLatch;
     private volatile boolean running = false;
     private SurfaceControl presentLayer;
     private SurfaceView hostView;
@@ -79,9 +85,26 @@ public class WaylandBridgeServer {
         // exponential backoff if the abstract socket is still held by a
         // stale process from a previous session ("Address already in use").
         // This matches the 41d5ea6 BridgeLocalServer pattern.
+        socketBoundLatch = new java.util.concurrent.CountDownLatch(1);
         acceptThread = new Thread(this::acceptLoop, "wl-bridge-server");
         acceptThread.setDaemon(true);
         acceptThread.start();
+        // Wait briefly for the socket to bind so the bridge binary (launched
+        // right after this by WaylandBridgeComponent) doesn't race ahead and
+        // get ECONNREFUSED on its first connect attempt. The bridge binary's
+        // input-stream connect is single-shot (no retry), so if it races it
+        // fails permanently. 2s max wait — if bind takes longer (stale socket
+        // + backoff), the bridge's per-frame dmabuf-present connect will retry.
+        try {
+            socketBoundLatch.await(2, java.util.concurrent.TimeUnit.SECONDS);
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
+        }
+        if (serverSocket != null) {
+            Log.i(TAG, "Socket bound before start() returned");
+        } else {
+            Log.w(TAG, "Socket not yet bound after 2s wait — bridge may retry connect");
+        }
     }
 
     public void stop() {
@@ -120,6 +143,11 @@ public class WaylandBridgeServer {
             try {
                 serverSocket = new LocalServerSocket(SOCKET_NAME);
                 Log.i(TAG, "Listening on abstract socket: " + SOCKET_NAME);
+                // Signal start() that the socket is bound — allows the bridge
+                // binary to be launched without racing the bind.
+                if (socketBoundLatch != null) {
+                    socketBoundLatch.countDown();
+                }
                 retryDelayMs = 100L;  // Reset backoff on successful bind
                 while (running) {
                     try {
@@ -164,39 +192,35 @@ public class WaylandBridgeServer {
 
     private void handleClient(LocalSocket client) {
         try {
-            // Use the socket's FileDescriptor for ancillary data (SCM_RIGHTS)
-            java.io.FileDescriptor fd = client.getFileDescriptor();
             InputStream is = client.getInputStream();
             OutputStream os = client.getOutputStream();
 
+            // Read the FIRST command line to decide what kind of connection this is.
+            // 'input-stream' is a long-lived connection (bridge keeps it open to
+            // receive input events). All other commands are request-response.
+            String firstCommand = readLine(is);
+            if (firstCommand == null) return;
+            firstCommand = firstCommand.trim();
+            if (firstCommand.isEmpty()) return;
+
+            // input-stream: long-lived — handle in a blocking loop and do NOT
+            // return to the request-response loop.
+            if (isInputStreamCommand(firstCommand)) {
+                handleInputStream(os, is);
+                return;
+            }
+
+            // Request-response loop for all other commands (dmabuf-present, etc.)
+            String command = firstCommand;
             while (running) {
-                // Read command line
-                ByteArrayOutputStream baos = new ByteArrayOutputStream();
-                int b;
-                while ((b = is.read()) >= 0) {
-                    if (b == '\n') break;
-                    baos.write(b);
-                }
-                if (b < 0) break;
-
-                String command = baos.toString().trim();
-                if (command.isEmpty()) continue;
-
                 // Check for ancillary data (dmabuf fd sent via SCM_RIGHTS)
-                // LocalSocket ancillary data is available via getAncillaryFileDescriptors
                 java.io.FileDescriptor[] ancillary = client.getAncillaryFileDescriptors();
                 int dmabufFd = -1;
                 // CRITICAL: do NOT use try-with-resources for the pfd here.
                 // ParcelFileDescriptor.dup() creates a pfd that OWNS the
-                // duplicated fd. The OLD code used try-with-resources, which
-                // called pfd.close() at block exit — BEFORE handleCommand
-                // used the fd. This left dmabufFd as a dangling integer,
-                // causing EBADF (errno 9) in the native fstat()/dup() calls.
-                //
-                // Instead, we keep the pfd open through handleCommand, then
-                // close it AFTER the native present returns. The native code
-                // dups the fd internally if it needs to keep it, so closing
-                // the pfd here after the call is safe and prevents fd leaks.
+                // duplicated fd. Closing it before handleCommand uses the fd
+                // causes EBADF (errno 9). Keep it open through the call, close
+                // after. Native code dups the fd if it needs to keep it.
                 android.os.ParcelFileDescriptor pfd = null;
                 if (ancillary != null && ancillary.length > 0) {
                     try {
@@ -213,13 +237,17 @@ public class WaylandBridgeServer {
                 }
 
                 String response = handleCommand(command, dmabufFd);
-                // Close the pfd NOW — after handleCommand returned. The native
-                // present code has already dup'd the fd if it needs to keep it.
                 if (pfd != null) {
                     try { pfd.close(); } catch (Exception ignored) {}
                 }
                 os.write((response + "\n").getBytes());
                 os.flush();
+
+                // Read next command line for the next iteration.
+                String nextCommand = readLine(is);
+                if (nextCommand == null) break;
+                command = nextCommand.trim();
+                if (command.isEmpty()) break;
             }
         } catch (IOException e) {
             Log.w(TAG, "Client error: " + e.getMessage());
@@ -228,20 +256,127 @@ public class WaylandBridgeServer {
         }
     }
 
-    private String handleCommand(String command, int dmabufFd) {
-        if (command.startsWith("waylandie-bridge hello") || command.startsWith("hello")) {
-            return "waylandie-bridge hello-ack version=1 features=dmabuf-present";
+    private static final String BRIDGE_COMMANDS =
+            "hello,ping,caps,display,vulkan,adrenotools,contract,buffers,sync,native,compositor,compositor-open,compositor-status,window-add,window-remove,window-status,fdtest,syncfd-test,dmabuf-test,dmabuf-meta,dmabuf-import-probe,dmabuf-present,kgsl-import-probe,ahb-export-probe,ahb-present-probe,ahb-ring-probe,status,input,input-stream";
+
+    /** Check if a command is the input-stream handshake. */
+    private static boolean isInputStreamCommand(String command) {
+        if (command == null) return false;
+        String trimmed = command.trim();
+        int space = trimmed.indexOf(' ');
+        String name = space < 0 ? trimmed : trimmed.substring(0, space);
+        return "input-stream".equals(name.toLowerCase(Locale.US));
+    }
+
+    /**
+     * Handle the input-stream protocol — a long-lived connection where the
+     * bridge sends input events (touch, key, clipboard) as line-delimited
+     * messages. We acknowledge with status=pass and then block reading lines
+     * until the bridge disconnects.
+     *
+     * Ported from 41d5ea6 MainActivity.handleBridgeInputStream().
+     */
+    private void handleInputStream(OutputStream os, InputStream is) {
+        Log.i(TAG, "input-stream attached");
+        try {
+            os.write("waylandie-bridge input-stream status=pass protocol=input-v1\n".getBytes());
+            os.flush();
+        } catch (IOException e) {
+            Log.w(TAG, "input-stream ack write failed: " + e.getMessage());
+            return;
         }
-        if (command.startsWith("waylandie-bridge ping") || command.startsWith("ping")) {
+        // Block reading input event lines until the bridge disconnects.
+        // We don't process the events yet (input routing is handled elsewhere
+        // via XServer), but we MUST keep the connection alive so the bridge
+        // considers input-stream attached and enables input forwarding.
+        try {
+            StringBuilder sb = new StringBuilder(256);
+            while (running) {
+                int b = is.read();
+                if (b < 0) break;
+                if (b == '\n') {
+                    if (sb.length() > 0) {
+                        // Log input events at debug level for diagnostics.
+                        Log.d(TAG, "input-stream event: " + sb);
+                        sb.setLength(0);
+                    }
+                    continue;
+                }
+                if (sb.length() < 65536) sb.append((char) b);
+            }
+        } catch (IOException e) {
+            Log.i(TAG, "input-stream detached: " + e.getMessage());
+        }
+        Log.i(TAG, "input-stream detached");
+    }
+
+    /** Read a single line (up to '\n') from the stream. Returns null on EOF. */
+    private static String readLine(InputStream is) throws IOException {
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        int b;
+        while ((b = is.read()) >= 0) {
+            if (b == '\n') break;
+            baos.write(b);
+        }
+        if (b < 0 && baos.size() == 0) return null;
+        return baos.toString();
+    }
+
+    private String handleCommand(String command, int dmabufFd) {
+        String name = command.trim();
+        int space = name.indexOf(' ');
+        if (space >= 0) name = name.substring(0, space);
+
+        if ("hello".equals(name)) {
+            return "waylandie-bridge hello-ack version=1 mode=control+graphics-contract";
+        }
+        if ("ping".equals(name)) {
             return "waylandie-bridge pong version=1";
         }
-        if (command.startsWith("waylandie-bridge caps") || command.startsWith("caps")) {
-            return "waylandie-bridge caps version=1 features=dmabuf-present,fdtest";
+        if ("caps".equals(name)) {
+            // Full caps response matching 41d5ea6 — the bridge binary parses
+            // fields like 'native-socket', 'commands', 'producer' to decide
+            // how to send frames and input. A truncated response causes the
+            // bridge to skip features or fail to connect.
+            return String.format(Locale.US,
+                    "waylandie-bridge caps version=1 transport=tcp-loopback " +
+                    "native-transport=unix-abstract native-socket=%s transport-next=unix-socket " +
+                    "commands=%s " +
+                    "features=buffer-meta,compositor-endpoint,android-multi-window," +
+                    "sync-placeholder,adrenotools-loader,fdtest,syncfd-test,dmabuf-test," +
+                    "dmabuf-meta,dmabuf-import-probe,dmabuf-present,kgsl-import-probe," +
+                    "ahb-export-probe,ahb-present-probe,ahb-ring-probe,fd-future " +
+                    "producer=dmabuf-present-vulkan contract=buffer-meta-only " +
+                    "compositor=android-presenter-endpoint windows=activity-per-toplevel " +
+                    "fd-passing=fdtest,syncfd-test,dmabuf-test,dmabuf-meta,dmabuf-import-probe," +
+                    "dmabuf-present,kgsl-import-probe,ahb-export-probe,ahb-present-probe,ahb-ring-probe " +
+                    "graphics-fd-passing=adrenotools-loader,kgsl-import-probe,dmabuf-image-import," +
+                    "dmabuf-present-gpu,ahb-vk-target buffer=fd-future sync=eventfd-control-probe " +
+                    "layer=%dx%d final-copy=forbidden",
+                    SOCKET_NAME, BRIDGE_COMMANDS, width, height);
         }
-        if (command.contains("dmabuf-present")) {
+        // window-add / window-remove: the bridge sends these when Wine
+        // toplevels are created/destroyed. We don't need to do anything
+        // (XServerDisplayActivity handles window management via X11),
+        // but we MUST return status=pass so the bridge doesn't treat
+        // them as errors and abort.
+        if ("window-add".equals(name) || "window-remove".equals(name) ||
+                "window-status".equals(name)) {
+            return "waylandie-bridge " + name + " status=pass";
+        }
+        // status query — return current bridge state.
+        if ("status".equals(name)) {
+            return "waylandie-bridge status=pass frames=" + frameIndex +
+                    " layer=" + width + "x" + height;
+        }
+        if ("dmabuf-present".equals(name) || command.contains("dmabuf-present")) {
             return handleDmaBufPresent(command, dmabufFd);
         }
-        return "waylandie-bridge unknown-command";
+        // Unknown command — return pass instead of unknown-command so the
+        // bridge doesn't abort on protocol mismatch. 41d5ea6 handles ~29
+        // commands; we handle the critical ones and pass-through the rest.
+        Log.w(TAG, "Unhandled bridge command: " + name + " (returning status=pass)");
+        return "waylandie-bridge " + name + " status=pass";
     }
 
     private String handleDmaBufPresent(String command, int dmabufFd) {
