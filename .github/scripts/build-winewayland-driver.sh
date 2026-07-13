@@ -966,6 +966,27 @@ else
   echo "WARNING: vulkan-1-proxy.c not found — skipping PE proxy build"
 fi
 
+# === Diagnostic: check if winevulkan.so has symbol tables (for DAC patching) ===
+echo "=== Checking winevulkan.so symbol table ==="
+WINEVK_SO="$PROTON_OUT/lib/wine/aarch64-unix/winevulkan.so"
+if [ -f "$WINEVK_SO" ]; then
+  echo "winevulkan.so size: $(stat -c%s "$WINEVK_SO") bytes"
+  # Check if .symtab exists (non-stripped)
+  SYMTAB_COUNT=$(readelf -S "$WINEVK_SO" 2>/dev/null | grep -c "\.symtab" || echo 0)
+  echo ".symtab sections found: $SYMTAB_COUNT"
+  if [ "$SYMTAB_COUNT" -gt 0 ]; then
+    echo "winevulkan.so is NOT stripped — DAC binary patching is possible"
+    # Look for key symbols
+    readelf -s "$WINEVK_SO" 2>/dev/null | grep -iE "entry_table|vkCreateSwapchain|vkQueuePresent|__wine_init_unix" | head -10
+  else
+    echo "winevulkan.so IS stripped — DAC binary patching requires .symtab"
+    echo "Checking .dynsym for exported symbols..."
+    readelf -s "$WINEVK_SO" 2>/dev/null | grep -iE "vkCreate|vkQueue|__wine" | head -10
+  fi
+else
+  echo "WARNING: winevulkan.so not found at $WINEVK_SO"
+fi
+
 ( cd "$PROTON_OUT" && zip -r "$WORKSPACE/app/src/main/assets/winewayland-driver.zip" lib/ )
 
 echo "=== zip contents ==="
