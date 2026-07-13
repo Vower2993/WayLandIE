@@ -943,6 +943,8 @@ if [ -f "$PROXY_SRC" ]; then
     -o "$PROTON_OUT/lib/wine/aarch64-windows/vulkan-1.dll" \
     "$PROXY_SRC" \
     -I"$VULKAN_INCLUDE" \
+    -DVK_USE_PLATFORM_WIN32_KHR=1 \
+    -DVK_USE_PLATFORM_XLIB_KHR=1 \
     -lkernel32 \
     -Wl,--enable-stdcall-fixup \
     -Wl,-subsystem,windows \
