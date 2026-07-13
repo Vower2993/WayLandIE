@@ -6604,6 +6604,12 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
             envVars.put("WINEDLLOVERRIDES", wlOverrides);
             Log.i("XServerDisplayActivity", "Wayland WINEDLLOVERRIDES: " + wlOverrides);
 
+            // Set DXVK config to prevent display mode change crash on Wayland.
+            // dxvk.conf is installed to system32/ by WaylandDriverInstaller.
+            // DXVK looks for dxvk.conf in the working directory and system32.
+            envVars.put("DXVK_D3D9_ALLOW_FULLSCREEN", "False");
+            envVars.put("DXVK_D3D11_ALLOW_FULLSCREEN", "False");
+
             // Keep DISPLAY=:0 (set by GuestProgramLauncherComponent.java:907).
             // Clearing DISPLAY causes nodrv_CreateWindow — explorer can't read
             // display config without X11. Confirmed by b35bbec build (2026-07-12):

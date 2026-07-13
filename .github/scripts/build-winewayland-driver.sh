@@ -981,6 +981,22 @@ XLIBSTUB
   else
     echo "WARNING: vulkan-1.dll PE proxy not built or too small"
   fi
+
+  # Create dxvk.conf — prevents display mode change crash on Wayland.
+  # DXVK calls ChangeDisplaySettingsExW for fullscreen games. Wayland
+  # doesn't support arbitrary display mode changes, so this returns
+  # failure → game crashes with NULL pointer deref.
+  # Setting allowFullscreen=False tells DXVK to skip the display mode
+  # change and render in windowed mode inside the virtual desktop.
+  echo "=== Creating dxvk.conf ==="
+  mkdir -p "$PROTON_OUT/lib/wine"
+  cat > "$PROTON_OUT/lib/wine/dxvk.conf" << 'DXVKCONF'
+# WayLandIE DXVK configuration
+# Prevents display mode change crash on Wayland
+d3d9.allowFullscreen = False
+d3d11.allowFullscreen = False
+DXVKCONF
+  echo "dxvk.conf created"
 else
   echo "WARNING: vulkan-1-proxy.c not found — skipping PE proxy build"
 fi

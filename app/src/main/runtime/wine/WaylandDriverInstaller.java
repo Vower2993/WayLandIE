@@ -474,6 +474,16 @@ public final class WaylandDriverInstaller {
         } else {
             Log.w(TAG, "vulkan-1.dll PE proxy not found in driver zip — DAC zero-copy disabled");
         }
+        // Copy dxvk.conf to system32 — prevents display mode change crash on Wayland.
+        // DXVK calls ChangeDisplaySettingsExW for fullscreen games. Wayland doesn't
+        // support arbitrary display mode changes → game crashes with NULL deref.
+        // dxvk.conf sets allowFullscreen=False to skip the display mode change.
+        copyIfExists(prefix, "lib/wine/dxvk.conf", system32);
+        // Also copy to the game's working directory (DXVK looks there first)
+        File dxvkConf = new File(system32, "dxvk.conf");
+        if (dxvkConf.exists()) {
+            Log.i(TAG, "Installed dxvk.conf to system32 (" + dxvkConf.length() + " bytes)");
+        }
     }
 
     /**
