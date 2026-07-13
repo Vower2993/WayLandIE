@@ -76,6 +76,13 @@ public class WaylandBridgeComponent extends EnvironmentComponent {
         File logsDir = com.winlator.cmod.runtime.system.LogManager.getLogsDir(context);
         outputLogFile = new File(logsDir, "wayland-bridge-output.log");
 
+        // Get actual screen dimensions for the bridge's Wayland output size
+        android.util.DisplayMetrics metrics = new android.util.DisplayMetrics();
+        ((android.view.WindowManager) context.getSystemService(Context.WINDOW_SERVICE))
+                .getDefaultDisplay().getRealMetrics(metrics);
+        int bridgeWidth = metrics.widthPixels > 0 ? metrics.widthPixels : 1280;
+        int bridgeHeight = metrics.heightPixels > 0 ? metrics.heightPixels : 720;
+
         List<String> cmd = new ArrayList<>();
         cmd.add(bridgeBin.getAbsolutePath());
         cmd.add("waylandie.display.bridge.v1");
@@ -84,8 +91,8 @@ public class WaylandBridgeComponent extends EnvironmentComponent {
         cmd.add("15000");
         cmd.add("0");
         cmd.add("0");
-        cmd.add("2992");
-        cmd.add("1440");
+        cmd.add(String.valueOf(bridgeWidth));
+        cmd.add(String.valueOf(bridgeHeight));
 
         ProcessBuilder pb = new ProcessBuilder(cmd);
         pb.directory(rootDir);

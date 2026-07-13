@@ -5903,10 +5903,9 @@ Java_com_winlator_cmod_runtime_display_environment_components_WaylandBridgeServe
  * Called from Java when the Android Surface is created. */
 static ANativeWindow *g_anw_ref = NULL;
 
-JNIEXPORT void JNICALL
+JNIEXPORT jstring JNICALL
 Java_com_winlator_cmod_runtime_display_environment_components_WaylandBridgeServer_nativeSetAnativeWindow(
         JNIEnv *env, jclass clazz, jobject surface) {
-    (void)env;
     (void)clazz;
     /* Release previous reference if any */
     if (g_anw_ref) {
@@ -5915,7 +5914,7 @@ Java_com_winlator_cmod_runtime_display_environment_components_WaylandBridgeServe
     }
     if (!surface) {
         setenv("WAYLANDIE_ANATIVE_WINDOW", "0", 1);
-        return;
+        return (*env)->NewStringUTF(env, "0");
     }
     /* Acquire ANativeWindow from the Surface object.
      * ANativeWindow_fromSurface returns an acquired reference.
@@ -5925,7 +5924,9 @@ Java_com_winlator_cmod_runtime_display_environment_components_WaylandBridgeServe
         char buf[32];
         snprintf(buf, sizeof(buf), "%llu", (unsigned long long)(uintptr_t)g_anw_ref);
         setenv("WAYLANDIE_ANATIVE_WINDOW", buf, 1);
+        return (*env)->NewStringUTF(env, buf);
     }
+    return (*env)->NewStringUTF(env, "0");
 }
 
 /* Native dup() — duplicate a dmabuf fd without fdsan conflicts. */

@@ -115,6 +115,9 @@ public final class WaylandDriverInstaller {
                 // that contains both aarch64 and arm64ec code. Wine's loader picks the
                 // right code path at runtime.
                 copyIfExists(prefix, "lib/wine/aarch64-windows/winewayland.drv", arm64ecDir);
+                // Copy vulkan-1.dll PE proxy to arm64ec-windows — arm64ec games
+                // (like DevilMayCry5.exe via FEX) load from this directory.
+                copyIfExists(prefix, "lib/wine/aarch64-windows/vulkan-1.dll", arm64ecDir);
                 // NOTE: winevulkan.dll NOT copied to arm64ec — stock Proton version used
             }
 

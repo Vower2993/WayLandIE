@@ -169,7 +169,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL hook_CreateWin32SurfaceKHR(
     xlib_info.pNext = NULL;
     xlib_info.flags = 0;
     xlib_info.dpy = NULL; /* adrenotools wrapper ignores this */
-    xlib_info.window = (void*)(uintptr_t)g_anative_window; /* ANativeWindow* as Window */
+    xlib_info.window = (Window)(uintptr_t)g_anative_window; /* ANativeWindow* cast to Window (unsigned long) */
 
     VkResult res = real_create_xlib(instance, &xlib_info, pAllocator, pSurface);
     LOGI("CreateWin32SurfaceKHR -> CreateXlibSurfaceKHR res=%d surface=%p\n",

@@ -6689,13 +6689,34 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
                 }
             });
             waylandBridgeServer.start(xServerView, this);
-            // NOTE: do NOT call nativeSetAnativeWindow here.
-            // The working 41d5ea6 build does NOT set WAYLANDIE_ANATIVE_WINDOW.
-            // Setting it makes Wine render directly to the Android Surface via
-            // vkCreateAndroidSurfaceKHR — competing with the bridge dmabuf path.
-            // Without it, Wine uses vkCreateWaylandSurfaceKHR on wayland-0,
-            // the bridge receives SHM, converts to dmabuf, and Java presents via
-            // ASurfaceTransaction. This is the single-path architecture that works.
+            // Set WAYLANDIE_ANATIVE_WINDOW NOW — surfaceCreated fired before
+            // setupUI, so WaylandBridgeServer wasn't loaded yet and
+            // nativeSetAnativeWindow was silently skipped in surfaceCreated.
+            // Call it here after the bridge server (and its native library) is loaded.
+            //
+            // CRITICAL: The PE proxy (vulkan-1.dll) reads this env var to create
+            // an Xlib surface via vkCreateXlibSurfaceKHR(ANativeWindow). Without
+            // this, the PE proxy falls back to winevulkan's vkCreateWin32SurfaceKHR
+            // which fails because Turnip doesn't support VK_KHR_win32_surface.
+            //
+            // The JNI nativeSetAnativeWindow calls setenv() in the Java process,
+            // but Wine is started with an EXPLICIT env array (envVars.toStringArray())
+            // that REPLACES the process env. So we must ALSO add the env var to
+            // envVars — otherwise the PE proxy's getenv() returns NULL.
+            if (xServerView.getHolder().getSurface() != null &&
+                    xServerView.getHolder().getSurface().isValid()) {
+                try {
+                    String anwValue = waylandBridgeServer.nativeSetAnativeWindow(xServerView.getHolder().getSurface());
+                    if (anwValue != null && !anwValue.isEmpty() && !"0".equals(anwValue)) {
+                        envVars.put("WAYLANDIE_ANATIVE_WINDOW", anwValue);
+                        Log.i("XServerDisplayActivity", "Set WAYLANDIE_ANATIVE_WINDOW=" + anwValue + " in envVars");
+                    } else {
+                        Log.w("XServerDisplayActivity", "WAYLANDIE_ANATIVE_WINDOW not set or zero after nativeSetAnativeWindow");
+                    }
+                } catch (UnsatisfiedLinkError e) {
+                    Log.e("XServerDisplayActivity", "Failed to set ANativeWindow", e);
+                }
+            }
         }
         final VulkanRenderer renderer = xServerView.getRenderer();
         // Match guest libvulkan so imported AHB tiling matches the producer.

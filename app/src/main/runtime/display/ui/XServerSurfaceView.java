@@ -165,13 +165,22 @@ public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Cal
         if (!waylandMode) {
             renderer.attachSurface(holder.getSurface());
         }
-        // NOTE: do NOT call nativeSetAnativeWindow in Wayland mode.
-        // The working 41d5ea6 build does NOT set the WAYLANDIE_ANATIVE_WINDOW env var.
-        // Setting it makes Wine's winewayland.drv use vkCreateAndroidSurfaceKHR on the
-        // Android Surface directly — competing with the bridge dmabuf path and causing
-        // a black screen. Without it, Wine uses vkCreateWaylandSurfaceKHR on the
-        // wl_surface (WAYLAND_DISPLAY=wayland-0), the bridge receives the buffer,
-        // converts SHM→dmabuf, and sends it to Java via the socket. Single path, no conflict.
+        // Set WAYLANDIE_ANATIVE_WINDOW for the PE proxy (vulkan-1.dll).
+        // The PE proxy reads this env var to get the ANativeWindow pointer,
+        // then calls vkCreateXlibSurfaceKHR(ANativeWindow) which adrenotools
+        // translates to vkCreateAndroidSurfaceKHR → SurfaceFlinger.
+        // Without this, the PE proxy can't create a surface and DXVK fails:
+        //   err: DxvkInstance::createInstance: Failed to create Vulkan instance
+        try {
+            // nativeSetAnativeWindow returns the ANativeWindow pointer as a string.
+            // The pointer is also set via setenv() for processes that inherit the
+            // Java process env. For Wine (which uses an explicit env array), the
+            // pointer is added to envVars in XServerDisplayActivity.setupUI().
+            com.winlator.cmod.runtime.display.environment.components.WaylandBridgeServer
+                    .nativeSetAnativeWindow(holder.getSurface());
+        } catch (UnsatisfiedLinkError e) {
+            // waylandie_display_native not loaded — X11 mode, ignore
+        }
 
         startRenderThreadIfNeeded();
     }

@@ -935,14 +935,33 @@ if [ -f "$PROXY_SRC" ]; then
   fi
   VULKAN_INCLUDE="$VULKAN_HEADERS_DIR/include"
 
+  # Create a minimal X11 stub for cross-compilation (vulkan_xlib.h needs it)
+  X11_STUB_DIR="/tmp/x11-stub/X11"
+  mkdir -p "$X11_STUB_DIR"
+  cat > "$X11_STUB_DIR/Xlib.h" << 'XLIBSTUB'
+#ifndef _STUB_XLIB_H
+#define _STUB_XLIB_H
+typedef struct _XDisplay Display;
+typedef unsigned long Window;
+typedef unsigned long XID;
+typedef unsigned long VisualID;
+typedef int Bool;
+typedef struct { int ext_data; VisualID visualid; int class;
+  unsigned long red_mask, green_mask, blue_mask; int bits_per_rgb; int map_entries; } Visual;
+#endif
+XLIBSTUB
+
   # Compile as ARM64 PE DLL with llvm-mingw
   # The proxy intercepts Vulkan calls INSIDE the Wine process, bypassing
   # adrenotools' isolated linker namespace that blocks VK_LAYER_PATH.
+  # We only need the X11 stub (not the Windows stub) because llvm-mingw
+  # provides its own windows.h.
   "$LLVM_MINGW_DIR/bin/aarch64-w64-mingw32-clang" \
     -shared \
     -o "$PROTON_OUT/lib/wine/aarch64-windows/vulkan-1.dll" \
     "$PROXY_SRC" \
     -I"$VULKAN_INCLUDE" \
+    -I"/tmp/x11-stub" \
     -DVK_USE_PLATFORM_WIN32_KHR=1 \
     -DVK_USE_PLATFORM_XLIB_KHR=1 \
     -lkernel32 \
@@ -968,8 +987,13 @@ fi
 
 # === Diagnostic: check if winevulkan.so has symbol tables (for DAC patching) ===
 echo "=== Checking winevulkan.so symbol table ==="
-WINEVK_SO="$PROTON_OUT/lib/wine/aarch64-unix/winevulkan.so"
+# winevulkan.so is in the Proton install dir, not the build output
+WINEVK_SO=$(find /tmp/proton-wine -name "winevulkan.so" -path "*/aarch64-unix/*" 2>/dev/null | head -1)
+if [ -z "$WINEVK_SO" ]; then
+  WINEVK_SO=$(find /tmp/proton-wine -name "winevulkan.so" 2>/dev/null | head -1)
+fi
 if [ -f "$WINEVK_SO" ]; then
+  echo "winevulkan.so found at: $WINEVK_SO"
   echo "winevulkan.so size: $(stat -c%s "$WINEVK_SO") bytes"
   # Check if .symtab exists (non-stripped)
   SYMTAB_COUNT=$(readelf -S "$WINEVK_SO" 2>/dev/null | grep -c "\.symtab" || echo 0)
@@ -979,12 +1003,21 @@ if [ -f "$WINEVK_SO" ]; then
     # Look for key symbols
     readelf -s "$WINEVK_SO" 2>/dev/null | grep -iE "entry_table|vkCreateSwapchain|vkQueuePresent|__wine_init_unix" | head -10
   else
-    echo "winevulkan.so IS stripped — DAC binary patching requires .symtab"
+    echo "winevulkan.so IS stripped — only .dynsym available"
     echo "Checking .dynsym for exported symbols..."
-    readelf -s "$WINEVK_SO" 2>/dev/null | grep -iE "vkCreate|vkQueue|__wine" | head -10
+    readelf -s "$WINEVK_SO" 2>/dev/null | grep -iE "vkCreate|vkQueue|__wine|unix" | head -15
+    echo "=== Section headers ==="
+    readelf -S "$WINEVK_SO" 2>/dev/null | grep -E "\.text|\.rodata|\.data|\.bss" | head -10
+  fi
+  # Also check the PE-side winevulkan.dll
+  WINEVK_DLL=$(find /tmp/proton-wine -name "winevulkan.dll" -path "*/aarch64-windows/*" 2>/dev/null | head -1)
+  if [ -n "$WINEVK_DLL" ]; then
+    echo "winevulkan.dll found at: $WINEVK_DLL ($(stat -c%s "$WINEVK_DLL") bytes)"
   fi
 else
-  echo "WARNING: winevulkan.so not found at $WINEVK_SO"
+  echo "WARNING: winevulkan.so not found in Proton source tree"
+  echo "Searching for any winevulkan files..."
+  find /tmp/proton-wine -name "winevulkan*" 2>/dev/null | head -10
 fi
 
 ( cd "$PROTON_OUT" && zip -r "$WORKSPACE/app/src/main/assets/winewayland-driver.zip" lib/ )
