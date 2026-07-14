@@ -172,6 +172,29 @@ static VkResult wayland_vulkan_surface_create(HWND hwnd, BOOL raw, const struct 
         const char *anw_env = getenv("WAYLANDIE_ANATIVE_WINDOW");
         if (!g_anative_window && anw_env)
             g_anative_window = (ANativeWindow *)(uintptr_t)strtoull(anw_env, NULL, 0);
+
+        /* Option B: If env var not set, try reading from file.
+         * surfaceCreated() writes the pointer to this file when the Surface
+         * becomes available. vkCreateInstance happens ~20-30s after Wine
+         * starts, so the file is always written by then. */
+        if (!g_anative_window) {
+            const char *anw_file = getenv("WAYLANDIE_ANATIVE_WINDOW_FILE");
+            if (!anw_file || !anw_file[0])
+                anw_file = "/data/user/0/com.tencent.ig/files/anative_window_ptr";
+            FILE *f = fopen(anw_file, "r");
+            if (f) {
+                char buf[64];
+                if (fgets(buf, sizeof(buf), f)) {
+                    unsigned long long val = strtoull(buf, NULL, 0);
+                    if (val != 0) {
+                        g_anative_window = (ANativeWindow *)(uintptr_t)val;
+                        fprintf(stderr, "WayLandIE: read ANativeWindow=%p from %s\n",
+                                (void*)g_anative_window, anw_file);
+                    }
+                }
+                fclose(f);
+            }
+        }
     }
 
     if (g_anative_window)

@@ -6612,6 +6612,11 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
             envVars.put("DXVK_D3D11_ALLOW_FULLSCREEN", "False");
             envVars.put("WINE_DISABLE_FULLSCREEN_HACK", "1");
 
+            // Option B: Set the file path where surfaceCreated writes the ANativeWindow pointer.
+            // winewayland.drv's vulkan.c reads this file as a fallback if the env var isn't set.
+            String pkgDataDir = getFilesDir().getAbsolutePath();
+            envVars.put("WAYLANDIE_ANATIVE_WINDOW_FILE", pkgDataDir + "/anative_window_ptr");
+
             // Keep DISPLAY=:0 (set by GuestProgramLauncherComponent.java:907).
             // Clearing DISPLAY causes nodrv_CreateWindow — explorer can't read
             // display config without X11. Confirmed by b35bbec build (2026-07-12):

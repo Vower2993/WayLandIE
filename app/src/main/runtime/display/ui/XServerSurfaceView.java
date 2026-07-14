@@ -177,6 +177,23 @@ public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Cal
                     .nativeSetAnativeWindow(holder.getSurface());
             anativeWindowPointer = ptr;
             android.util.Log.i("XServerSurfaceView", "surfaceCreated: ANativeWindow=" + ptr);
+            // Option B: Also write the pointer to a file so winewayland.drv can
+            // read it at vkCreateInstance time (which happens ~20-30s after Wine
+            // starts). This is a fallback for when the env var isn't set.
+            if (ptr != null && !"0".equals(ptr)) {
+                try {
+                    java.io.File dataDir = getContext().getFilesDir();
+                    java.io.File anwFile = new java.io.File(dataDir, "anative_window_ptr");
+                    java.io.FileWriter fw = new java.io.FileWriter(anwFile, false);
+                    fw.write(ptr);
+                    fw.close();
+                    android.util.Log.i("XServerSurfaceView",
+                        "Wrote ANativeWindow pointer to " + anwFile.getAbsolutePath());
+                } catch (Exception e) {
+                    android.util.Log.w("XServerSurfaceView",
+                        "Failed to write ANativeWindow file: " + e.getMessage());
+                }
+            }
         } catch (UnsatisfiedLinkError e) {
             android.util.Log.e("XServerSurfaceView", "nativeSetAnativeWindow failed", e);
             anativeWindowPointer = "0";
