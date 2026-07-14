@@ -1709,6 +1709,25 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
                     applyPreferredRefreshRate();
                 }
 
+                // OPTION A: Wait for surfaceCreated on the background thread.
+                // setupUI() runs on the UI thread and adds the SurfaceView to the
+                // layout. surfaceCreated() fires on the UI thread AFTER setupUI()
+                // returns and the view is laid out. We must NOT block the UI thread
+                // (that would prevent surfaceCreated from firing). Instead, we wait
+                // here on the background thread — surfaceCreated fires on the UI
+                // thread in parallel, sets the pointer, and notifies us.
+                if ("wayland".equals(displayMode)) {
+                    Log.i("XServerDisplayActivity", "Wayland mode: waiting for surfaceCreated (background thread)...");
+                    String anwValue = xServerView.waitForSurfaceCreated(10000);
+                    if (anwValue != null && !anwValue.isEmpty() && !"0".equals(anwValue)) {
+                        // Set it in envVars so Wine inherits it
+                        envVars.put("WAYLANDIE_ANATIVE_WINDOW", anwValue);
+                        Log.i("XServerDisplayActivity", "Set WAYLANDIE_ANATIVE_WINDOW=" + anwValue + " in envVars");
+                    } else {
+                        Log.w("XServerDisplayActivity", "WAYLANDIE_ANATIVE_WINDOW not available — relying on file fallback (Option B)");
+                    }
+                }
+
                 try {
                     setupXEnvironment();
                 } catch (PackageManager.NameNotFoundException e) {
@@ -6702,31 +6721,9 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
                 }
             });
             waylandBridgeServer.start(xServerView, this);
-            // OPTION A: Wait for surfaceCreated to fire before continuing.
-            //
-            // The ANativeWindow pointer is not available until the SurfaceView's
-            // surfaceCreated() callback fires. This happens asynchronously after
-            // the view is laid out. If we proceed to launch Wine before this,
-            // WAYLANDIE_ANATIVE_WINDOW won't be in envVars → DXVK can't create
-            // a Vulkan surface → game renders to nothing → black screen.
-            //
-            // We block here (on a background thread, not the UI thread) until
-            // surfaceCreated fires. The 5s timeout is generous — surface creation
-            // typically takes <100ms after the view is added to the layout.
-            //
-            // surfaceCreated() calls nativeSetAnativeWindow() which:
-            //   1. Calls setenv("WAYLANDIE_ANATIVE_WINDOW", pointer) in the process env
-            //   2. Stores the pointer string in xServerView.anativeWindowPointer
-            //
-            // We then copy it into envVars so Wine inherits it.
-            Log.i("XServerDisplayActivity", "Wayland mode: waiting for surfaceCreated...");
-            String anwValue = xServerView.waitForSurfaceCreated(5000);
-            if (anwValue != null && !anwValue.isEmpty() && !"0".equals(anwValue)) {
-                envVars.put("WAYLANDIE_ANATIVE_WINDOW", anwValue);
-                Log.i("XServerDisplayActivity", "Set WAYLANDIE_ANATIVE_WINDOW=" + anwValue + " in envVars");
-            } else {
-                Log.w("XServerDisplayActivity", "WAYLANDIE_ANATIVE_WINDOW not available — game will not render");
-            }
+            // NOTE: The ANativeWindow pointer wait is done in the background
+            // executor (setupXEnvironment), NOT here. This method runs on the
+            // UI thread — blocking it would prevent surfaceCreated from firing.
         }
         final VulkanRenderer renderer = xServerView.getRenderer();
         // Match guest libvulkan so imported AHB tiling matches the producer.
