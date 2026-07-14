@@ -43,6 +43,11 @@ public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Cal
     private volatile int wlStride = 0;
     private volatile int wlDrmFormat = 0;
     private volatile boolean wlFrameAvailable = false;
+    // ANativeWindow pointer (set by surfaceCreated, read by XServerDisplayActivity
+    // before Wine launches). In Wayland mode, this is passed to Wine via envVars
+    // so DXVK can create a Vulkan surface bound to this SurfaceView.
+    private volatile String anativeWindowPointer = null;
+    private final Object surfaceCreatedLock = new Object();
 
     public XServerSurfaceView(Context context, XServer xServer) {
         super(context);
@@ -157,29 +162,31 @@ public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Cal
             width = 0;
             height = 0;
         }
-        // In Wayland mode, skip VkRenderer entirely — no swapchain, no BLASTBufferQueue.
-        // The SurfaceView is used purely as a container for the presentLayer (child SurfaceControl).
-        // ASurfaceTransaction presents dmabuf content to presentLayer directly.
-        // Creating a VkRenderer swapchain would create an empty BLASTBufferQueue that
-        // prevents SurfaceFlinger from compositing the child presentLayer.
+        // In Wayland mode, the game renders directly to this SurfaceView via
+        // vkCreateXlibSurfaceKHR(ANativeWindow). The VkRenderer is NOT used —
+        // the game's DXVK swapchain IS the buffer source for the parent SurfaceView.
+        // This gives the parent a buffer so SurfaceFlinger composites child layers
+        // (presentLayer for desktop overlay) on top.
         if (!waylandMode) {
             renderer.attachSurface(holder.getSurface());
         }
-        // Set WAYLANDIE_ANATIVE_WINDOW for the PE proxy (vulkan-1.dll).
-        // The PE proxy reads this env var to get the ANativeWindow pointer,
-        // then calls vkCreateXlibSurfaceKHR(ANativeWindow) which adrenotools
-        // translates to vkCreateAndroidSurfaceKHR → SurfaceFlinger.
-        // Without this, the PE proxy can't create a surface and DXVK fails:
-        //   err: DxvkInstance::createInstance: Failed to create Vulkan instance
+        // Get the ANativeWindow pointer and store it for XServerDisplayActivity
+        // to pick up before launching Wine.
         try {
-            // nativeSetAnativeWindow returns the ANativeWindow pointer as a string.
-            // The pointer is also set via setenv() for processes that inherit the
-            // Java process env. For Wine (which uses an explicit env array), the
-            // pointer is added to envVars in XServerDisplayActivity.setupUI().
-            com.winlator.cmod.runtime.display.environment.components.WaylandBridgeServer
+            String ptr = com.winlator.cmod.runtime.display.environment.components.WaylandBridgeServer
                     .nativeSetAnativeWindow(holder.getSurface());
+            anativeWindowPointer = ptr;
+            android.util.Log.i("XServerSurfaceView", "surfaceCreated: ANativeWindow=" + ptr);
         } catch (UnsatisfiedLinkError e) {
-            // waylandie_display_native not loaded — X11 mode, ignore
+            android.util.Log.e("XServerSurfaceView", "nativeSetAnativeWindow failed", e);
+            anativeWindowPointer = "0";
+        } catch (Throwable t) {
+            android.util.Log.e("XServerSurfaceView", "surfaceCreated exception", t);
+            anativeWindowPointer = "0";
+        }
+        // Notify any thread waiting for the surface to be created (Option A: delay Wine launch).
+        synchronized (surfaceCreatedLock) {
+            surfaceCreatedLock.notifyAll();
         }
 
         startRenderThreadIfNeeded();
@@ -345,4 +352,41 @@ public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Cal
 
     public int getSurfaceWidth() { return width; }
     public int getSurfaceHeight() { return height; }
+
+    /**
+     * Returns the ANativeWindow pointer as a decimal string, or null if
+     * surfaceCreated hasn't fired yet.
+     */
+    public String getAnativeWindowPointer() {
+        return anativeWindowPointer;
+    }
+
+    /**
+     * Blocks the calling thread until surfaceCreated has fired and the
+     * ANativeWindow pointer is available. Used by XServerDisplayActivity
+     * to delay Wine launch until the Surface is ready.
+     *
+     * @param timeoutMs max time to wait
+     * @return the ANativeWindow pointer string, or "0" on timeout/error
+     */
+    public String waitForSurfaceCreated(long timeoutMs) {
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        synchronized (surfaceCreatedLock) {
+            while (anativeWindowPointer == null) {
+                long remaining = deadline - System.currentTimeMillis();
+                if (remaining <= 0) {
+                    android.util.Log.w("XServerSurfaceView",
+                        "waitForSurfaceCreated TIMEOUT after " + timeoutMs + "ms");
+                    return "0";
+                }
+                try {
+                    surfaceCreatedLock.wait(remaining);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return "0";
+                }
+            }
+        }
+        return anativeWindowPointer;
+    }
 }

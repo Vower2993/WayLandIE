@@ -6605,10 +6605,12 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
             Log.i("XServerDisplayActivity", "Wayland WINEDLLOVERRIDES: " + wlOverrides);
 
             // Set DXVK config to prevent display mode change crash on Wayland.
-            // dxvk.conf is installed to system32/ by WaylandDriverInstaller.
-            // DXVK looks for dxvk.conf in the working directory and system32.
+            // Wayland doesn't support ChangeDisplaySettingsEx → DXVK crashes
+            // when trying to enter fullscreen. These env vars + WINE_DISABLE_FULLSCREEN_HACK
+            // force DXVK into windowed mode inside the virtual desktop.
             envVars.put("DXVK_D3D9_ALLOW_FULLSCREEN", "False");
             envVars.put("DXVK_D3D11_ALLOW_FULLSCREEN", "False");
+            envVars.put("WINE_DISABLE_FULLSCREEN_HACK", "1");
 
             // Keep DISPLAY=:0 (set by GuestProgramLauncherComponent.java:907).
             // Clearing DISPLAY causes nodrv_CreateWindow — explorer can't read
@@ -6695,33 +6697,30 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
                 }
             });
             waylandBridgeServer.start(xServerView, this);
-            // Set WAYLANDIE_ANATIVE_WINDOW NOW — surfaceCreated fired before
-            // setupUI, so WaylandBridgeServer wasn't loaded yet and
-            // nativeSetAnativeWindow was silently skipped in surfaceCreated.
-            // Call it here after the bridge server (and its native library) is loaded.
+            // OPTION A: Wait for surfaceCreated to fire before continuing.
             //
-            // CRITICAL: The PE proxy (vulkan-1.dll) reads this env var to create
-            // an Xlib surface via vkCreateXlibSurfaceKHR(ANativeWindow). Without
-            // this, the PE proxy falls back to winevulkan's vkCreateWin32SurfaceKHR
-            // which fails because Turnip doesn't support VK_KHR_win32_surface.
+            // The ANativeWindow pointer is not available until the SurfaceView's
+            // surfaceCreated() callback fires. This happens asynchronously after
+            // the view is laid out. If we proceed to launch Wine before this,
+            // WAYLANDIE_ANATIVE_WINDOW won't be in envVars → DXVK can't create
+            // a Vulkan surface → game renders to nothing → black screen.
             //
-            // The JNI nativeSetAnativeWindow calls setenv() in the Java process,
-            // but Wine is started with an EXPLICIT env array (envVars.toStringArray())
-            // that REPLACES the process env. So we must ALSO add the env var to
-            // envVars — otherwise the PE proxy's getenv() returns NULL.
-            if (xServerView.getHolder().getSurface() != null &&
-                    xServerView.getHolder().getSurface().isValid()) {
-                try {
-                    String anwValue = waylandBridgeServer.nativeSetAnativeWindow(xServerView.getHolder().getSurface());
-                    if (anwValue != null && !anwValue.isEmpty() && !"0".equals(anwValue)) {
-                        envVars.put("WAYLANDIE_ANATIVE_WINDOW", anwValue);
-                        Log.i("XServerDisplayActivity", "Set WAYLANDIE_ANATIVE_WINDOW=" + anwValue + " in envVars");
-                    } else {
-                        Log.w("XServerDisplayActivity", "WAYLANDIE_ANATIVE_WINDOW not set or zero after nativeSetAnativeWindow");
-                    }
-                } catch (UnsatisfiedLinkError e) {
-                    Log.e("XServerDisplayActivity", "Failed to set ANativeWindow", e);
-                }
+            // We block here (on a background thread, not the UI thread) until
+            // surfaceCreated fires. The 5s timeout is generous — surface creation
+            // typically takes <100ms after the view is added to the layout.
+            //
+            // surfaceCreated() calls nativeSetAnativeWindow() which:
+            //   1. Calls setenv("WAYLANDIE_ANATIVE_WINDOW", pointer) in the process env
+            //   2. Stores the pointer string in xServerView.anativeWindowPointer
+            //
+            // We then copy it into envVars so Wine inherits it.
+            Log.i("XServerDisplayActivity", "Wayland mode: waiting for surfaceCreated...");
+            String anwValue = xServerView.waitForSurfaceCreated(5000);
+            if (anwValue != null && !anwValue.isEmpty() && !"0".equals(anwValue)) {
+                envVars.put("WAYLANDIE_ANATIVE_WINDOW", anwValue);
+                Log.i("XServerDisplayActivity", "Set WAYLANDIE_ANATIVE_WINDOW=" + anwValue + " in envVars");
+            } else {
+                Log.w("XServerDisplayActivity", "WAYLANDIE_ANATIVE_WINDOW not available — game will not render");
             }
         }
         final VulkanRenderer renderer = xServerView.getRenderer();
