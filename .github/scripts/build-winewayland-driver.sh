@@ -759,6 +759,21 @@ export ac_cv_lib_EGL_eglGetProcAddress=yes
 echo "=== configure Wayland vars ==="
 grep -E "^(WAYLAND|XKB)" /tmp/proton-wine/config.status | head -20 || true
 
+# Patch config.h to enable VK_USE_PLATFORM_ANDROID_KHR
+# Wine's configure doesn't detect Android Vulkan platform on cross-compile.
+# We need this for vkCreateAndroidSurfaceKHR (system driver surface creation).
+echo "=== Patching config.h for VK_USE_PLATFORM_ANDROID_KHR ==="
+find /tmp/proton-wine -name "config.h" -path "*/include/*" -exec sed -i '/#define HAVE_VULKAN/a #define VK_USE_PLATFORM_ANDROID_KHR 1' {} \; 2>/dev/null || true
+# Also check the build dir
+find /tmp/proton-wine -name "config.h" -path "*/winewayland*" -exec sed -i '/#define HAVE_VULKAN/a #define VK_USE_PLATFORM_ANDROID_KHR 1' {} \; 2>/dev/null || true
+# Fallback: just add it to all config.h files
+find /tmp/proton-wine -name "config.h" -exec grep -l "HAVE_VULKAN" {} \; 2>/dev/null | while read f; do
+  if ! grep -q "VK_USE_PLATFORM_ANDROID_KHR" "$f"; then
+    echo "#define VK_USE_PLATFORM_ANDROID_KHR 1" >> "$f"
+    echo "  Patched: $f"
+  fi
+done
+
 echo "=== [8/9] Build winewayland targets ==="
 
 make -j$(nproc) -k \

@@ -6631,6 +6631,26 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
             envVars.put("DXVK_D3D11_ALLOW_FULLSCREEN", "False");
             envVars.put("WINE_DISABLE_FULLSCREEN_HACK", "1");
 
+            // Force system Vulkan driver in Wayland mode.
+            // The system driver (/system/lib64/libvulkan.so) supports
+            // VK_KHR_android_surface natively — no adrenotools, no isolated
+            // namespace, no WAYLANDIE_ANATIVE_WINDOW env var hack needed.
+            // vkCreateAndroidSurfaceKHR(ANativeWindow) works directly.
+            //
+            // Turnip via adrenotools only supports VK_KHR_xlib_surface, which
+            // requires the ANativeWindow pointer to be passed as a fake Xlib
+            // Window handle — this creates the timing race we've been fighting.
+            //
+            // With the system driver, vulkan.c tries vkCreateAndroidSurfaceKHR
+            // first (which the system driver supports), then falls back to
+            // vkCreateXlibSurfaceKHR (for Turnip).
+            envVars.remove("VK_ICD_FILENAMES");
+            envVars.remove("ADRENOTOOLS_DRIVER_PATH");
+            envVars.remove("ADRENOTOOLS_DRIVER_NAME");
+            envVars.remove("ADRENOTOOLS_HOOKS_PATH");
+            envVars.put("VK_ICD_FILENAMES", "/system/lib64/libvulkan.so");
+            Log.i("XServerDisplayActivity", "Wayland mode: forced system Vulkan driver (VK_ICD_FILENAMES cleared)");
+
             // Option B: Set the file path where surfaceCreated writes the ANativeWindow pointer.
             // winewayland.drv's vulkan.c reads this file as a fallback if the env var isn't set.
             String pkgDataDir = getFilesDir().getAbsolutePath();

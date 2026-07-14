@@ -36,6 +36,10 @@
 #ifdef __ANDROID__
 #include <android/hardware_buffer.h>
 #include <android/native_window.h>
+#ifndef VK_USE_PLATFORM_ANDROID_KHR
+#define VK_USE_PLATFORM_ANDROID_KHR 1
+#endif
+#include <vulkan/vulkan_android.h>
 #endif
 
 WINE_DEFAULT_DEBUG_CHANNEL(vulkan);
@@ -166,17 +170,21 @@ static VkResult wayland_vulkan_surface_create(HWND hwnd, BOOL raw, const struct 
         }
     }
 
-    /* PATH A (default + fallback): Direct rendering via Xlib surface →
-     * adrenotools → SurfaceFlinger. Game frames bypass the Wayland bridge. */
+    /* PATH A (default + fallback): Direct rendering via Android surface →
+     * SurfaceFlinger. Game frames render directly to the SurfaceView.
+     *
+     * Try vkCreateAndroidSurfaceKHR first (works with system driver — no
+     * adrenotools, no isolated namespace, no WAYLANDIE_ANATIVE_WINDOW needed).
+     * Fall back to vkCreateXlibSurfaceKHR if android_surface isn't available
+     * (Turnip via adrenotools only supports xlib_surface). */
     {
+        /* Try Android surface first — the system driver supports this natively.
+         * We need the ANativeWindow pointer from the env var or file. */
         const char *anw_env = getenv("WAYLANDIE_ANATIVE_WINDOW");
         if (!g_anative_window && anw_env)
             g_anative_window = (ANativeWindow *)(uintptr_t)strtoull(anw_env, NULL, 0);
 
-        /* Option B: If env var not set, try reading from file.
-         * surfaceCreated() writes the pointer to this file when the Surface
-         * becomes available. vkCreateInstance happens ~20-30s after Wine
-         * starts, so the file is always written by then. */
+        /* Option B: file-based fallback */
         if (!g_anative_window) {
             const char *anw_file = getenv("WAYLANDIE_ANATIVE_WINDOW_FILE");
             if (!anw_file || !anw_file[0])
@@ -195,30 +203,52 @@ static VkResult wayland_vulkan_surface_create(HWND hwnd, BOOL raw, const struct 
                 fclose(f);
             }
         }
-    }
 
-    if (g_anative_window)
-    {
-        VkXlibSurfaceCreateInfoKHR create_info;
-        create_info.sType = VK_STRUCTURE_TYPE_XLIB_SURFACE_CREATE_INFO_KHR;
-        create_info.pNext = NULL;
-        create_info.flags = 0;
-        create_info.dpy = NULL;  /* adrenotools wrapper ignores this */
-        create_info.window = (Window)(uintptr_t)g_anative_window;  /* ANativeWindow* as Window */
-
-        res = instance->p_vkCreateXlibSurfaceKHR(instance->host.instance, &create_info, NULL, handle);
-        if (res != VK_SUCCESS)
+        /* Try vkCreateAndroidSurfaceKHR — works with system driver */
+        if (g_anative_window && instance->p_vkCreateAndroidSurfaceKHR)
         {
-            ERR("Failed to create Xlib Vulkan surface, res=%d\n", res);
-            client_surface_release(&surface->client);
-            return res;
+            VkAndroidSurfaceCreateInfoKHR android_info;
+            android_info.sType = VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR;
+            android_info.pNext = NULL;
+            android_info.flags = 0;
+            android_info.window = g_anative_window;
+
+            res = instance->p_vkCreateAndroidSurfaceKHR(instance->host.instance, &android_info, NULL, handle);
+            if (res == VK_SUCCESS)
+            {
+                set_client_surface(hwnd, surface);
+                *client = &surface->client;
+                TRACE("Created Android surface=0x%s for hwnd=%p (system driver direct rendering)\n",
+                      wine_dbgstr_longlong(*handle), hwnd);
+                return VK_SUCCESS;
+            }
+            ERR("vkCreateAndroidSurfaceKHR failed res=%d, trying Xlib fallback\n", res);
         }
 
-        set_client_surface(hwnd, surface);
-        *client = &surface->client;
-        TRACE("Created Xlib surface=0x%s for hwnd=%p (direct rendering)\n",
-              wine_dbgstr_longlong(*handle), hwnd);
-        return VK_SUCCESS;
+        /* Fall back to vkCreateXlibSurfaceKHR — for Turnip via adrenotools */
+        if (g_anative_window)
+        {
+            VkXlibSurfaceCreateInfoKHR create_info;
+            create_info.sType = VK_STRUCTURE_TYPE_XLIB_SURFACE_CREATE_INFO_KHR;
+            create_info.pNext = NULL;
+            create_info.flags = 0;
+            create_info.dpy = NULL;  /* adrenotools wrapper ignores this */
+            create_info.window = (Window)(uintptr_t)g_anative_window;
+
+            res = instance->p_vkCreateXlibSurfaceKHR(instance->host.instance, &create_info, NULL, handle);
+            if (res != VK_SUCCESS)
+            {
+                ERR("Failed to create Xlib Vulkan surface, res=%d\n", res);
+                client_surface_release(&surface->client);
+                return res;
+            }
+
+            set_client_surface(hwnd, surface);
+            *client = &surface->client;
+            TRACE("Created Xlib surface=0x%s for hwnd=%p (Turnip direct rendering)\n",
+                  wine_dbgstr_longlong(*handle), hwnd);
+            return VK_SUCCESS;
+        }
     }
 #endif
 
@@ -266,9 +296,26 @@ static void wayland_map_instance_extensions(struct vulkan_instance_extensions *e
     if (extensions->has_VK_KHR_win32_surface) extensions->has_VK_KHR_wayland_surface = 1;
     if (extensions->has_VK_KHR_wayland_surface) extensions->has_VK_KHR_win32_surface = 1;
 #ifdef __ANDROID__
-    /* Map win32_surface → xlib_surface so DXVK's request for
-     * VK_KHR_win32_surface is satisfied by VK_KHR_xlib_surface.
-     * The adrenotools wrapper exposes xlib_surface, not android_surface. */
+    /* Map win32_surface → android_surface for the SYSTEM driver.
+     *
+     * The system Vulkan driver (/system/lib64/libvulkan.so) natively supports
+     * VK_KHR_android_surface — no need for xlib_surface translation or
+     * WAYLANDIE_ANATIVE_WINDOW env var hacks.
+     *
+     * DXVK requests VK_KHR_win32_surface. We map it to VK_KHR_android_surface
+     * so DXVK's vkCreateInstance succeeds. Then in wayland_vulkan_surface_create,
+     * we call vkCreateAndroidSurfaceKHR(ANativeWindow) directly — the native
+     * Android surface creation function that the system driver supports.
+     *
+     * This eliminates:
+     *   - adrenotools isolated namespace (no adrenotools)
+     *   - VK_KHR_xlib_surface translation (not needed)
+     *   - WAYLANDIE_ANATIVE_WINDOW env var timing race (not needed)
+     *   - vkCreateXlibSurfaceKHR with fake Window handle (not needed)
+     */
+    if (extensions->has_VK_KHR_win32_surface) extensions->has_VK_KHR_android_surface = 1;
+    if (extensions->has_VK_KHR_android_surface) extensions->has_VK_KHR_win32_surface = 1;
+    /* Also keep xlib_surface mapping as fallback for Turnip driver */
     if (extensions->has_VK_KHR_win32_surface) extensions->has_VK_KHR_xlib_surface = 1;
     if (extensions->has_VK_KHR_xlib_surface) extensions->has_VK_KHR_win32_surface = 1;
 #endif
