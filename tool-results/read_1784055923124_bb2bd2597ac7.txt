@@ -1,0 +1,1440 @@
+     1→#include <algorithm>
+     2→#include <cerrno>
+     3→#include <cstdint>
+     4→#include <cstdlib>
+     5→#include <cstring>
+     6→#include <fstream>
+     7→#include <iostream>
+     8→#include <memory>
+     9→#include <mutex>
+    10→#include <string>
+    11→#include <unordered_map>
+    12→#include <vector>
+    13→
+    14→#include <dirent.h>
+    15→#include <dlfcn.h>
+    16→#include <fcntl.h>
+    17→#include <linux/input.h>
+    18→#include <linux/joystick.h>
+    19→#include <poll.h>
+    20→#include <signal.h>
+    21→#include <stdarg.h>
+    22→#include <stdbool.h>
+    23→#include <stdio.h>
+    24→#include <string.h>
+    25→#include <sys/inotify.h>
+    26→#include <sys/ioctl.h>
+    27→#include <sys/mman.h>
+    28→#include <sys/select.h>
+    29→#include <sys/socket.h>
+    30→#include <sys/stat.h>
+    31→#include <sys/syscall.h>
+    32→#include <sys/sysmacros.h>
+    33→#include <sys/time.h>
+    34→#include <sys/types.h>
+    35→#include <sys/uio.h>
+    36→#include <sys/un.h>
+    37→#include <unistd.h>
+    38→
+    39→#define EXPORT __attribute__((visibility("default"))) extern "C"
+    40→
+    41→static constexpr uint16_t GAMEPAD_VENDOR_ID_BASE = 0x1234;
+    42→static constexpr uint16_t GAMEPAD_PRODUCT_ID_BASE = 0x5678;
+    43→static constexpr uint16_t GAMEPAD_VERSION = 0x0110;
+    44→static constexpr const char *GAMEPAD_NAME_TEMPLATE = "Generic HID Gamepad %d";
+    45→static constexpr const char *GAMEPAD_PHYS_TEMPLATE = "usb-fakeinput/input%d";
+    46→static constexpr const char *GAMEPAD_UNIQ_TEMPLATE = "0000000000%02d";
+    47→static constexpr uint8_t GAMEPAD_AXIS_COUNT = 8;
+    48→static constexpr uint8_t GAMEPAD_BUTTON_COUNT = 11;
+    49→static constexpr uint32_t FAKE_INPUT_RING_MAGIC = 0x46494252;
+    50→static constexpr uint32_t FAKE_INPUT_RING_VERSION = 2;
+    51→static constexpr uint32_t FAKE_INPUT_EVENT_SIZE = sizeof(struct input_event);
+    52→static constexpr uint32_t FAKE_INPUT_RING_CAPACITY = 4096;
+    53→static constexpr unsigned int FAKE_INPUT_MAJOR = 13;
+    54→static constexpr unsigned int FAKE_INPUT_EVENT_MINOR_BASE = 64;
+    55→static constexpr unsigned int FAKE_INPUT_JS_MINOR_BASE = 0;
+    56→
+    57→struct FakeInputRingHeader {
+    58→  uint32_t magic;             // 0
+    59→  uint32_t version;           // 4
+    60→  uint32_t event_size;        // 8
+    61→  uint32_t capacity;          // 12
+    62→  uint64_t write_seq;         // 16
+    63→  uint64_t generation;        // 24
+    64→  // Authoritative absolute-state snapshot, published by the writer under a
+    65→  // seqlock (odd snapshot_seq = write in progress). The reader replays it as a
+    66→  // full keyframe whenever the delta stream could have desynced (open, ring
+    67→  // overflow) so dropped events can recover without periodic duplicate input.
+    68→  uint64_t snapshot_seq;      // 32
+    69→  uint32_t snapshot_buttons;  // 40  bit i -> kSnapshotButtons[i] pressed
+    70→  int16_t snapshot_axes[8];   // 44  values in kSnapshotAxisCodes order
+    71→  uint8_t reserved[4];        // 60
+    72→};
+    73→
+    74→static_assert(sizeof(FakeInputRingHeader) == 64,
+    75→              "fake input ring header must stay ABI-stable");
+    76→
+    77→static constexpr size_t FAKE_INPUT_RING_HEADER_SIZE =
+    78→    sizeof(FakeInputRingHeader);
+    79→static constexpr size_t FAKE_INPUT_RING_SIZE =
+    80→    FAKE_INPUT_RING_HEADER_SIZE +
+    81→    (FAKE_INPUT_RING_CAPACITY * FAKE_INPUT_EVENT_SIZE);
+    82→
+    83→struct FakeController {
+    84→  char *event = nullptr;
+    85→  int slot = -1;
+    86→  FakeInputRingHeader *ring = nullptr;
+    87→  uint64_t read_seq = 0;
+    88→  uint64_t generation = 0;
+    89→  size_t mapping_size = 0;
+    90→  // Pending keyframe (full absolute-state baseline) currently streaming to the
+    91→  // guest. The axis/button values are captured from the snapshot when the
+    92→  // keyframe starts so the frame stays consistent across multi-read delivery.
+    93→  size_t keyframe_remaining = 0;
+    94→  int32_t keyframe_axes[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+    95→  uint32_t keyframe_buttons = 0;
+    96→};
+    97→
+    98→struct NeutralEventSpec {
+    99→  uint16_t type;
+   100→  uint16_t code;
+   101→};
+   102→
+   103→// Event template for a full keyframe: every button, every axis/hat, then a
+   104→// SYN_REPORT, in this fixed order. The value carried by each event is filled
+   105→// from the authoritative snapshot (see keyframe_value); an all-zero snapshot
+   106→// yields the neutral baseline. Replayed on open and ring overflow so dropped
+   107→// events cannot leave a guest stuck.
+   108→static const NeutralEventSpec kNeutralEvents[] = {
+   109→    {EV_KEY, BTN_A},      {EV_KEY, BTN_B},      {EV_KEY, BTN_X},
+   110→    {EV_KEY, BTN_Y},      {EV_KEY, BTN_TL},     {EV_KEY, BTN_TR},
+   111→    {EV_KEY, BTN_SELECT}, {EV_KEY, BTN_START},  {EV_KEY, BTN_MODE},
+   112→    {EV_KEY, BTN_THUMBL}, {EV_KEY, BTN_THUMBR}, {EV_ABS, ABS_X},
+   113→    {EV_ABS, ABS_Y},      {EV_ABS, ABS_RX},     {EV_ABS, ABS_RY},
+   114→    {EV_ABS, ABS_GAS},    {EV_ABS, ABS_BRAKE},  {EV_ABS, ABS_HAT0X},
+   115→    {EV_ABS, ABS_HAT0Y},  {EV_SYN, SYN_REPORT},
+   116→};
+   117→static constexpr size_t kNeutralEventCount =
+   118→    sizeof(kNeutralEvents) / sizeof(kNeutralEvents[0]);
+   119→
+   120→// Axis layout of FakeInputRingHeader::snapshot_axes (mirrors the Java writer).
+   121→static const uint16_t kSnapshotAxisCodes[8] = {
+   122→    ABS_X, ABS_Y, ABS_RX, ABS_RY, ABS_GAS, ABS_BRAKE, ABS_HAT0X, ABS_HAT0Y};
+   123→// Bit i of FakeInputRingHeader::snapshot_buttons maps to this button code.
+   124→static const uint16_t kSnapshotButtons[10] = {
+   125→    BTN_A,  BTN_B,      BTN_X,     BTN_Y,      BTN_TL,
+   126→    BTN_TR, BTN_SELECT, BTN_START, BTN_THUMBL, BTN_THUMBR};
+   127→
+   128→static std::unordered_map<int, FakeController> controller_map;
+   129→static std::unordered_map<int, std::string> ring_paths;
+   130→static bool ring_paths_loaded = false;
+   131→static bool initialized = false;
+   132→static const char *hook_dir = nullptr;
+   133→static const char *udev_data_dir = nullptr;
+   134→static bool vibration_enabled = true;
+   135→volatile sig_atomic_t stop_flag = 0;
+   136→
+   137→static int (*my_open)(const char *, int, ...) = nullptr;
+   138→static int (*my_openat)(int, const char *, int, ...) = nullptr;
+   139→static int (*my_stat)(const char *, struct stat *) = nullptr;
+   140→static int (*my_fstat)(int fd, struct stat *buf) = nullptr;
+   141→static int (*my_access)(const char *, int) = nullptr;
+   142→static int (*my_faccessat)(int, const char *, int, int) = nullptr;
+   143→static int (*my_scandir)(const char *, struct dirent ***,
+   144→                         int (*)(const struct dirent *),
+   145→                         int (*)(const struct dirent **,
+   146→                                 const struct dirent **));
+   147→static int (*my_inotify_add_watch)(int, const char *, uint32_t);
+   148→static int (*my_close)(int);
+   149→static int (*my_poll)(struct pollfd *, nfds_t, int) = nullptr;
+   150→static int (*my_ppoll)(struct pollfd *, nfds_t, const struct timespec *,
+   151→                       const sigset_t *) = nullptr;
+   152→static int (*my_select)(int, fd_set *, fd_set *, fd_set *,
+   153→                        struct timeval *) = nullptr;
+   154→static ssize_t (*my_write)(int, const void *, size_t) = nullptr;
+   155→
+   156→static std::unordered_map<int, struct ff_effect> ff_effects;
+   157→static int next_ff_id = 0;
+   158→
+   159→namespace Logger {
+   160→int log_enabled;
+   161→
+   162→void init() {
+   163→  log_enabled = getenv("FAKE_EVDEV_LOG") && atoi(getenv("FAKE_EVDEV_LOG"));
+   164→}
+   165→
+   166→void log(const char *message, ...) {
+   167→  if (!log_enabled)
+   168→    return;
+   169→
+   170→  va_list args;
+   171→  va_start(args, message);
+   172→  vfprintf(stderr, message, args);
+   173→  va_end(args);
+   174→
+   175→  std::cerr.flush();
+   176→}
+   177→} // namespace Logger
+   178→
+   179→void handle_sigint(int sig) {
+   180→  (void)sig;
+   181→  stop_flag = 1;
+   182→}
+   183→
+   184→void setup_signal_handler() {
+   185→  if (!initialized) {
+   186→    signal(SIGINT, handle_sigint);
+   187→    initialized = true;
+   188→  }
+   189→}
+   190→
+   191→__attribute__((constructor)) static void library_init() {
+   192→  if (!hook_dir)
+   193→    hook_dir = getenv("FAKE_EVDEV_DIR")
+   194→                   ? getenv("FAKE_EVDEV_DIR")
+   195→                   : "/data/data/com.termux/files/home/fake-input";
+   196→  udev_data_dir = getenv("FAKE_UDEV_DATA_DIR");
+   197→  vibration_enabled =
+   198→      getenv("FAKE_EVDEV_VIBRATION") && atoi(getenv("FAKE_EVDEV_VIBRATION"));
+   199→
+   200→  Logger::init();
+   201→}
+   202→
+   203→__attribute__((visibility("hidden"))) static void
+   204→send_vibration(int strong, int weak, uint16_t duration_ms, uint16_t slot) {
+   205→  if (!vibration_enabled)
+   206→    return;
+   207→
+   208→  int sock = socket(AF_UNIX, SOCK_STREAM, 0);
+   209→  if (sock < 0)
+   210→    return;
+   211→
+   212→  struct sockaddr_un addr = {};
+   213→  addr.sun_family = AF_UNIX;
+   214→  const char *name = "winlator_vibration";
+   215→  memcpy(addr.sun_path + 1, name, strlen(name));
+   216→  socklen_t addrlen = offsetof(struct sockaddr_un, sun_path) + 1 + strlen(name);
+   217→
+   218→  if (connect(sock, reinterpret_cast<struct sockaddr *>(&addr), addrlen) < 0) {
+   219→    syscall(SYS_close, sock);
+   220→    return;
+   221→  }
+   222→
+   223→  uint16_t data[4];
+   224→  data[0] = static_cast<uint16_t>(strong);
+   225→  data[1] = static_cast<uint16_t>(weak);
+   226→  data[2] = duration_ms;
+   227→  data[3] = slot;
+   228→  send(sock, data, sizeof(data), 0);
+   229→  syscall(SYS_close, sock);
+   230→}
+   231→
+   232→__attribute__((visibility("hidden"))) static void
+   233→check_ff_event(const struct input_event *ev, uint16_t slot) {
+   234→  if (ev->type != EV_FF)
+   235→    return;
+   236→
+   237→  int id = ev->code;
+   238→  if (ev->value > 0) {
+   239→    auto it = ff_effects.find(id);
+   240→    if (it == ff_effects.end())
+   241→      return;
+   242→
+   243→    uint16_t duration = it->second.replay.length;
+   244→    if (it->second.type == FF_RUMBLE) {
+   245→      send_vibration(it->second.u.rumble.strong_magnitude,
+   246→                     it->second.u.rumble.weak_magnitude, duration, slot);
+   247→    } else if (it->second.type == FF_PERIODIC) {
+   248→      send_vibration(it->second.u.periodic.magnitude,
+   249→                     it->second.u.periodic.magnitude, duration, slot);
+   250→    }
+   251→  } else {
+   252→    send_vibration(0, 0, 0, slot);
+   253→  }
+   254→}
+   255→
+   256→__attribute__((visibility("hidden"))) char *
+   257→from_real_to_fake_path(const char *pathname) {
+   258→  const char *event = strrchr(pathname, '/') + 1;
+   259→  char *fake_path = nullptr;
+   260→  if (asprintf(&fake_path, "%s/%s", hook_dir, event) < 0)
+   261→    fake_path = nullptr;
+   262→  return fake_path;
+   263→}
+   264→
+   265→__attribute__((visibility("hidden"))) static bool path_exists(const char *path) {
+   266→  return path && faccessat(AT_FDCWD, path, F_OK, 0) == 0;
+   267→}
+   268→
+   269→__attribute__((visibility("hidden"))) static bool
+   270→is_fake_input_node_path(const char *pathname) {
+   271→  return pathname && (!strncmp(pathname, "/dev/input/event", 16) ||
+   272→                      !strncmp(pathname, "/dev/input/js", 13));
+   273→}
+   274→
+   275→__attribute__((visibility("hidden"))) static bool
+   276→is_fake_udev_data_path(const char *pathname) {
+   277→  return pathname && udev_data_dir && *udev_data_dir &&
+   278→         !strncmp(pathname, "/run/udev/data/c13:", 19);
+   279→}
+   280→
+   281→__attribute__((visibility("hidden"))) char *
+   282→from_real_to_fake_udev_data_path(const char *pathname) {
+   283→  const char *name = strrchr(pathname, '/') + 1;
+   284→  char *fake_path = nullptr;
+   285→  if (asprintf(&fake_path, "%s/%s", udev_data_dir, name) < 0)
+   286→    fake_path = nullptr;
+   287→  return fake_path;
+   288→}
+   289→
+   290→__attribute__((visibility("hidden"))) const char *
+   291→get_event(const char *pathname) {
+   292→  const char *event = strrchr(pathname, '/') + 1;
+   293→  return event;
+   294→}
+   295→
+   296→__attribute__((visibility("hidden"))) int get_event_number(const char *event) {
+   297→  if (!event)
+   298→    return -1;
+   299→
+   300→  const char *digits = event;
+   301→  while (*digits && (*digits < '0' || *digits > '9'))
+   302→    digits++;
+   303→
+   304→  return *digits ? atoi(digits) : -1;
+   305→}
+   306→
+   307→__attribute__((visibility("hidden"))) static dev_t
+   308→get_fake_input_rdev(const char *event) {
+   309→  int event_number = get_event_number(event);
+   310→  if (event_number < 0)
+   311→    return makedev(FAKE_INPUT_MAJOR, 0);
+   312→
+   313→  if (!strncmp(event, "event", 5))
+   314→    return makedev(FAKE_INPUT_MAJOR, FAKE_INPUT_EVENT_MINOR_BASE + event_number);
+   315→  if (!strncmp(event, "js", 2))
+   316→    return makedev(FAKE_INPUT_MAJOR, FAKE_INPUT_JS_MINOR_BASE + event_number);
+   317→
+   318→  return makedev(FAKE_INPUT_MAJOR, event_number);
+   319→}
+   320→
+   321→__attribute__((visibility("hidden"))) static void load_ring_paths() {
+   322→  if (ring_paths_loaded)
+   323→    return;
+   324→
+   325→  ring_paths_loaded = true;
+   326→  const char *spec = getenv("FAKE_EVDEV_MEMFD_PATHS");
+   327→  if (!spec || !*spec)
+   328→    return;
+   329→
+   330→  char *copy = strdup(spec);
+   331→  if (!copy)
+   332→    return;
+   333→
+   334→  char *saveptr = nullptr;
+   335→  for (char *token = strtok_r(copy, ";", &saveptr); token;
+   336→       token = strtok_r(nullptr, ";", &saveptr)) {
+   337→    char *equals = strchr(token, '=');
+   338→    if (!equals)
+   339→      continue;
+   340→    *equals = '\0';
+   341→    int slot = atoi(token);
+   342→    const char *path = equals + 1;
+   343→    if (slot >= 0 && *path)
+   344→      ring_paths[slot] = path;
+   345→  }
+   346→
+   347→  free(copy);
+   348→}
+   349→
+   350→__attribute__((visibility("hidden"))) static const char *
+   351→get_ring_path_for_slot(int slot) {
+   352→  load_ring_paths();
+   353→  auto it = ring_paths.find(slot);
+   354→  return it == ring_paths.end() ? nullptr : it->second.c_str();
+   355→}
+   356→
+   357→__attribute__((visibility("hidden"))) static uint64_t
+   358→ring_write_seq(const FakeInputRingHeader *ring) {
+   359→  return __atomic_load_n(&ring->write_seq, __ATOMIC_ACQUIRE);
+   360→}
+   361→
+   362→__attribute__((visibility("hidden"))) static uint64_t
+   363→ring_generation(const FakeInputRingHeader *ring) {
+   364→  return __atomic_load_n(&ring->generation, __ATOMIC_ACQUIRE);
+   365→}
+   366→
+   367→__attribute__((visibility("hidden"))) static bool
+   368→ring_header_is_valid(const FakeInputRingHeader *ring) {
+   369→  return ring && ring->magic == FAKE_INPUT_RING_MAGIC &&
+   370→         ring->version == FAKE_INPUT_RING_VERSION &&
+   371→         ring->event_size == FAKE_INPUT_EVENT_SIZE &&
+   372→         ring->capacity == FAKE_INPUT_RING_CAPACITY;
+   373→}
+   374→
+   375→struct SnapshotState {
+   376→  uint32_t buttons = 0;
+   377→  int32_t axes[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+   378→};
+   379→
+   380→static long long monotonic_ms();
+   381→
+   382→// Read the authoritative absolute-state snapshot using the writer's seqlock.
+   383→// Retries on a torn read (snapshot_seq odd or changed mid-read); after a few
+   384→// failed attempts returns the neutral baseline rather than spinning. This
+   385→// mirrors the publication model already used for write_seq.
+   386→__attribute__((visibility("hidden"))) static SnapshotState
+   387→read_snapshot(const FakeInputRingHeader *ring) {
+   388→  SnapshotState out;
+   389→  for (int attempt = 0; attempt < 8; attempt++) {
+   390→    uint64_t s1 = __atomic_load_n(&ring->snapshot_seq, __ATOMIC_ACQUIRE);
+   391→    if (s1 & 1ULL)
+   392→      continue; // a write is in progress
+   393→    uint32_t buttons = ring->snapshot_buttons;
+   394→    int16_t axes[8];
+   395→    for (int i = 0; i < 8; i++)
+   396→      axes[i] = ring->snapshot_axes[i];
+   397→    __atomic_thread_fence(__ATOMIC_ACQUIRE);
+   398→    uint64_t s2 = __atomic_load_n(&ring->snapshot_seq, __ATOMIC_RELAXED);
+   399→    if (s1 == s2) {
+   400→      out.buttons = buttons;
+   401→      for (int i = 0; i < 8; i++)
+   402→        out.axes[i] = axes[i]; // sign-extend to int32 for the event value
+   403→      return out;
+   404→    }
+   405→  }
+   406→  return out;
+   407→}
+   408→
+   409→// Capture the current absolute state into the controller so it can be streamed
+   410→// as a keyframe independently of the ring. Idempotent w.r.t. an in-flight
+   411→// keyframe: callers guard on keyframe_remaining == 0 so a partially delivered
+   412→// frame is never restarted mid-stream.
+   413→__attribute__((visibility("hidden"))) static void
+   414→capture_keyframe(FakeController &fake, const char *reason, int fd) {
+   415→  SnapshotState snap = read_snapshot(fake.ring);
+   416→  fake.keyframe_buttons = snap.buttons;
+   417→  for (int i = 0; i < 8; i++)
+   418→    fake.keyframe_axes[i] = snap.axes[i];
+   419→  fake.keyframe_remaining = kNeutralEventCount;
+   420→  Logger::log("Fake input keyframe reason=%s fd=%d slot=%d read_seq=%llu "
+   421→              "write_seq=%llu buttons=0x%03x axes=[%d,%d,%d,%d,%d,%d,%d,%d]\n",
+   422→              reason ? reason : "unknown", fd, fake.slot,
+   423→              static_cast<unsigned long long>(fake.read_seq),
+   424→              static_cast<unsigned long long>(ring_write_seq(fake.ring)),
+   425→              fake.keyframe_buttons, fake.keyframe_axes[0],
+   426→              fake.keyframe_axes[1], fake.keyframe_axes[2],
+   427→              fake.keyframe_axes[3], fake.keyframe_axes[4],
+   428→              fake.keyframe_axes[5], fake.keyframe_axes[6],
+   429→              fake.keyframe_axes[7]);
+   430→}
+   431→
+   432→// Resolve the value a keyframe event should carry from the captured snapshot.
+   433→__attribute__((visibility("hidden"))) static int32_t
+   434→keyframe_value(const FakeController &fake, uint16_t type, uint16_t code) {
+   435→  if (type == EV_KEY) {
+   436→    for (int i = 0; i < 10; i++)
+   437→      if (kSnapshotButtons[i] == code)
+   438→        return (fake.keyframe_buttons >> i) & 1u;
+   439→    return 0; // e.g. BTN_MODE, which the writer never presses
+   440→  }
+   441→  if (type == EV_ABS) {
+   442→    for (int i = 0; i < 8; i++)
+   443→      if (kSnapshotAxisCodes[i] == code)
+   444→        return fake.keyframe_axes[i];
+   445→  }
+   446→  return 0; // SYN / unknown
+   447→}
+   448→
+   449→__attribute__((visibility("hidden"))) static int
+   450→open_fake_input_ring(const char *event, int flags) {
+   451→  int slot = get_event_number(event);
+   452→  const char *ring_path = get_ring_path_for_slot(slot);
+   453→  if (!ring_path) {
+   454→    errno = ENODEV;
+   455→    return -1;
+   456→  }
+   457→
+   458→  if (!my_open)
+   459→    *(void **)&my_open = dlsym(RTLD_NEXT, "open");
+   460→
+   461→  int fd = my_open(ring_path, O_RDWR | (flags & O_NONBLOCK));
+   462→  if (fd < 0)
+   463→    return -1;
+   464→
+   465→  void *mapping =
+   466→      mmap(nullptr, FAKE_INPUT_RING_SIZE, PROT_READ, MAP_SHARED, fd, 0);
+   467→  if (mapping == MAP_FAILED) {
+   468→    int saved_errno = errno;
+   469→    syscall(SYS_close, fd);
+   470→    errno = saved_errno;
+   471→    return -1;
+   472→  }
+   473→
+   474→  FakeInputRingHeader *ring =
+   475→      reinterpret_cast<FakeInputRingHeader *>(mapping);
+   476→  if (!ring_header_is_valid(ring)) {
+   477→    munmap(mapping, FAKE_INPUT_RING_SIZE);
+   478→    syscall(SYS_close, fd);
+   479→    errno = ENODEV;
+   480→    return -1;
+   481→  }
+   482→
+   483→  FakeController controller = {};
+   484→  controller.event = strdup(event);
+   485→  controller.slot = slot;
+   486→  controller.ring = ring;
+   487→  controller.mapping_size = FAKE_INPUT_RING_SIZE;
+   488→  controller.read_seq = ring_write_seq(ring);
+   489→  controller.generation = ring_generation(ring);
+   490→  // Emit the current absolute state as the first frame so a guest that opens
+   491→  // mid-hold (or reopens after a slot hand-off) starts already in sync.
+   492→  capture_keyframe(controller, "open", fd);
+   493→  controller_map[fd] = controller;
+   494→
+   495→  Logger::log("Adding ring-backed controller, fd %d event %s slot %d\n", fd,
+   496→              event, slot);
+   497→  return fd;
+   498→}
+   499→
+   500→__attribute__((visibility("hidden"))) static void
+   501→copy_slot_ioctl_string(int op, void *argp, const char *format, int event_number) {
+   502→  size_t size = _IOC_SIZE(op);
+   503→  if (!argp || size == 0)
+   504→    return;
+   505→
+   506→  snprintf(static_cast<char *>(argp), size, format, event_number);
+   507→}
+   508→
+   509→__attribute__((visibility("hidden"))) static bool is_fake_input_fd(int fd) {
+   510→  return controller_map.find(fd) != controller_map.end();
+   511→}
+   512→
+   513→__attribute__((visibility("hidden"))) static bool fake_fd_is_stale(int fd) {
+   514→  auto controller = controller_map.find(fd);
+   515→  return controller != controller_map.end() &&
+   516→         ring_generation(controller->second.ring) != controller->second.generation;
+   517→}
+   518→
+   519→__attribute__((visibility("hidden"))) static bool
+   520→fake_fd_has_unread_data(int fd) {
+   521→  auto controller = controller_map.find(fd);
+   522→  if (controller == controller_map.end())
+   523→    return false;
+   524→
+   525→  FakeController &fake = controller->second;
+   526→  if (ring_generation(fake.ring) != fake.generation)
+   527→    return false;
+   528→  uint64_t write_seq = ring_write_seq(fake.ring);
+   529→  if (write_seq < fake.read_seq)
+   530→    fake.read_seq = write_seq;
+   531→  if (write_seq - fake.read_seq > FAKE_INPUT_RING_CAPACITY) {
+   532→    fake.read_seq = write_seq - FAKE_INPUT_RING_CAPACITY;
+   533→    if (fake.keyframe_remaining == 0) {
+   534→      capture_keyframe(fake, "overflow", fd);
+   535→    }
+   536→  }
+   537→  // A pending keyframe counts as readable so poll/blocking reads wake to finish
+   538→  // flushing it even after the ring itself has drained.
+   539→  return fake.keyframe_remaining > 0 || write_seq > fake.read_seq;
+   540→}
+   541→
+   542→__attribute__((visibility("hidden"))) static long long
+   543→timespec_to_ms(const struct timespec *timeout) {
+   544→  if (!timeout)
+   545→    return -1;
+   546→  return static_cast<long long>(timeout->tv_sec) * 1000LL +
+   547→         timeout->tv_nsec / 1000000LL;
+   548→}
+   549→
+   550→__attribute__((visibility("hidden"))) static long long
+   551→timeval_to_ms(const struct timeval *timeout) {
+   552→  if (!timeout)
+   553→    return -1;
+   554→  return static_cast<long long>(timeout->tv_sec) * 1000LL +
+   555→         timeout->tv_usec / 1000LL;
+   556→}
+   557→
+   558→__attribute__((visibility("hidden"))) static long long monotonic_ms() {
+   559→  struct timespec now = {};
+   560→  clock_gettime(CLOCK_MONOTONIC, &now);
+   561→  return static_cast<long long>(now.tv_sec) * 1000LL + now.tv_nsec / 1000000LL;
+   562→}
+   563→
+   564→EXPORT int open(const char *pathname, int flags, ...) {
+   565→  va_list va;
+   566→  mode_t mode;
+   567→  int fd;
+   568→  bool hasMode;
+   569→
+   570→  va_start(va, flags);
+   571→
+   572→  hasMode = flags & O_CREAT;
+   573→
+   574→  if (hasMode) {
+   575→    mode = va_arg(va, mode_t);
+   576→  }
+   577→
+   578→  va_end(va);
+   579→
+   580→  if (!my_open)
+   581→    *(void **)&my_open = dlsym(RTLD_NEXT, "open");
+   582→
+   583→  char *fake_path = nullptr;
+   584→  const char *event = nullptr;
+   585→  if (pathname) {
+   586→    if (is_fake_input_node_path(pathname)) {
+   587→      event = get_event(pathname);
+   588→      fake_path = from_real_to_fake_path(pathname);
+   589→      if (!fake_path) {
+   590→        errno = ENOMEM;
+   591→        return -1;
+   592→      }
+   593→      if (path_exists(fake_path)) {
+   594→        fd = open_fake_input_ring(event, flags);
+   595→        if (fd >= 0) {
+   596→          free(fake_path);
+   597→          return fd;
+   598→        }
+   599→        int saved_errno = errno;
+   600→        free(fake_path);
+   601→        errno = saved_errno;
+   602→        return -1;
+   603→      }
+   604→      pathname = fake_path;
+   605→    } else if (is_fake_udev_data_path(pathname)) {
+   606→      fake_path = from_real_to_fake_udev_data_path(pathname);
+   607→      if (!fake_path) {
+   608→        errno = ENOMEM;
+   609→        return -1;
+   610→      }
+   611→      pathname = fake_path;
+   612→    } else if (!strcmp(pathname, "/dev/input")) {
+   613→      pathname = hook_dir;
+   614→    }
+   615→  }
+   616→
+   617→  if (hasMode)
+   618→    fd = my_open(pathname, flags, mode);
+   619→  else
+   620→    fd = my_open(pathname, flags);
+   621→
+   622→  if (fake_path)
+   623→    free(fake_path);
+   624→
+   625→  return fd;
+   626→}
+   627→
+   628→EXPORT int openat(int dirfd, const char *pathname, int flags, ...) {
+   629→  va_list va;
+   630→  mode_t mode;
+   631→  int fd;
+   632→  bool hasMode;
+   633→
+   634→  va_start(va, flags);
+   635→
+   636→  hasMode = flags & O_CREAT;
+   637→
+   638→  if (hasMode) {
+   639→    mode = va_arg(va, mode_t);
+   640→  }
+   641→
+   642→  va_end(va);
+   643→
+   644→  if (!my_openat)
+   645→    *(void **)&my_openat = dlsym(RTLD_NEXT, "openat");
+   646→
+   647→  char *fake_path = nullptr;
+   648→  const char *event = nullptr;
+   649→  if (pathname) {
+   650→    if (is_fake_input_node_path(pathname)) {
+   651→      event = get_event(pathname);
+   652→      fake_path = from_real_to_fake_path(pathname);
+   653→      if (!fake_path) {
+   654→        errno = ENOMEM;
+   655→        return -1;
+   656→      }
+   657→      if (path_exists(fake_path)) {
+   658→        fd = open_fake_input_ring(event, flags);
+   659→        if (fd >= 0) {
+   660→          free(fake_path);
+   661→          return fd;
+   662→        }
+   663→        int saved_errno = errno;
+   664→        free(fake_path);
+   665→        errno = saved_errno;
+   666→        return -1;
+   667→      }
+   668→      pathname = fake_path;
+   669→    } else if (is_fake_udev_data_path(pathname)) {
+   670→      fake_path = from_real_to_fake_udev_data_path(pathname);
+   671→      if (!fake_path) {
+   672→        errno = ENOMEM;
+   673→        return -1;
+   674→      }
+   675→      pathname = fake_path;
+   676→    } else if (!strcmp(pathname, "/dev/input")) {
+   677→      pathname = hook_dir;
+   678→    }
+   679→  }
+   680→
+   681→  if (hasMode)
+   682→    fd = my_openat(dirfd, pathname, flags, mode);
+   683→  else
+   684→    fd = my_openat(dirfd, pathname, flags);
+   685→
+   686→  if (fake_path)
+   687→    free(fake_path);
+   688→
+   689→  return fd;
+   690→}
+   691→
+   692→EXPORT int stat(const char *pathname, struct stat *statbuf) {
+   693→  if (!my_stat)
+   694→    *(void **)&my_stat = dlsym(RTLD_NEXT, "stat");
+   695→
+   696→  const char *event = nullptr;
+   697→  char *fake_path = nullptr;
+   698→
+   699→  if (pathname) {
+   700→    if (is_fake_input_node_path(pathname)) {
+   701→      event = get_event(pathname);
+   702→      fake_path = from_real_to_fake_path(pathname);
+   703→      if (!fake_path) {
+   704→        errno = ENOMEM;
+   705→        return -1;
+   706→      }
+   707→      pathname = fake_path;
+   708→    } else if (is_fake_udev_data_path(pathname)) {
+   709→      fake_path = from_real_to_fake_udev_data_path(pathname);
+   710→      if (!fake_path) {
+   711→        errno = ENOMEM;
+   712→        return -1;
+   713→      }
+   714→      pathname = fake_path;
+   715→    } else if (!strcmp(pathname, "/dev/input")) {
+   716→      pathname = hook_dir;
+   717→    }
+   718→  }
+   719→
+   720→  int ret = my_stat(pathname, statbuf);
+   721→
+   722→  if (ret == 0 && event && get_event_number(event) >= 0) {
+   723→    statbuf->st_mode = (statbuf->st_mode & ~S_IFMT) | S_IFCHR;
+   724→    statbuf->st_rdev = get_fake_input_rdev(event);
+   725→  }
+   726→
+   727→  if (fake_path)
+   728→    free(fake_path);
+   729→
+   730→  return ret;
+   731→}
+   732→
+   733→EXPORT int fstat(int fd, struct stat *buf) {
+   734→  if (!my_fstat)
+   735→    *(void **)&my_fstat = dlsym(RTLD_NEXT, "fstat");
+   736→
+   737→  int ret = my_fstat(fd, buf);
+   738→
+   739→  auto controller = controller_map.find(fd);
+   740→  if (ret == 0 && controller != controller_map.end()) {
+   741→    buf->st_mode = (buf->st_mode & ~S_IFMT) | S_IFCHR;
+   742→    buf->st_rdev = get_fake_input_rdev(controller->second.event);
+   743→  }
+   744→
+   745→  return ret;
+   746→}
+   747→
+   748→EXPORT int access(const char *pathname, int mode) {
+   749→  if (!my_access)
+   750→    *(void **)&my_access = dlsym(RTLD_NEXT, "access");
+   751→
+   752→  char *fake_path = nullptr;
+   753→  if (pathname) {
+   754→    if (is_fake_input_node_path(pathname)) {
+   755→      fake_path = from_real_to_fake_path(pathname);
+   756→      if (!fake_path) {
+   757→        errno = ENOMEM;
+   758→        return -1;
+   759→      }
+   760→      pathname = fake_path;
+   761→    } else if (is_fake_udev_data_path(pathname)) {
+   762→      fake_path = from_real_to_fake_udev_data_path(pathname);
+   763→      if (!fake_path) {
+   764→        errno = ENOMEM;
+   765→        return -1;
+   766→      }
+   767→      pathname = fake_path;
+   768→    } else if (!strcmp(pathname, "/dev/input")) {
+   769→      pathname = hook_dir;
+   770→    }
+   771→  }
+   772→
+   773→  int ret = my_access(pathname, mode);
+   774→  if (fake_path)
+   775→    free(fake_path);
+   776→  return ret;
+   777→}
+   778→
+   779→EXPORT int faccessat(int dirfd, const char *pathname, int mode, int flags) {
+   780→  if (!my_faccessat)
+   781→    *(void **)&my_faccessat = dlsym(RTLD_NEXT, "faccessat");
+   782→
+   783→  char *fake_path = nullptr;
+   784→  if (pathname) {
+   785→    if (is_fake_input_node_path(pathname)) {
+   786→      fake_path = from_real_to_fake_path(pathname);
+   787→      if (!fake_path) {
+   788→        errno = ENOMEM;
+   789→        return -1;
+   790→      }
+   791→      pathname = fake_path;
+   792→    } else if (is_fake_udev_data_path(pathname)) {
+   793→      fake_path = from_real_to_fake_udev_data_path(pathname);
+   794→      if (!fake_path) {
+   795→        errno = ENOMEM;
+   796→        return -1;
+   797→      }
+   798→      pathname = fake_path;
+   799→    } else if (!strcmp(pathname, "/dev/input")) {
+   800→      pathname = hook_dir;
+   801→    }
+   802→  }
+   803→
+   804→  int ret = my_faccessat(dirfd, pathname, mode, flags);
+   805→  if (fake_path)
+   806→    free(fake_path);
+   807→  return ret;
+   808→}
+   809→
+   810→EXPORT int scandir(const char *dirp, struct dirent ***namelist,
+   811→                   int (*filter)(const struct dirent *),
+   812→                   int (*compar)(const struct dirent **,
+   813→                                 const struct dirent **)) {
+   814→  if (!my_scandir)
+   815→    *(void **)&my_scandir = dlsym(RTLD_NEXT, "scandir");
+   816→
+   817→  if (dirp) {
+   818→    if (!strcmp(dirp, "/dev/input")) {
+   819→      dirp = hook_dir;
+   820→    } else if (udev_data_dir && !strcmp(dirp, "/run/udev/data")) {
+   821→      dirp = udev_data_dir;
+   822→    }
+   823→  }
+   824→
+   825→  return my_scandir(dirp, namelist, filter, compar);
+   826→}
+   827→
+   828→EXPORT int inotify_add_watch(int fd, const char *pathname, uint32_t mask) {
+   829→  if (!my_inotify_add_watch)
+   830→    *(void **)&my_inotify_add_watch = dlsym(RTLD_NEXT, "inotify_add_watch");
+   831→
+   832→  char *fake_path = nullptr;
+   833→  if (pathname) {
+   834→    if (is_fake_input_node_path(pathname)) {
+   835→      fake_path = from_real_to_fake_path(pathname);
+   836→      if (!fake_path) {
+   837→        errno = ENOMEM;
+   838→        return -1;
+   839→      }
+   840→      pathname = fake_path;
+   841→    } else if (!strcmp(pathname, "/dev/input")) {
+   842→      pathname = hook_dir;
+   843→    }
+   844→  }
+   845→
+   846→  int ret = my_inotify_add_watch(fd, pathname, mask);
+   847→  if (fake_path)
+   848→    free(fake_path);
+   849→  return ret;
+   850→}
+   851→
+   852→EXPORT int ioctl(int fd, int op, ...) {
+   853→  va_list va;
+   854→  void *argp;
+   855→
+   856→  va_start(va, op);
+   857→  argp = va_arg(va, void *);
+   858→  va_end(va);
+   859→
+   860→  auto controller = controller_map.find(fd);
+   861→  if (controller == controller_map.end()) {
+   862→    return syscall(SYS_ioctl, fd, op, argp);
+   863→  }
+   864→
+   865→  int type = (op >> 8 & 0xFF);
+   866→  int number = (op >> 0 & 0xFF);
+   867→  const char *event = controller->second.event ? controller->second.event : "event0";
+   868→  int event_number = controller->second.slot;
+   869→
+   870→  if (type == 0x45 && number == 0x1) {
+   871→    Logger::log("Hooking ioctl EVIOCGVERSION for event %s\n", event);
+   872→    int version = 65536;
+   873→    memcpy(argp, (void *)&version, sizeof(int));
+   874→    return 0;
+   875→  } else if (type == 0x45 && number == 0x2) {
+   876→    Logger::log("Hooking ioctl EVIOCGID for event %s\n", event);
+   877→    struct input_id id;
+   878→    memset(&id, 0, sizeof(id));
+   879→    id.bustype = 0x03;
+   880→    id.vendor = static_cast<uint16_t>(GAMEPAD_VENDOR_ID_BASE + event_number);
+   881→    id.product = static_cast<uint16_t>(GAMEPAD_PRODUCT_ID_BASE + event_number);
+   882→    id.version = GAMEPAD_VERSION;
+   883→    memcpy(argp, (void *)&id, sizeof(id));
+   884→    return 0;
+   885→  } else if (type == 0x45 && number == 0x6) {
+   886→    Logger::log("Hooking ioctl EVIOCGNAME for event %s\n", event);
+   887→    copy_slot_ioctl_string(op, argp, GAMEPAD_NAME_TEMPLATE, event_number);
+   888→    return 0;
+   889→  } else if (type == 0x45 && number == 0x7) {
+   890→    Logger::log("Hooking ioctl EVIOCGPHYS for event %s\n", event);
+   891→    copy_slot_ioctl_string(op, argp, GAMEPAD_PHYS_TEMPLATE, event_number);
+   892→    return 0;
+   893→  } else if (type == 0x45 && number == 0x8) {
+   894→    Logger::log("Hooking ioctl EVIOCGUNIQ for event %s\n", event);
+   895→    copy_slot_ioctl_string(op, argp, GAMEPAD_UNIQ_TEMPLATE, event_number);
+   896→    return 0;
+   897→  } else if (type == 0x45 && number == 0x9) {
+   898→    Logger::log("Hooking ioctl EVIOCGPROP for event %s\n", event);
+   899→    return 0;
+   900→  } else if (type == 0x45 && number == 0x18) {
+   901→    Logger::log("Hooking ioctl EVIOCGKEY(len) for event %s\n", event);
+   902→    char bitmask[KEY_MAX / 8] = {0};
+   903→    memcpy(argp, (void *)&bitmask, sizeof(bitmask));
+   904→    return 0;
+   905→  } else if (type == 0x45 && number == 0x20) {
+   906→    Logger::log("Hooking ioctl EVIOCGBIT(0, len) for event %s\n", event);
+   907→    char bitmask[EV_MAX / 8] = {0};
+   908→    bitmask[EV_SYN / 8] |= (1 << (EV_SYN % 8));
+   909→    bitmask[EV_KEY / 8] |= (1 << (EV_KEY % 8));
+   910→    bitmask[EV_ABS / 8] |= (1 << (EV_ABS % 8));
+   911→    memcpy(argp, (void *)&bitmask, sizeof(bitmask));
+   912→    return 0;
+   913→  } else if (type == 0x45 && number == 0x21) {
+   914→    Logger::log("Hooking ioctl EVIOCGBIT(EV_KEY, len) for event %s\n", event);
+   915→    char bitmask[KEY_MAX / 8] = {0};
+   916→    const int xbox_buttons[] = {BTN_A,    BTN_B,      BTN_X,      BTN_Y,
+   917→                                BTN_TL,   BTN_TR,     BTN_SELECT, BTN_START,
+   918→                                BTN_MODE, BTN_THUMBL, BTN_THUMBR};
+   919→    for (int button : xbox_buttons)
+   920→      bitmask[button / 8] |= (1 << (button % 8));
+   921→    memcpy(argp, (void *)&bitmask, sizeof(bitmask));
+   922→    return 0;
+   923→  } else if (type == 0x45 && number == 0x22) {
+   924→    Logger::log("Hooking ioctl EVIOCGBIT(EV_REL, len) for event %s\n", event);
+   925→    char bitmask[REL_MAX / 8] = {0};
+   926→    memcpy(argp, (void *)&bitmask, sizeof(bitmask));
+   927→    return 0;
+   928→  } else if (type == 0x45 && number == 0x23) {
+   929→    Logger::log("Hooking ioctl EVIOCGBIT(EV_ABS, len) for event %s\n", event);
+   930→    char bitmask[ABS_MAX / 8] = {0};
+   931→    bitmask[ABS_X / 8] |= (1 << (ABS_X % 8));
+   932→    bitmask[ABS_Y / 8] |= (1 << (ABS_Y % 8));
+   933→    bitmask[ABS_RX / 8] |= (1 << (ABS_RX % 8));
+   934→    bitmask[ABS_RY / 8] |= (1 << (ABS_RY % 8));
+   935→    bitmask[ABS_GAS / 8] |= (1 << (ABS_GAS % 8));
+   936→    bitmask[ABS_BRAKE / 8] |= (1 << (ABS_BRAKE % 8));
+   937→    bitmask[ABS_HAT0X / 8] |= (1 << (ABS_HAT0X % 8));
+   938→    bitmask[ABS_HAT0Y / 8] |= (1 << (ABS_HAT0Y % 8));
+   939→    memcpy(argp, (void *)&bitmask, sizeof(bitmask));
+   940→    return 0;
+   941→  } else if (type == 0x45 && number == 0x35) {
+   942→    Logger::log("Hooking ioctl EVIOCGBIT(EV_FF, len) for event %s\n", event);
+   943→    char bitmask[FF_MAX / 8] = {0};
+   944→    bitmask[FF_RUMBLE / 8] |= (1 << (FF_RUMBLE % 8));
+   945→    bitmask[FF_PERIODIC / 8] |= (1 << (FF_PERIODIC % 8));
+   946→    memcpy(argp, (void *)&bitmask, sizeof(bitmask));
+   947→    return 0;
+   948→  } else if (type == 0x45 && number == 0x80) {
+   949→    struct ff_effect *effect = static_cast<struct ff_effect *>(argp);
+   950→    if (effect->id == -1)
+   951→      effect->id = next_ff_id++;
+   952→    ff_effects[effect->id] = *effect;
+   953→
+   954→    uint16_t duration = effect->replay.length;
+   955→    uint16_t slot = static_cast<uint16_t>(event_number);
+   956→    if (effect->type == FF_RUMBLE) {
+   957→      send_vibration(effect->u.rumble.strong_magnitude,
+   958→                     effect->u.rumble.weak_magnitude, duration, slot);
+   959→    } else if (effect->type == FF_PERIODIC) {
+   960→      send_vibration(effect->u.periodic.magnitude, effect->u.periodic.magnitude,
+   961→                     duration, slot);
+   962→    }
+   963→    return 0;
+   964→  } else if (type == 0x45 && number == 0x81) {
+   965→    int id = (intptr_t)argp;
+   966→    ff_effects.erase(id);
+   967→    return 0;
+   968→  } else if (type == 0x45 && number == 0x84) {
+   969→    int max_effects = 16;
+   970→    memcpy(argp, &max_effects, sizeof(int));
+   971→    return 0;
+   972→  } else if (type == 0x45 && number >= 0x40 && number <= 0x51) {
+   973→    Logger::log("Hooking ioctl EVIOCGABS(ABS) for event %s\n", event);
+   974→    struct input_absinfo abs_info;
+   975→    memset(&abs_info, 0, sizeof(abs_info));
+   976→    if (number >= 0x40 && number <= 0x44) {
+   977→      abs_info.value = 0;
+   978→      abs_info.minimum = -32768;
+   979→      abs_info.maximum = 32767;
+   980→    } else if (number >= 0x49 && number <= 0x4A) {
+   981→      abs_info.value = 0;
+   982→      abs_info.minimum = 0;
+   983→      abs_info.maximum = 255;
+   984→    } else if (number >= 0x50 && number <= 0x51) {
+   985→      abs_info.value = 0;
+   986→      abs_info.minimum = -1;
+   987→      abs_info.maximum = 1;
+   988→    }
+   989→    memcpy(argp, (void *)&abs_info, sizeof(abs_info));
+   990→    return 0;
+   991→  } else if (type == 0x45 && number == 0x90) {
+   992→    Logger::log("Hooking ioctl EVIOCGRAB for event %s\n", event);
+   993→    return 0;
+   994→  } else if (type == 0x6A && number == 0x1) {
+   995→    Logger::log("Hooking ioctl JSIOCGVERSION for event %s\n", event);
+   996→    int version = JS_VERSION;
+   997→    memcpy(argp, (void *)&version, sizeof(version));
+   998→    return 0;
+   999→  } else if (type == 0x6A && number == 0x11) {
+  1000→    Logger::log("Hooking ioctl JSIOCGAXES for event %s\n", event);
+  1001→    uint8_t axes = GAMEPAD_AXIS_COUNT;
+  1002→    memcpy(argp, (void *)&axes, sizeof(axes));
+  1003→    return 0;
+  1004→  } else if (type == 0x6A && number == 0x12) {
+  1005→    Logger::log("Hooking ioctl JSIOCGBUTTONS for event %s\n", event);
+  1006→    uint8_t buttons = GAMEPAD_BUTTON_COUNT;
+  1007→    memcpy(argp, (void *)&buttons, sizeof(buttons));
+  1008→    return 0;
+  1009→  } else if (type == 0x6A && number == 0x13) {
+  1010→    Logger::log("Hooking ioctl JSIOCGNAME(len) for event %s\n", event);
+  1011→    copy_slot_ioctl_string(op, argp, GAMEPAD_NAME_TEMPLATE, event_number);
+  1012→    return 0;
+  1013→  } else {
+  1014→    Logger::log("Unhandled evdev ioctl, type %d number %d\n", type, number);
+  1015→    return syscall(SYS_ioctl, fd, op, argp);
+  1016→  }
+  1017→}
+  1018→
+  1019→EXPORT int close(int fd) {
+  1020→  if (!my_close)
+  1021→    *(void **)&my_close = dlsym(RTLD_NEXT, "close");
+  1022→
+  1023→  auto controller = controller_map.find(fd);
+  1024→  if (controller != controller_map.end()) {
+  1025→    Logger::log("Removing controller, fd %d event %s\n", controller->first,
+  1026→                controller->second.event ? controller->second.event : "(unknown)");
+  1027→    if (controller->second.ring)
+  1028→      munmap(controller->second.ring, controller->second.mapping_size);
+  1029→    free(controller->second.event);
+  1030→    controller_map.erase(fd);
+  1031→  }
+  1032→
+  1033→  return my_close(fd);
+  1034→}
+  1035→
+  1036→EXPORT ssize_t read(int fd, void *buf, size_t count) {
+  1037→  auto controller = controller_map.find(fd);
+  1038→
+  1039→  if (controller != controller_map.end()) {
+  1040→    FakeController &fake = controller->second;
+  1041→    if (count < FAKE_INPUT_EVENT_SIZE) {
+  1042→      errno = EINVAL;
+  1043→      return -1;
+  1044→    }
+  1045→
+  1046→    int flags = fcntl(fd, F_GETFL);
+  1047→    bool isNonBlock = flags >= 0 && (flags & O_NONBLOCK);
+  1048→
+  1049→    if (fake_fd_is_stale(fd)) {
+  1050→      errno = ENODEV;
+  1051→      return -1;
+  1052→    }
+  1053→
+  1054→    long backoff_ns = 1000 * 1000; // 1ms initial
+  1055→    while (!fake_fd_has_unread_data(fd)) {
+  1056→      if (fake_fd_is_stale(fd)) {
+  1057→        errno = ENODEV;
+  1058→        return -1;
+  1059→      }
+  1060→      if (isNonBlock) {
+  1061→        errno = EAGAIN;
+  1062→        return -1;
+  1063→      }
+  1064→      setup_signal_handler();
+  1065→      if (stop_flag) {
+  1066→        errno = EINTR;
+  1067→        return -1;
+  1068→      }
+  1069→      struct timespec sleep_time = {0, backoff_ns};
+  1070→      nanosleep(&sleep_time, nullptr);
+  1071→      if (backoff_ns < 16 * 1000 * 1000)
+  1072→        backoff_ns *= 2;
+  1073→    }
+  1074→
+  1075→    uint64_t write_seq = ring_write_seq(fake.ring);
+  1076→    if (write_seq - fake.read_seq > FAKE_INPUT_RING_CAPACITY) {
+  1077→      fake.read_seq = write_seq - FAKE_INPUT_RING_CAPACITY;
+  1078→      if (fake.keyframe_remaining == 0) {
+  1079→        capture_keyframe(fake, "overflow", fd);
+  1080→      }
+  1081→    }
+  1082→
+  1083→    uint8_t *out = static_cast<uint8_t *>(buf);
+  1084→    size_t out_events = 0;
+  1085→    size_t requested_events = count / FAKE_INPUT_EVENT_SIZE;
+  1086→
+  1087→    // A keyframe is pending (open / ring overflow). Replay the full
+  1088→    // absolute baseline — every button and axis at its snapshot value — before
+  1089→    // any surviving delta events, so a lost button-up / axis-return can't stick.
+  1090→    // The frame streams across reads of any size: we emit as much as fits and do
+  1091→    // NOT consume the ring until it is fully delivered, so even a
+  1092→    // one-event-at-a-time consumer recovers. keyframe_remaining keeps the fd
+  1093→    // readable (see fake_fd_has_unread_data) so poll wakes us to finish it.
+  1094→    if (fake.keyframe_remaining > 0) {
+  1095→      struct timeval now = {};
+  1096→      gettimeofday(&now, nullptr);
+  1097→      while (fake.keyframe_remaining > 0 && out_events < requested_events) {
+  1098→        size_t idx = kNeutralEventCount - fake.keyframe_remaining;
+  1099→        struct input_event ev;
+  1100→        memset(&ev, 0, sizeof(ev));
+  1101→        ev.time = now;
+  1102→        ev.type = kNeutralEvents[idx].type;
+  1103→        ev.code = kNeutralEvents[idx].code;
+  1104→        ev.value = keyframe_value(fake, kNeutralEvents[idx].type,
+  1105→                                  kNeutralEvents[idx].code);
+  1106→        memcpy(out + (out_events * FAKE_INPUT_EVENT_SIZE), &ev,
+  1107→               FAKE_INPUT_EVENT_SIZE);
+  1108→        out_events++;
+  1109→        fake.keyframe_remaining--;
+  1110→      }
+  1111→      if (fake.keyframe_remaining > 0) {
+  1112→        // Buffer filled before the baseline finished; deliver the remainder (and
+  1113→        // only then fresh events) on subsequent reads. out_events >= 1 here.
+  1114→        return static_cast<ssize_t>(out_events * FAKE_INPUT_EVENT_SIZE);
+  1115→      }
+  1116→    }
+  1117→
+  1118→    size_t available_events =
+  1119→        static_cast<size_t>(std::min<uint64_t>(write_seq - fake.read_seq,
+  1120→                                              FAKE_INPUT_RING_CAPACITY));
+  1121→    size_t events_to_read =
+  1122→        std::min(requested_events - out_events, available_events);
+  1123→    const uint8_t *ring_events =
+  1124→        reinterpret_cast<const uint8_t *>(fake.ring) +
+  1125→        FAKE_INPUT_RING_HEADER_SIZE;
+  1126→
+  1127→    for (size_t i = 0; i < events_to_read; i++) {
+  1128→      size_t event_index =
+  1129→          static_cast<size_t>((fake.read_seq + i) % FAKE_INPUT_RING_CAPACITY);
+  1130→      memcpy(out + ((out_events + i) * FAKE_INPUT_EVENT_SIZE),
+  1131→             ring_events + (event_index * FAKE_INPUT_EVENT_SIZE),
+  1132→             FAKE_INPUT_EVENT_SIZE);
+  1133→    }
+  1134→
+  1135→    fake.read_seq += events_to_read;
+  1136→    return static_cast<ssize_t>((out_events + events_to_read) *
+  1137→                                FAKE_INPUT_EVENT_SIZE);
+  1138→  }
+  1139→  return syscall(SYS_read, fd, buf, count);
+  1140→}
+  1141→
+  1142→EXPORT ssize_t write(int fd, const void *buf, size_t count) {
+  1143→  if (!my_write)
+  1144→    *(void **)&my_write = dlsym(RTLD_NEXT, "write");
+  1145→
+  1146→  auto controller = controller_map.find(fd);
+  1147→  if (controller != controller_map.end()) {
+  1148→    if (fake_fd_is_stale(fd)) {
+  1149→      errno = ENODEV;
+  1150→      return -1;
+  1151→    }
+  1152→
+  1153→    const struct input_event *ev = nullptr;
+  1154→    uint16_t slot = static_cast<uint16_t>(controller->second.slot);
+  1155→    if (count == sizeof(struct input_event)) {
+  1156→      ev = static_cast<const struct input_event *>(buf);
+  1157→      check_ff_event(ev, slot);
+  1158→    }
+  1159→
+  1160→    return static_cast<ssize_t>(count);
+  1161→  }
+  1162→  return my_write(fd, buf, count);
+  1163→}
+  1164→
+  1165→EXPORT ssize_t writev(int fd, const struct iovec *iov, int iovcnt) {
+  1166→  auto controller = controller_map.find(fd);
+  1167→  if (controller != controller_map.end()) {
+  1168→    if (fake_fd_is_stale(fd)) {
+  1169→      errno = ENODEV;
+  1170→      return -1;
+  1171→    }
+  1172→
+  1173→    uint16_t slot = static_cast<uint16_t>(controller->second.slot);
+  1174→    ssize_t total = 0;
+  1175→    for (int i = 0; i < iovcnt; i++) {
+  1176→      if (iov[i].iov_len == sizeof(struct input_event)) {
+  1177→        const struct input_event *ev =
+  1178→            static_cast<const struct input_event *>(iov[i].iov_base);
+  1179→        check_ff_event(ev, slot);
+  1180→      }
+  1181→      total += static_cast<ssize_t>(iov[i].iov_len);
+  1182→    }
+  1183→    return total;
+  1184→  }
+  1185→  return syscall(SYS_writev, fd, iov, iovcnt);
+  1186→}
+  1187→
+  1188→EXPORT int poll(struct pollfd *fds, nfds_t nfds, int timeout) {
+  1189→  if (!my_poll)
+  1190→    *(void **)&my_poll = dlsym(RTLD_NEXT, "poll");
+  1191→
+  1192→  bool has_fake_fds = false;
+  1193→  std::vector<struct pollfd> real_fds;
+  1194→  real_fds.reserve(nfds);
+  1195→
+  1196→  for (nfds_t i = 0; i < nfds; i++) {
+  1197→    if (is_fake_input_fd(fds[i].fd)) {
+  1198→      has_fake_fds = true;
+  1199→    }
+  1200→    real_fds.push_back(fds[i]);
+  1201→    if (is_fake_input_fd(real_fds[i].fd)) {
+  1202→      real_fds[i].fd = -1;
+  1203→      real_fds[i].revents = 0;
+  1204→    }
+  1205→  }
+  1206→
+  1207→  if (!has_fake_fds)
+  1208→    return my_poll ? my_poll(fds, nfds, timeout) : -1;
+  1209→
+  1210→  const long long deadline_ms = timeout < 0 ? -1 : monotonic_ms() + timeout;
+  1211→  int backoff_ms = 1;
+  1212→
+  1213→  while (true) {
+  1214→    int ready = 0;
+  1215→
+  1216→    for (nfds_t i = 0; i < nfds; i++)
+  1217→      fds[i].revents = 0;
+  1218→
+  1219→    for (nfds_t i = 0; i < nfds; i++) {
+  1220→      if (!is_fake_input_fd(fds[i].fd))
+  1221→        continue;
+  1222→
+  1223→      short revents = 0;
+  1224→      if (fake_fd_is_stale(fds[i].fd))
+  1225→        revents |= POLLHUP;
+  1226→      if ((fds[i].events & (POLLIN | POLLRDNORM)) &&
+  1227→          fake_fd_has_unread_data(fds[i].fd))
+  1228→        revents |= (fds[i].events & (POLLIN | POLLRDNORM));
+  1229→
+  1230→      fds[i].revents = revents;
+  1231→      if (revents)
+  1232→        ready++;
+  1233→    }
+  1234→
+  1235→    int real_timeout = ready > 0 ? 0 : [&] {
+  1236→      if (timeout == 0) return 0;
+  1237→      int remaining = deadline_ms < 0
+  1238→                          ? backoff_ms
+  1239→                          : std::min(backoff_ms, (int)(deadline_ms - monotonic_ms()));
+  1240→      return std::max(remaining, 0);
+  1241→    }();
+  1242→
+  1243→    int real_ready = my_poll ? my_poll(real_fds.data(), nfds, real_timeout) : 0;
+  1244→    if (real_ready > 0) {
+  1245→      for (nfds_t i = 0; i < nfds; i++) {
+  1246→        if (!is_fake_input_fd(fds[i].fd)) {
+  1247→          fds[i].revents = real_fds[i].revents;
+  1248→          if (fds[i].revents)
+  1249→            ready++;
+  1250→        }
+  1251→      }
+  1252→    }
+  1253→
+  1254→    if (ready == 0 && real_timeout > 0) {
+  1255→      for (nfds_t i = 0; i < nfds; i++) {
+  1256→        if (!is_fake_input_fd(fds[i].fd))
+  1257→          continue;
+  1258→
+  1259→        short revents = 0;
+  1260→        if (fake_fd_is_stale(fds[i].fd))
+  1261→          revents |= POLLHUP;
+  1262→        if ((fds[i].events & (POLLIN | POLLRDNORM)) &&
+  1263→            fake_fd_has_unread_data(fds[i].fd))
+  1264→          revents |= (fds[i].events & (POLLIN | POLLRDNORM));
+  1265→
+  1266→        fds[i].revents = revents;
+  1267→        if (revents)
+  1268→          ready++;
+  1269→      }
+  1270→    }
+  1271→
+  1272→    if (ready > 0)
+  1273→      return ready;
+  1274→
+  1275→    if (timeout == 0)
+  1276→      return 0;
+  1277→
+  1278→    if (deadline_ms >= 0 && monotonic_ms() >= deadline_ms)
+  1279→      return 0;
+  1280→
+  1281→    if (backoff_ms < 16)
+  1282→      backoff_ms *= 2;
+  1283→  }
+  1284→}
+  1285→
+  1286→EXPORT int ppoll(struct pollfd *fds, nfds_t nfds,
+  1287→                 const struct timespec *timeout, const sigset_t *sigmask) {
+  1288→  if (!my_ppoll)
+  1289→    *(void **)&my_ppoll = dlsym(RTLD_NEXT, "ppoll");
+  1290→
+  1291→  if (sigmask)
+  1292→    return my_ppoll ? my_ppoll(fds, nfds, timeout, sigmask)
+  1293→                    : syscall(SYS_ppoll, fds, nfds, timeout, sigmask,
+  1294→                              sizeof(sigset_t));
+  1295→
+  1296→  return poll(fds, nfds, static_cast<int>(timespec_to_ms(timeout)));
+  1297→}
+  1298→
+  1299→EXPORT int select(int nfds, fd_set *readfds, fd_set *writefds,
+  1300→                  fd_set *exceptfds, struct timeval *timeout) {
+  1301→  if (!my_select)
+  1302→    *(void **)&my_select = dlsym(RTLD_NEXT, "select");
+  1303→
+  1304→  fd_set original_readfds;
+  1305→  fd_set original_writefds;
+  1306→  fd_set original_exceptfds;
+  1307→  fd_set real_readfds;
+  1308→  fd_set real_writefds;
+  1309→  fd_set real_exceptfds;
+  1310→  bool has_fake_fds = false;
+  1311→
+  1312→  if (readfds) {
+  1313→    original_readfds = *readfds;
+  1314→    real_readfds = *readfds;
+  1315→  } else {
+  1316→    FD_ZERO(&original_readfds);
+  1317→    FD_ZERO(&real_readfds);
+  1318→  }
+  1319→  if (writefds) {
+  1320→    original_writefds = *writefds;
+  1321→    real_writefds = *writefds;
+  1322→  } else {
+  1323→    FD_ZERO(&original_writefds);
+  1324→    FD_ZERO(&real_writefds);
+  1325→  }
+  1326→  if (exceptfds) {
+  1327→    original_exceptfds = *exceptfds;
+  1328→    real_exceptfds = *exceptfds;
+  1329→  } else {
+  1330→    FD_ZERO(&original_exceptfds);
+  1331→    FD_ZERO(&real_exceptfds);
+  1332→  }
+  1333→
+  1334→  for (int fd = 0; fd < nfds; fd++) {
+  1335→    if (!is_fake_input_fd(fd))
+  1336→      continue;
+  1337→    has_fake_fds = true;
+  1338→    FD_CLR(fd, &real_readfds);
+  1339→    FD_CLR(fd, &real_writefds);
+  1340→    FD_CLR(fd, &real_exceptfds);
+  1341→  }
+  1342→
+  1343→  if (!has_fake_fds)
+  1344→    return my_select ? my_select(nfds, readfds, writefds, exceptfds, timeout)
+  1345→                     : -1;
+  1346→
+  1347→  const long long timeout_ms = timeval_to_ms(timeout);
+  1348→  const long long deadline_ms =
+  1349→      timeout_ms < 0 ? -1 : monotonic_ms() + timeout_ms;
+  1350→  int backoff_ms = 1;
+  1351→
+  1352→  while (true) {
+  1353→    int ready = 0;
+  1354→
+  1355→    if (readfds)
+  1356→      FD_ZERO(readfds);
+  1357→    if (writefds)
+  1358→      FD_ZERO(writefds);
+  1359→    if (exceptfds)
+  1360→      FD_ZERO(exceptfds);
+  1361→
+  1362→    for (int fd = 0; fd < nfds; fd++) {
+  1363→      if (!is_fake_input_fd(fd))
+  1364→        continue;
+  1365→      if (readfds && FD_ISSET(fd, &original_readfds) && fake_fd_is_stale(fd)) {
+  1366→        FD_SET(fd, readfds);
+  1367→        ready++;
+  1368→      } else if (readfds && FD_ISSET(fd, &original_readfds) &&
+  1369→                 fake_fd_has_unread_data(fd)) {
+  1370→        FD_SET(fd, readfds);
+  1371→        ready++;
+  1372→      }
+  1373→    }
+  1374→
+  1375→    int wait_ms = ready > 0 ? 0 : [&] {
+  1376→      if (timeout_ms == 0) return 0;
+  1377→      int remaining = deadline_ms < 0
+  1378→                          ? backoff_ms
+  1379→                          : std::min(backoff_ms, (int)(deadline_ms - monotonic_ms()));
+  1380→      return std::max(remaining, 0);
+  1381→    }();
+  1382→    struct timeval wait_tv = {wait_ms / 1000, (wait_ms % 1000) * 1000};
+  1383→
+  1384→    fd_set iter_readfds = real_readfds;
+  1385→    fd_set iter_writefds = real_writefds;
+  1386→    fd_set iter_exceptfds = real_exceptfds;
+  1387→
+  1388→    int real_ready =
+  1389→        my_select
+  1390→            ? my_select(nfds, readfds ? &iter_readfds : nullptr,
+  1391→                        writefds ? &iter_writefds : nullptr,
+  1392→                        exceptfds ? &iter_exceptfds : nullptr, &wait_tv)
+  1393→            : 0;
+  1394→
+  1395→    if (real_ready > 0) {
+  1396→      for (int fd = 0; fd < nfds; fd++) {
+  1397→        if (readfds && FD_ISSET(fd, &iter_readfds)) {
+  1398→          FD_SET(fd, readfds);
+  1399→          ready++;
+  1400→        }
+  1401→        if (writefds && FD_ISSET(fd, &iter_writefds)) {
+  1402→          FD_SET(fd, writefds);
+  1403→          ready++;
+  1404→        }
+  1405→        if (exceptfds && FD_ISSET(fd, &iter_exceptfds)) {
+  1406→          FD_SET(fd, exceptfds);
+  1407→          ready++;
+  1408→        }
+  1409→      }
+  1410→    }
+  1411→
+  1412→    if (ready == 0 && wait_ms > 0) {
+  1413→      for (int fd = 0; fd < nfds; fd++) {
+  1414→        if (!is_fake_input_fd(fd))
+  1415→          continue;
+  1416→        if (readfds && FD_ISSET(fd, &original_readfds) && fake_fd_is_stale(fd)) {
+  1417→          FD_SET(fd, readfds);
+  1418→          ready++;
+  1419→        } else if (readfds && FD_ISSET(fd, &original_readfds) &&
+  1420→                   fake_fd_has_unread_data(fd)) {
+  1421→          FD_SET(fd, readfds);
+  1422→          ready++;
+  1423→        }
+  1424→      }
+  1425→    }
+  1426→
+  1427→    if (ready > 0)
+  1428→      return ready;
+  1429→
+  1430→    if (timeout_ms == 0)
+  1431→      return 0;
+  1432→
+  1433→    if (deadline_ms >= 0 && monotonic_ms() >= deadline_ms)
+  1434→      return 0;
+  1435→
+  1436→    if (backoff_ms < 16)
+  1437→      backoff_ms *= 2;
+  1438→  }
+  1439→}
+  1440→

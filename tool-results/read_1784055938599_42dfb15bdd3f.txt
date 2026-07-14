@@ -1,0 +1,928 @@
+     1→#include <jni.h>
+     2→
+     3→#include <android/asset_manager.h>
+     4→#include <android/asset_manager_jni.h>
+     5→#include <android/log.h>
+     6→#include <curl/curl.h>
+     7→#include <lzma.h>
+     8→#include <zstd.h>
+     9→
+    10→#include <algorithm>
+    11→#include <cerrno>
+    12→#include <chrono>
+    13→#include <cstdint>
+    14→#include <cstdio>
+    15→#include <cstdlib>
+    16→#include <cstring>
+    17→#include <memory>
+    18→#include <mutex>
+    19→#include <optional>
+    20→#include <string>
+    21→#include <string_view>
+    22→#include <unordered_set>
+    23→#include <vector>
+    24→
+    25→#include <fcntl.h>
+    26→#include <sys/stat.h>
+    27→#include <unistd.h>
+    28→
+    29→namespace {
+    30→
+    31→constexpr const char* kLogTag = "NativeContentIO";
+    32→constexpr size_t kBufferSize = 256 * 1024;
+    33→constexpr int64_t kProgressBatchBytes = 8 * 1024 * 1024;
+    34→constexpr int64_t kProgressBatchIntervalMs = 100;
+    35→
+    36→#define NATIVE_LOGE(...) __android_log_print(ANDROID_LOG_ERROR, kLogTag, __VA_ARGS__)
+    37→#define NATIVE_LOGW(...) __android_log_print(ANDROID_LOG_WARN, kLogTag, __VA_ARGS__)
+    38→
+    39→std::once_flag g_curl_global_once;
+    40→
+    41→static void ensure_curl_global_init() {
+    42→    std::call_once(g_curl_global_once, [] { curl_global_init(CURL_GLOBAL_DEFAULT); });
+    43→}
+    44→
+    45→std::string jstr(JNIEnv* env, jstring value) {
+    46→    if (!value) return {};
+    47→    const char* chars = env->GetStringUTFChars(value, nullptr);
+    48→    if (!chars) return {};
+    49→    std::string out(chars);
+    50→    env->ReleaseStringUTFChars(value, chars);
+    51→    return out;
+    52→}
+    53→
+    54→bool mkdirs(std::string_view path) {
+    55→    if (path.empty()) return true;
+    56→    std::string current;
+    57→    current.reserve(path.size());
+    58→
+    59→    size_t pos = 0;
+    60→    if (path[0] == '/') {
+    61→        current.push_back('/');
+    62→        pos = 1;
+    63→    }
+    64→
+    65→    while (pos <= path.size()) {
+    66→        size_t next = path.find('/', pos);
+    67→        std::string_view part =
+    68→            path.substr(pos, next == std::string_view::npos ? path.size() - pos : next - pos);
+    69→        if (!part.empty()) {
+    70→            if (!current.empty() && current.back() != '/') current.push_back('/');
+    71→            current.append(part);
+    72→            if (::mkdir(current.c_str(), 0771) != 0 && errno != EEXIST) {
+    73→                return false;
+    74→            }
+    75→        }
+    76→        if (next == std::string_view::npos) break;
+    77→        pos = next + 1;
+    78→    }
+    79→    return true;
+    80→}
+    81→
+    82→bool ensure_parent_dir(const std::string& path) {
+    83→    const size_t slash = path.find_last_of('/');
+    84→    if (slash == std::string::npos || slash == 0) return true;
+    85→    return mkdirs(std::string_view(path).substr(0, slash));
+    86→}
+    87→
+    88→std::string join_path(const std::string& base, const std::string& rel) {
+    89→    if (base.empty()) return rel;
+    90→    if (base.back() == '/') return base + rel;
+    91→    return base + "/" + rel;
+    92→}
+    93→
+    94→bool is_safe_relative_path(std::string_view path) {
+    95→    if (path.empty() || path[0] == '/') return false;
+    96→    size_t pos = 0;
+    97→    while (pos <= path.size()) {
+    98→        size_t next = path.find('/', pos);
+    99→        std::string_view part =
+   100→            path.substr(pos, next == std::string_view::npos ? path.size() - pos : next - pos);
+   101→        if (part == "..") return false;
+   102→        if (next == std::string_view::npos) break;
+   103→        pos = next + 1;
+   104→    }
+   105→    return true;
+   106→}
+   107→
+   108→std::string clean_entry_name(std::string name) {
+   109→    while (name.rfind("./", 0) == 0) {
+   110→        name.erase(0, 2);
+   111→    }
+   112→    return name;
+   113→}
+   114→
+   115→std::string trim_trailing_slashes(std::string path) {
+   116→    while (path.size() > 1 && path.back() == '/') {
+   117→        path.pop_back();
+   118→    }
+   119→    return path;
+   120→}
+   121→
+   122→bool has_symlink_ancestor(
+   123→    const std::string& entry_name,
+   124→    const std::unordered_set<std::string>& symlink_entries) {
+   125→    if (symlink_entries.empty()) return false;
+   126→    std::string path = trim_trailing_slashes(entry_name);
+   127→    while (true) {
+   128→        if (symlink_entries.count(path)) return true;
+   129→        const size_t slash = path.find_last_of('/');
+   130→        if (slash == std::string::npos || slash == 0) break;
+   131→        path.resize(slash);
+   132→    }
+   133→    return false;
+   134→}
+   135→
+   136→std::string parent_entry_name(const std::string& entry_name) {
+   137→    std::string normalized = trim_trailing_slashes(entry_name);
+   138→    const size_t slash = normalized.find_last_of('/');
+   139→    if (slash == std::string::npos) return {};
+   140→    return normalized.substr(0, slash);
+   141→}
+   142→
+   143→uint64_t parse_tar_number(const char* field, size_t length) {
+   144→    if (length == 0) return 0;
+   145→    const unsigned char first = static_cast<unsigned char>(field[0]);
+   146→    if ((first & 0x80) != 0) {
+   147→        uint64_t value = first & 0x7f;
+   148→        for (size_t i = 1; i < length; ++i) {
+   149→            value = (value << 8) | static_cast<unsigned char>(field[i]);
+   150→        }
+   151→        return value;
+   152→    }
+   153→
+   154→    size_t i = 0;
+   155→    while (i < length && (field[i] == ' ' || field[i] == '\0')) ++i;
+   156→    uint64_t value = 0;
+   157→    for (; i < length; ++i) {
+   158→        if (field[i] < '0' || field[i] > '7') break;
+   159→        value = (value << 3) + static_cast<uint64_t>(field[i] - '0');
+   160→    }
+   161→    return value;
+   162→}
+   163→
+   164→std::string tar_string(const char* field, size_t length) {
+   165→    size_t n = 0;
+   166→    while (n < length && field[n] != '\0') ++n;
+   167→    return std::string(field, n);
+   168→}
+   169→
+   170→std::string read_octal_record_string(std::string data) {
+   171→    while (!data.empty() && data.back() == '\0') data.pop_back();
+   172→    return data;
+   173→}
+   174→
+   175→struct PaxValues {
+   176→    std::optional<std::string> path;
+   177→    std::optional<std::string> link_path;
+   178→};
+   179→
+   180→PaxValues parse_pax(std::string_view data) {
+   181→    PaxValues values;
+   182→    size_t pos = 0;
+   183→    while (pos < data.size()) {
+   184→        size_t space = data.find(' ', pos);
+   185→        if (space == std::string_view::npos) break;
+   186→        size_t len = 0;
+   187→        for (size_t i = pos; i < space; ++i) {
+   188→            if (data[i] < '0' || data[i] > '9') {
+   189→                len = 0;
+   190→                break;
+   191→            }
+   192→            len = len * 10 + static_cast<size_t>(data[i] - '0');
+   193→        }
+   194→        if (len == 0 || pos + len > data.size()) break;
+   195→        std::string_view record = data.substr(space + 1, pos + len - space - 1);
+   196→        if (!record.empty() && record.back() == '\n') record.remove_suffix(1);
+   197→        size_t eq = record.find('=');
+   198→        if (eq != std::string_view::npos) {
+   199→            std::string_view key = record.substr(0, eq);
+   200→            std::string value(record.substr(eq + 1));
+   201→            if (key == "path") values.path = std::move(value);
+   202→            if (key == "linkpath") values.link_path = std::move(value);
+   203→        }
+   204→        pos += len;
+   205→    }
+   206→    return values;
+   207→}
+   208→
+   209→class Reader {
+   210→public:
+   211→    virtual ~Reader() = default;
+   212→    virtual ssize_t read(uint8_t* out, size_t length) = 0;
+   213→
+   214→    bool read_exact(uint8_t* out, size_t length) {
+   215→        size_t total = 0;
+   216→        while (total < length) {
+   217→            ssize_t n = read(out + total, length - total);
+   218→            if (n <= 0) return false;
+   219→            total += static_cast<size_t>(n);
+   220→        }
+   221→        return true;
+   222→    }
+   223→
+   224→    bool skip(uint64_t amount) {
+   225→        uint8_t buffer[8192];
+   226→        while (amount > 0) {
+   227→            const size_t chunk = static_cast<size_t>(std::min<uint64_t>(amount, sizeof(buffer)));
+   228→            if (!read_exact(buffer, chunk)) return false;
+   229→            amount -= chunk;
+   230→        }
+   231→        return true;
+   232→    }
+   233→};
+   234→
+   235→class FileReader final : public Reader {
+   236→public:
+   237→    explicit FileReader(std::string path) : file_(std::fopen(path.c_str(), "rb")) {
+   238→        if (file_) std::setvbuf(file_, nullptr, _IOFBF, kBufferSize);
+   239→    }
+   240→    ~FileReader() override {
+   241→        if (file_) std::fclose(file_);
+   242→    }
+   243→    bool ok() const { return file_ != nullptr; }
+   244→    ssize_t read(uint8_t* out, size_t length) override {
+   245→        if (!file_) return -1;
+   246→        size_t n = std::fread(out, 1, length, file_);
+   247→        if (n == 0 && std::ferror(file_)) return -1;
+   248→        return static_cast<ssize_t>(n);
+   249→    }
+   250→
+   251→private:
+   252→    FILE* file_ = nullptr;
+   253→};
+   254→
+   255→class AssetReader final : public Reader {
+   256→public:
+   257→    AssetReader(AAssetManager* manager, std::string path)
+   258→        : asset_(manager ? AAssetManager_open(manager, path.c_str(), AASSET_MODE_STREAMING) : nullptr) {}
+   259→
+   260→    ~AssetReader() override {
+   261→        if (asset_) AAsset_close(asset_);
+   262→    }
+   263→
+   264→    bool ok() const { return asset_ != nullptr; }
+   265→
+   266→    ssize_t read(uint8_t* out, size_t length) override {
+   267→        if (!asset_) return -1;
+   268→        return AAsset_read(asset_, out, length);
+   269→    }
+   270→
+   271→private:
+   272→    AAsset* asset_ = nullptr;
+   273→};
+   274→
+   275→class FileWriter final {
+   276→public:
+   277→    FileWriter(const std::string& path, bool nofollow) {
+   278→        int flags = O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC;
+   279→        if (nofollow) flags |= O_NOFOLLOW;
+   280→        int fd = ::open(
+   281→            path.c_str(),
+   282→            flags,
+   283→            0660);
+   284→        if (fd >= 0) file_ = ::fdopen(fd, "wb");
+   285→        if (file_) {
+   286→            std::setvbuf(file_, nullptr, _IONBF, 0);
+   287→        } else if (fd >= 0) {
+   288→            ::close(fd);
+   289→        }
+   290→    }
+   291→
+   292→    ~FileWriter() {
+   293→        close();
+   294→    }
+   295→
+   296→    bool ok() const {
+   297→        return file_ != nullptr;
+   298→    }
+   299→
+   300→    bool write(const uint8_t* data, size_t length) {
+   301→        return file_ && std::fwrite(data, 1, length, file_) == length;
+   302→    }
+   303→
+   304→    bool close() {
+   305→        if (!file_) return true;
+   306→        FILE* file = file_;
+   307→        file_ = nullptr;
+   308→        int fd = ::fileno(file);
+   309→        if (fd >= 0) {
+   310→            std::fflush(file);
+   311→            ::sync_file_range(fd, 0, 0, SYNC_FILE_RANGE_WRITE);
+   312→        }
+   313→        return std::fclose(file) == 0;
+   314→    }
+   315→
+   316→private:
+   317→    FILE* file_ = nullptr;
+   318→};
+   319→
+   320→class XzReader final : public Reader {
+   321→public:
+   322→    explicit XzReader(std::unique_ptr<Reader> source) : source_(std::move(source)) {
+   323→        ok_ = lzma_stream_decoder(&strm_, UINT64_MAX, LZMA_CONCATENATED) == LZMA_OK;
+   324→    }
+   325→    ~XzReader() override {
+   326→        if (ok_) lzma_end(&strm_);
+   327→    }
+   328→    bool ok() const { return source_ != nullptr && ok_; }
+   329→    ssize_t read(uint8_t* out, size_t length) override {
+   330→        if (finished_) return 0;
+   331→        strm_.next_out = out;
+   332→        strm_.avail_out = length;
+   333→
+   334→        while (strm_.avail_out > 0) {
+   335→            if (strm_.avail_in == 0 && !input_finished_) {
+   336→                ssize_t n = source_->read(input_.data(), input_.size());
+   337→                if (n < 0) return -1;
+   338→                if (n == 0) input_finished_ = true;
+   339→                strm_.next_in = input_.data();
+   340→                strm_.avail_in = static_cast<size_t>(std::max<ssize_t>(n, 0));
+   341→            }
+   342→
+   343→            const size_t in_before = strm_.avail_in;
+   344→            const size_t out_before = length - strm_.avail_out;
+   345→            lzma_ret ret = lzma_code(&strm_, input_finished_ ? LZMA_FINISH : LZMA_RUN);
+   346→            if (ret == LZMA_STREAM_END) {
+   347→                finished_ = true;
+   348→                break;
+   349→            }
+   350→            if (ret != LZMA_OK) {
+   351→                NATIVE_LOGW("XZ decode failed: %d", static_cast<int>(ret));
+   352→                return -1;
+   353→            }
+   354→            if (strm_.avail_in == in_before && (length - strm_.avail_out) == out_before) {
+   355→                NATIVE_LOGW("XZ decoder stalled");
+   356→                return -1;
+   357→            }
+   358→        }
+   359→        return static_cast<ssize_t>(length - strm_.avail_out);
+   360→    }
+   361→
+   362→private:
+   363→    std::unique_ptr<Reader> source_;
+   364→    lzma_stream strm_ = LZMA_STREAM_INIT;
+   365→    bool ok_ = false;
+   366→    std::vector<uint8_t> input_ = std::vector<uint8_t>(1 << 20);
+   367→    bool input_finished_ = false;
+   368→    bool finished_ = false;
+   369→};
+   370→
+   371→class ZstdReader final : public Reader {
+   372→public:
+   373→    explicit ZstdReader(std::unique_ptr<Reader> source)
+   374→        : source_(std::move(source)), stream_(ZSTD_createDStream()) {
+   375→        if (stream_) {
+   376→            size_t rc = ZSTD_initDStream(stream_);
+   377→            if (ZSTD_isError(rc)) {
+   378→                ZSTD_freeDStream(stream_);
+   379→                stream_ = nullptr;
+   380→            }
+   381→        }
+   382→    }
+   383→    ~ZstdReader() override {
+   384→        if (stream_) ZSTD_freeDStream(stream_);
+   385→    }
+   386→    bool ok() const { return source_ != nullptr && stream_ != nullptr; }
+   387→    ssize_t read(uint8_t* out, size_t length) override {
+   388→        if (finished_) return 0;
+   389→        ZSTD_outBuffer output{out, length, 0};
+   390→        while (output.pos < output.size) {
+   391→            if (input_.pos == input_.size && !input_finished_) {
+   392→                ssize_t n = source_->read(input_storage_.data(), input_storage_.size());
+   393→                if (n < 0) return -1;
+   394→                if (n == 0) input_finished_ = true;
+   395→                input_ = ZSTD_inBuffer{input_storage_.data(), static_cast<size_t>(std::max<ssize_t>(n, 0)), 0};
+   396→            }
+   397→            size_t in_before = input_.pos;
+   398→            size_t out_before = output.pos;
+   399→            size_t rc = ZSTD_decompressStream(stream_, &output, &input_);
+   400→            if (ZSTD_isError(rc)) {
+   401→                NATIVE_LOGW("Zstd decode failed: %s", ZSTD_getErrorName(rc));
+   402→                return -1;
+   403→            }
+   404→            frame_finished_ = rc == 0;
+   405→            if (frame_finished_ && input_finished_ && input_.pos == input_.size) {
+   406→                finished_ = true;
+   407→                break;
+   408→            }
+   409→            if (input_finished_ && input_.pos == input_.size && output.pos == out_before && !frame_finished_) {
+   410→                NATIVE_LOGW("Zstd stream ended before frame completion");
+   411→                return -1;
+   412→            }
+   413→            if (input_.pos == in_before && output.pos == out_before) {
+   414→                NATIVE_LOGW("Zstd decoder stalled");
+   415→                return -1;
+   416→            }
+   417→        }
+   418→        return static_cast<ssize_t>(output.pos);
+   419→    }
+   420→
+   421→private:
+   422→    std::unique_ptr<Reader> source_;
+   423→    ZSTD_DStream* stream_ = nullptr;
+   424→    std::vector<uint8_t> input_storage_ = std::vector<uint8_t>(ZSTD_DStreamInSize());
+   425→    ZSTD_inBuffer input_{nullptr, 0, 0};
+   426→    bool input_finished_ = false;
+   427→    bool finished_ = false;
+   428→    bool frame_finished_ = false;
+   429→};
+   430→
+   431→class JavaExtractListener {
+   432→public:
+   433→    JavaExtractListener(JNIEnv* env, jobject listener) : env_(env), listener_(listener) {
+   434→        if (!listener_) return;
+   435→        jclass listener_cls = env_->FindClass("com/winlator/cmod/shared/util/OnExtractFileListener");
+   436→        on_extract_ =
+   437→            env_->GetMethodID(listener_cls, "onExtractFile", "(Ljava/io/File;J)Ljava/io/File;");
+   438→        on_progress_ =
+   439→            env_->GetMethodID(listener_cls, "onExtractFileProgress", "(Ljava/io/File;J)V");
+   440→        maps_files_method_ = env_->GetMethodID(listener_cls, "mapsExtractedFiles", "()Z");
+   441→        byte_progress_method_ = env_->GetMethodID(listener_cls, "reportsExtractedBytesOnly", "()Z");
+   442→        on_bytes_progress_ = env_->GetMethodID(listener_cls, "onExtractedBytes", "(J)V");
+   443→
+   444→        if (maps_files_method_) {
+   445→            maps_files_ = env_->CallBooleanMethod(listener_, maps_files_method_) == JNI_TRUE;
+   446→            if (env_->ExceptionCheck()) return;
+   447→        }
+   448→        if (byte_progress_method_) {
+   449→            byte_progress_only_ =
+   450→                env_->CallBooleanMethod(listener_, byte_progress_method_) == JNI_TRUE;
+   451→            if (env_->ExceptionCheck()) return;
+   452→        }
+   453→
+   454→        if (maps_files_ || !byte_progress_only_) {
+   455→            jclass file_cls = env_->FindClass("java/io/File");
+   456→            file_class_ = static_cast<jclass>(env_->NewLocalRef(file_cls));
+   457→            file_ctor_ = env_->GetMethodID(file_class_, "<init>", "(Ljava/lang/String;)V");
+   458→            get_path_ = env_->GetMethodID(file_class_, "getPath", "()Ljava/lang/String;");
+   459→        }
+   460→
+   461→        enabled_ =
+   462→            (!maps_files_ || (file_class_ && file_ctor_ && get_path_ && on_extract_)) &&
+   463→            (byte_progress_only_ || !listener_ || (file_class_ && file_ctor_ && on_progress_));
+   464→    }
+   465→
+   466→    std::optional<std::string> map(const std::string& destination, int64_t size) {
+   467→        if (!listener_) return destination;
+   468→        if (!enabled_) return std::nullopt;
+   469→        if (!maps_files_) return destination;
+   470→
+   471→        jstring path = env_->NewStringUTF(destination.c_str());
+   472→        jobject file = env_->NewObject(file_class_, file_ctor_, path);
+   473→        env_->DeleteLocalRef(path);
+   474→        jobject mapped =
+   475→            env_->CallObjectMethod(listener_, on_extract_, file, static_cast<jlong>(size));
+   476→        env_->DeleteLocalRef(file);
+   477→        if (env_->ExceptionCheck()) return std::nullopt;
+   478→        if (!mapped) return std::nullopt;
+   479→
+   480→        auto mapped_path = static_cast<jstring>(env_->CallObjectMethod(mapped, get_path_));
+   481→        env_->DeleteLocalRef(mapped);
+   482→        if (env_->ExceptionCheck() || !mapped_path) return std::nullopt;
+   483→        std::string result = jstr(env_, mapped_path);
+   484→        env_->DeleteLocalRef(mapped_path);
+   485→        return result;
+   486→    }
+   487→
+   488→    bool progress(const std::string& destination, int64_t size) {
+   489→        if (!listener_ || !enabled_) return true;
+   490→        if (byte_progress_only_) {
+   491→            pending_progress_bytes_ += std::max<int64_t>(size, 0);
+   492→            auto now = std::chrono::steady_clock::now();
+   493→            int64_t elapsed_ms =
+   494→                std::chrono::duration_cast<std::chrono::milliseconds>(now - last_progress_flush_).count();
+   495→            if (pending_progress_bytes_ >= kProgressBatchBytes || elapsed_ms >= kProgressBatchIntervalMs) {
+   496→                flush_progress();
+   497→            }
+   498→            return !env_->ExceptionCheck();
+   499→        }
+   500→        if (!on_progress_) return true;
+   501→
+   502→        jstring path = env_->NewStringUTF(destination.c_str());
+   503→        jobject file = env_->NewObject(file_class_, file_ctor_, path);
+   504→        env_->DeleteLocalRef(path);
+   505→        env_->CallVoidMethod(listener_, on_progress_, file, static_cast<jlong>(size));
+   506→        env_->DeleteLocalRef(file);
+   507→        return !env_->ExceptionCheck();
+   508→    }
+   509→
+   510→    bool flush_progress() {
+   511→        if (!listener_ || !enabled_ || !byte_progress_only_ || !on_bytes_progress_) return true;
+   512→        if (pending_progress_bytes_ <= 0) return true;
+   513→        int64_t bytes = pending_progress_bytes_;
+   514→        pending_progress_bytes_ = 0;
+   515→        last_progress_flush_ = std::chrono::steady_clock::now();
+   516→        env_->CallVoidMethod(listener_, on_bytes_progress_, static_cast<jlong>(bytes));
+   517→        return !env_->ExceptionCheck();
+   518→    }
+   519→
+   520→private:
+   521→    JNIEnv* env_;
+   522→    jobject listener_;
+   523→    jclass file_class_ = nullptr;
+   524→    jmethodID file_ctor_ = nullptr;
+   525→    jmethodID get_path_ = nullptr;
+   526→    jmethodID on_extract_ = nullptr;
+   527→    jmethodID on_progress_ = nullptr;
+   528→    jmethodID maps_files_method_ = nullptr;
+   529→    jmethodID byte_progress_method_ = nullptr;
+   530→    jmethodID on_bytes_progress_ = nullptr;
+   531→    bool enabled_ = false;
+   532→    bool maps_files_ = true;
+   533→    bool byte_progress_only_ = false;
+   534→    int64_t pending_progress_bytes_ = 0;
+   535→    std::chrono::steady_clock::time_point last_progress_flush_ = std::chrono::steady_clock::now();
+   536→};
+   537→
+   538→bool read_payload(Reader& reader, uint64_t size, std::string* out) {
+   539→    if (size > 64 * 1024 * 1024) return false;
+   540→    out->assign(static_cast<size_t>(size), '\0');
+   541→    if (size > 0 && !reader.read_exact(reinterpret_cast<uint8_t*>(out->data()), static_cast<size_t>(size))) {
+   542→        return false;
+   543→    }
+   544→    const uint64_t padding = (512 - (size % 512)) % 512;
+   545→    return reader.skip(padding);
+   546→}
+   547→
+   548→bool extract_tar(
+   549→    Reader& reader,
+   550→    const std::string& destination,
+   551→    JNIEnv* env,
+   552→    jobject listener,
+   553→    bool enforce_safe_symlinks) {
+   554→    JavaExtractListener java_listener(env, listener);
+   555→    std::vector<uint8_t> header(512);
+   556→    std::optional<std::string> next_name;
+   557→    std::optional<std::string> next_link;
+   558→    std::unordered_set<std::string> symlink_entries;
+   559→
+   560→    std::vector<uint8_t> file_buffer(kBufferSize);
+   561→    std::unordered_set<std::string> created_dirs;
+   562→    const auto mkdirs_cached = [&](std::string_view dir) -> bool {
+   563→        if (dir.empty()) return true;
+   564→        if (created_dirs.find(std::string(dir)) != created_dirs.end()) return true;
+   565→        std::string current;
+   566→        current.reserve(dir.size());
+   567→        size_t pos = 0;
+   568→        if (dir[0] == '/') {
+   569→            current.push_back('/');
+   570→            pos = 1;
+   571→        }
+   572→        while (pos <= dir.size()) {
+   573→            size_t next = dir.find('/', pos);
+   574→            std::string_view part =
+   575→                dir.substr(pos, next == std::string_view::npos ? dir.size() - pos : next - pos);
+   576→            if (!part.empty()) {
+   577→                if (!current.empty() && current.back() != '/') current.push_back('/');
+   578→                current.append(part);
+   579→                if (created_dirs.insert(current).second) {
+   580→                    if (::mkdir(current.c_str(), 0771) != 0 && errno != EEXIST) return false;
+   581→                }
+   582→            }
+   583→            if (next == std::string_view::npos) break;
+   584→            pos = next + 1;
+   585→        }
+   586→        return true;
+   587→    };
+   588→    const auto ensure_parent_cached = [&](const std::string& path) -> bool {
+   589→        const size_t slash = path.find_last_of('/');
+   590→        if (slash == std::string::npos || slash == 0) return true;
+   591→        return mkdirs_cached(std::string_view(path).substr(0, slash));
+   592→    };
+   593→
+   594→    while (true) {
+   595→        if (!reader.read_exact(header.data(), header.size())) return false;
+   596→        bool all_zero = true;
+   597→        for (uint8_t b : header) {
+   598→            if (b != 0) {
+   599→                all_zero = false;
+   600→                break;
+   601→            }
+   602→        }
+   603→        if (all_zero) return java_listener.flush_progress();
+   604→
+   605→        auto* h = reinterpret_cast<const char*>(header.data());
+   606→        std::string name = tar_string(h, 100);
+   607→        std::string prefix = tar_string(h + 345, 155);
+   608→        if (!prefix.empty()) name = prefix + "/" + name;
+   609→        std::string link_name = tar_string(h + 157, 100);
+   610→        const uint64_t size = parse_tar_number(h + 124, 12);
+   611→        const uint32_t mode = static_cast<uint32_t>(parse_tar_number(h + 100, 8));
+   612→        const char type = h[156] == '\0' ? '0' : h[156];
+   613→
+   614→        if (type == 'L' || type == 'K') {
+   615→            std::string payload;
+   616→            if (!read_payload(reader, size, &payload)) return false;
+   617→            if (type == 'L') next_name = clean_entry_name(read_octal_record_string(std::move(payload)));
+   618→            if (type == 'K') next_link = read_octal_record_string(std::move(payload));
+   619→            continue;
+   620→        }
+   621→
+   622→        if (type == 'x' || type == 'g') {
+   623→            std::string payload;
+   624→            if (!read_payload(reader, size, &payload)) return false;
+   625→            if (type == 'x') {
+   626→                PaxValues pax = parse_pax(payload);
+   627→                if (pax.path) next_name = clean_entry_name(*pax.path);
+   628→                if (pax.link_path) next_link = *pax.link_path;
+   629→            }
+   630→            continue;
+   631→        }
+   632→
+   633→        if (next_name) {
+   634→            name = *next_name;
+   635→            next_name.reset();
+   636→        } else {
+   637→            name = clean_entry_name(std::move(name));
+   638→        }
+   639→        if (next_link) {
+   640→            link_name = *next_link;
+   641→            next_link.reset();
+   642→        }
+   643→
+   644→        const uint64_t padding = (512 - (size % 512)) % 512;
+   645→        if (!is_safe_relative_path(name)) {
+   646→            if (!reader.skip(size + padding)) return false;
+   647→            continue;
+   648→        }
+   649→
+   650→        const bool is_symlink = type == '2';
+   651→        if (!is_symlink && has_symlink_ancestor(name, symlink_entries)) {
+   652→            NATIVE_LOGW("skipping archive entry under symlink: %s", name.c_str());
+   653→            if (!reader.skip(size + padding)) return false;
+   654→            continue;
+   655→        }
+   656→
+   657→        std::string out_path = join_path(destination, name);
+   658→        auto mapped = java_listener.map(out_path, static_cast<int64_t>(size));
+   659→        if (!mapped) {
+   660→            if (!reader.skip(size + padding)) return false;
+   661→            continue;
+   662→        }
+   663→        out_path = std::move(*mapped);
+   664→
+   665→        if (type == '5') {
+   666→            if (!mkdirs_cached(out_path)) return false;
+   667→        } else if (type == '2') {
+   668→            // Wine prefixes legitimately use links like c: -> ../drive_c and z: -> /.
+   669→            // Allow the link itself, but never extract later archive entries through it.
+   670→            std::string parent_name = parent_entry_name(name);
+   671→            if (!parent_name.empty() && has_symlink_ancestor(parent_name, symlink_entries)) {
+   672→                NATIVE_LOGW("skipping symlink under symlinked parent: %s", name.c_str());
+   673→                if (!reader.skip(size + padding)) return false;
+   674→                continue;
+   675→            }
+   676→            if (!ensure_parent_cached(out_path)) return false;
+   677→            ::unlink(out_path.c_str());
+   678→            if (::symlink(link_name.c_str(), out_path.c_str()) != 0 && errno != EEXIST) {
+   679→                NATIVE_LOGW("symlink failed for %s: %s", out_path.c_str(), std::strerror(errno));
+   680→            }
+   681→            symlink_entries.insert(trim_trailing_slashes(name));
+   682→        } else if (type == '0' || type == '\0') {
+   683→            if (!ensure_parent_cached(out_path)) return false;
+   684→            FileWriter out(out_path, enforce_safe_symlinks);
+   685→            if (!out.ok()) return false;
+   686→
+   687→            uint64_t remaining = size;
+   688→            bool ok = true;
+   689→            while (remaining > 0) {
+   690→                const size_t chunk = static_cast<size_t>(std::min<uint64_t>(remaining, file_buffer.size()));
+   691→                if (!reader.read_exact(file_buffer.data(), chunk)) {
+   692→                    ok = false;
+   693→                    break;
+   694→                }
+   695→                if (!out.write(file_buffer.data(), chunk)) {
+   696→                    ok = false;
+   697→                    break;
+   698→                }
+   699→                remaining -= chunk;
+   700→            }
+   701→            if (!out.close()) ok = false;
+   702→            if (!ok) return false;
+   703→            if ((mode & 0111) != 0) ::chmod(out_path.c_str(), 0771);
+   704→            if (!java_listener.progress(out_path, static_cast<int64_t>(size))) return false;
+   705→            if (!reader.skip(padding)) return false;
+   706→            continue;
+   707→        } else if (type == '1') {
+   708→            if (!ensure_parent_cached(out_path)) return false;
+   709→            ::unlink(out_path.c_str());
+   710→            std::string clean_link_name = clean_entry_name(link_name);
+   711→            if (!is_safe_relative_path(clean_link_name)) {
+   712→                if (!reader.skip(size + padding)) return false;
+   713→                continue;
+   714→            }
+   715→            if (has_symlink_ancestor(clean_link_name, symlink_entries)) {
+   716→                NATIVE_LOGW("skipping hard link through symlink ancestor: %s", clean_link_name.c_str());
+   717→                if (!reader.skip(size + padding)) return false;
+   718→                continue;
+   719→            }
+   720→            std::string link_path = join_path(destination, clean_link_name);
+   721→            if (::link(link_path.c_str(), out_path.c_str()) != 0) {
+   722→                NATIVE_LOGW("hard link failed for %s: %s", out_path.c_str(), std::strerror(errno));
+   723→            }
+   724→            if (!java_listener.progress(out_path, static_cast<int64_t>(size))) return false;
+   725→        }
+   726→
+   727→        if (!reader.skip(size + padding)) return false;
+   728→        if (type == '5') ::chmod(out_path.c_str(), 0771);
+   729→    }
+   730→}
+   731→
+   732→struct DownloadContext {
+   733→    FILE* file = nullptr;
+   734→    JNIEnv* env = nullptr;
+   735→    jobject listener = nullptr;
+   736→    jmethodID on_progress = nullptr;
+   737→    std::chrono::steady_clock::time_point last_update = std::chrono::steady_clock::now();
+   738→};
+   739→
+   740→size_t curl_write_file(char* ptr, size_t size, size_t nmemb, void* userdata) {
+   741→    auto* ctx = static_cast<DownloadContext*>(userdata);
+   742→    const size_t bytes = size * nmemb;
+   743→    return std::fwrite(ptr, 1, bytes, ctx->file);
+   744→}
+   745→
+   746→int curl_progress(void* userdata, curl_off_t total, curl_off_t now, curl_off_t, curl_off_t) {
+   747→    auto* ctx = static_cast<DownloadContext*>(userdata);
+   748→    if (!ctx->listener || !ctx->on_progress) return 0;
+   749→
+   750→    auto current = std::chrono::steady_clock::now();
+   751→    if (now == 0 || total == now ||
+   752→        std::chrono::duration_cast<std::chrono::milliseconds>(current - ctx->last_update).count() >= 80) {
+   753→        ctx->env->CallVoidMethod(
+   754→            ctx->listener,
+   755→            ctx->on_progress,
+   756→            static_cast<jlong>(now),
+   757→            static_cast<jlong>(total > 0 ? total : -1));
+   758→        ctx->last_update = current;
+   759→        if (ctx->env->ExceptionCheck()) return 1;
+   760→    }
+   761→    return 0;
+   762→}
+   763→
+   764→void configure_curl_common(CURL* curl, const std::string& url, const std::string& ca_bundle) {
+   765→    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+   766→    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+   767→    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 15L);
+   768→    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 0L);
+   769→    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1L);
+   770→    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 30L);
+   771→    curl_easy_setopt(curl, CURLOPT_USERAGENT, "WinNative/1.0");
+   772→    curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "identity");
+   773→    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+   774→    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
+   775→    if (!ca_bundle.empty()) curl_easy_setopt(curl, CURLOPT_CAINFO, ca_bundle.c_str());
+   776→}
+   777→
+   778→}  // namespace
+   779→
+   780→extern "C" JNIEXPORT jboolean JNICALL
+   781→Java_com_winlator_cmod_shared_io_NativeContentIO_nativeExtractArchive(
+   782→    JNIEnv* env, jclass, jint type, jstring jsource, jstring jdestination, jobject listener) {
+   783→    std::string source = jstr(env, jsource);
+   784→    std::string destination = jstr(env, jdestination);
+   785→    if (source.empty() || destination.empty()) return JNI_FALSE;
+   786→    if (!mkdirs(destination)) return JNI_FALSE;
+   787→
+   788→    bool ok = false;
+   789→    if (type == 0) {
+   790→        auto raw = std::make_unique<FileReader>(source);
+   791→        if (!raw->ok()) return JNI_FALSE;
+   792→        XzReader reader(std::move(raw));
+   793→        ok = reader.ok() && extract_tar(reader, destination, env, listener, true);
+   794→    } else if (type == 1) {
+   795→        auto raw = std::make_unique<FileReader>(source);
+   796→        if (!raw->ok()) return JNI_FALSE;
+   797→        ZstdReader reader(std::move(raw));
+   798→        ok = reader.ok() && extract_tar(reader, destination, env, listener, true);
+   799→    }
+   800→    if (!ok && env->ExceptionCheck()) return JNI_FALSE;
+   801→    return ok ? JNI_TRUE : JNI_FALSE;
+   802→}
+   803→
+   804→extern "C" JNIEXPORT jboolean JNICALL
+   805→Java_com_winlator_cmod_shared_io_NativeContentIO_nativeExtractAsset(
+   806→    JNIEnv* env,
+   807→    jclass,
+   808→    jint type,
+   809→    jobject jasset_manager,
+   810→    jstring jasset_file,
+   811→    jstring jdestination,
+   812→    jobject listener) {
+   813→    AAssetManager* manager = AAssetManager_fromJava(env, jasset_manager);
+   814→    std::string asset_file = jstr(env, jasset_file);
+   815→    std::string destination = jstr(env, jdestination);
+   816→    if (!manager || asset_file.empty() || destination.empty()) return JNI_FALSE;
+   817→    if (!mkdirs(destination)) return JNI_FALSE;
+   818→
+   819→    bool ok = false;
+   820→    if (type == 0) {
+   821→        auto raw = std::make_unique<AssetReader>(manager, asset_file);
+   822→        if (!raw->ok()) return JNI_FALSE;
+   823→        XzReader reader(std::move(raw));
+   824→        ok = reader.ok() && extract_tar(reader, destination, env, listener, false);
+   825→    } else if (type == 1) {
+   826→        auto raw = std::make_unique<AssetReader>(manager, asset_file);
+   827→        if (!raw->ok()) return JNI_FALSE;
+   828→        ZstdReader reader(std::move(raw));
+   829→        ok = reader.ok() && extract_tar(reader, destination, env, listener, false);
+   830→    }
+   831→    if (!ok && env->ExceptionCheck()) return JNI_FALSE;
+   832→    return ok ? JNI_TRUE : JNI_FALSE;
+   833→}
+   834→
+   835→extern "C" JNIEXPORT jboolean JNICALL
+   836→Java_com_winlator_cmod_shared_io_NativeContentIO_nativeDownloadFile(
+   837→    JNIEnv* env, jclass, jstring jaddress, jstring jdestination, jstring jca_bundle, jobject listener) {
+   838→    std::string address = jstr(env, jaddress);
+   839→    std::string destination = jstr(env, jdestination);
+   840→    std::string ca_bundle = jstr(env, jca_bundle);
+   841→    if (address.empty() || destination.empty() || !ensure_parent_dir(destination)) return JNI_FALSE;
+   842→
+   843→    ensure_curl_global_init();
+   844→    std::string partial = destination + ".part";
+   845→    FILE* file = std::fopen(partial.c_str(), "wb");
+   846→    if (!file) return JNI_FALSE;
+   847→    std::setvbuf(file, nullptr, _IOFBF, kBufferSize);
+   848→
+   849→    DownloadContext ctx;
+   850→    ctx.file = file;
+   851→    ctx.env = env;
+   852→    ctx.listener = listener;
+   853→    if (listener) {
+   854→        jclass cls = env->GetObjectClass(listener);
+   855→        ctx.on_progress = env->GetMethodID(cls, "onProgress", "(JJ)V");
+   856→        if (ctx.on_progress) {
+   857→            env->CallVoidMethod(listener, ctx.on_progress, static_cast<jlong>(0), static_cast<jlong>(-1));
+   858→        }
+   859→    }
+   860→
+   861→    CURL* curl = curl_easy_init();
+   862→    if (!curl) {
+   863→        std::fclose(file);
+   864→        ::unlink(partial.c_str());
+   865→        return JNI_FALSE;
+   866→    }
+   867→    configure_curl_common(curl, address, ca_bundle);
+   868→    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_file);
+   869→    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &ctx);
+   870→    curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+   871→    curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, curl_progress);
+   872→    curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &ctx);
+   873→
+   874→    CURLcode rc = curl_easy_perform(curl);
+   875→    long status = 0;
+   876→    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
+   877→    curl_off_t downloaded = 0;
+   878→    curl_off_t expected = -1;
+   879→    curl_easy_getinfo(curl, CURLINFO_SIZE_DOWNLOAD_T, &downloaded);
+   880→    curl_easy_getinfo(curl, CURLINFO_CONTENT_LENGTH_DOWNLOAD_T, &expected);
+   881→    curl_easy_cleanup(curl);
+   882→
+   883→    bool ok = (rc == CURLE_OK && status >= 200 && status < 300);
+   884→    if (expected >= 0 && downloaded != expected) ok = false;
+   885→    if (std::fclose(file) != 0) ok = false;
+   886→
+   887→    if (ok && listener && ctx.on_progress && !env->ExceptionCheck()) {
+   888→        env->CallVoidMethod(listener, ctx.on_progress, static_cast<jlong>(downloaded), static_cast<jlong>(downloaded));
+   889→    }
+   890→
+   891→    if (!ok || env->ExceptionCheck()) {
+   892→        ::unlink(partial.c_str());
+   893→        NATIVE_LOGW("download failed for %s: curl=%d http=%ld", address.c_str(), static_cast<int>(rc), status);
+   894→        return JNI_FALSE;
+   895→    }
+   896→
+   897→    ::unlink(destination.c_str());
+   898→    if (::rename(partial.c_str(), destination.c_str()) != 0) {
+   899→        ::unlink(partial.c_str());
+   900→        return JNI_FALSE;
+   901→    }
+   902→    return JNI_TRUE;
+   903→}
+   904→
+   905→extern "C" JNIEXPORT jlong JNICALL
+   906→Java_com_winlator_cmod_shared_io_NativeContentIO_nativeFetchContentLength(
+   907→    JNIEnv* env, jclass, jstring jaddress, jstring jca_bundle) {
+   908→    std::string address = jstr(env, jaddress);
+   909→    std::string ca_bundle = jstr(env, jca_bundle);
+   910→    if (address.empty()) return -1;
+   911→
+   912→    ensure_curl_global_init();
+   913→    CURL* curl = curl_easy_init();
+   914→    if (!curl) return -1;
+   915→    configure_curl_common(curl, address, ca_bundle);
+   916→    curl_easy_setopt(curl, CURLOPT_NOBODY, 1L);
+   917→    curl_easy_setopt(curl, CURLOPT_HEADER, 0L);
+   918→
+   919→    CURLcode rc = curl_easy_perform(curl);
+   920→    long status = 0;
+   921→    curl_off_t length = -1;
+   922→    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
+   923→    curl_easy_getinfo(curl, CURLINFO_CONTENT_LENGTH_DOWNLOAD_T, &length);
+   924→    curl_easy_cleanup(curl);
+   925→    if (rc != CURLE_OK || status < 200 || status >= 300 || length < 0) return -1;
+   926→    return static_cast<jlong>(length);
+   927→}
+   928→
