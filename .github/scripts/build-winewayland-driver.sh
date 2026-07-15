@@ -86,7 +86,34 @@ if [ -d "$WLD_SRC" ]; then
     sed -i '/xdg_toplevel_icon_manager_v1_interface, 1);/a \    }\n    else if (strcmp(interface, "zwp_linux_dmabuf_v1") == 0)\n    {\n        wayland_dmabuf_init(registry, id, version);' \
         dlls/winewayland.drv/wayland.c
 
-    # 6. wayland_surface.c: insert attach_dmabuf after closing brace of attach_shm
+    # 6. Patch init.c: add change_display_settings stub that returns success.
+    #    Without this, Wine uses nodrv_ChangeDisplaySettingsEx which returns
+    #    DISP_CHANGE_BADMODE. DXVK's EnterFullscreenMode gets a NULL swapchain
+    #    pointer and crashes with a page fault at address 0x00000000.
+    #    The stub fakes success so DXVK proceeds to create a surface and swapchain.
+    echo "Patching init.c for change_display_settings stub..."
+    if [ -f dlls/winewayland.drv/init.c ]; then
+        # Add the stub function before the driver_funcs struct
+        sed -i '/static const struct user_driver_funcs wayland_driver_funcs/i\
+static LONG wayland_change_display_settings( LPCWSTR devname, LPDEVMODEW devmode,\
+    HWND hwnd, DWORD flags, LPVOID lparam )\
+{\
+    TRACE("(\\\\n");\
+    return DISP_CHANGE_SUCCESSFUL; /* Fake success — Wayland doesn'\''t support mode changes */\
+}\
+' dlls/winewayland.drv/init.c
+
+        # Check if change_display_settings is already in the struct
+        if ! grep -q "change_display_settings" dlls/winewayland.drv/init.c; then
+            # Add it to the struct — find the closing }; and insert before it
+            sed -i '/^};/i\    .p_change_display_settings = wayland_change_display_settings,' dlls/winewayland.drv/init.c
+        fi
+        echo "  init.c patched with change_display_settings stub"
+    else
+        echo "  WARNING: init.c not found — cannot patch change_display_settings"
+    fi
+
+    # 7. wayland_surface.c: insert attach_dmabuf after closing brace of attach_shm
     #    Match 'content_height = win_height;' followed by '}' on next line, insert after '}'
     sed -i '/^[[:space:]]*surface->content_height = win_height;[[:space:]]*$/{n;/^}$/r '"${WLD_SRC}"'/wayland_surface_attach_dmabuf.inc'"
 }" dlls/winewayland.drv/wayland_surface.c
