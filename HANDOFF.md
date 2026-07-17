@@ -1,38 +1,46 @@
-# WayLandIE Handoff — Wayland Display Compositor Rendering
+# WayLandIE Handoff — Wayland Display Bridge + Compositor + Zero-Copy
 
 ## What We're Trying to Achieve
 
-WayLandIE is a fork of WinNative (Wine + DXVK + FEXCore on ARM64 Android). The **primary goal** is to make the Wayland display compositor render actual game graphics — not just the Wine desktop, but actual DXVK-rendered game frames — through a zero-copy dmabuf pipeline.
+WayLandIE is a fork of WinNative (Wine + DXVK + FEXCore on ARM64 Android). The **primary goal** is:
 
-### The Two Render Paths
+**Display games through the Wayland display bridge and display compositor with zero buffer copy.**
 
-**PATH A (game rendering — THE GOAL):**
-```
-DXVK → winevulkan → adrenotools → Turnip → vkCreateXlibSurfaceKHR(ANativeWindow)
-  → vkCreateSwapchainKHR → vkQueuePresentKHR
-    → ANativeWindow queueBuffer → SurfaceFlinger (direct, zero-copy)
-```
-The game's DXVK swapchain renders directly to the SurfaceView's ANativeWindow. This is the **only path that produces actual game graphics in Wayland mode**. No Wayland bridge involved — the bridge is for the desktop, not the game.
+The entire render path must go through our Wayland compositor (`waylandie-wayland-bridge.c`) — NOT direct to ANativeWindow. The bridge receives dmabuf frames from Wine and presents them to SurfaceFlinger via ASurfaceControl, with zero CPU memcpy.
 
-**PATH B (desktop rendering — works):**
+### The Intended Render Path (NOT YET WORKING)
+
 ```
-Wine explorer.exe → winewayland.drv → wl_surface (SHM buffer)
-  → Wayland bridge compositor (waylandie-wayland-bridge.c, 5059 lines)
-    → SHM→AHB conversion (WAYLANDIE_HAS_AHARDWAREBUFFER)
-      → dmabuf fd exported
+DXVK → winevulkan → winewayland.drv
+  → zwp_linux_dmabuf_v1 (dmabuf fd exported from VkImage)
+    → Wayland bridge compositor (waylandie-wayland-bridge.c)
+      → receives dmabuf fd via Unix socket
         → Java presenter (WaylandBridgeServer.java)
           → adrenotools + Turnip imports dmabuf as VkImage
             → ASurfaceControl presents to SurfaceFlinger
+              → HWC direct scanout (zero copy)
 ```
-PATH B works — the Wine desktop (explorer.exe shell) renders through the Wayland bridge to SurfaceFlinger. But PATH B is NOT the game render path.
 
-## Current State (commit 9ac1c92)
+**Critical:** The game frames MUST go through the Wayland bridge, not direct to ANativeWindow. The bridge is the zero-copy dmabuf pipeline. Direct-to-ANativeWindow defeats the entire purpose.
 
-### What Works
+## Current State (commit 352b3e8, reverted to 9ac1c92)
+
+### What Works: NOTHING
+
+**Nothing works in Wayland mode.** Specifically:
+- ❌ No stable desktop — we see flashes of the Wine desktop, then it crashes
+- ❌ No game has ever rendered through the Wayland display compositor
+- ❌ No stable rendering of any kind through the bridge
+
+We have never seen:
+- A stable Wine desktop rendered through the Wayland bridge
+- A single game frame rendered through the Wayland bridge
+- The bridge compositor successfully presenting frames for more than a few seconds
+
+### What's Been Achieved (infrastructure only — no visible output)
 - ✅ winewayland.drv loads and connects to the bridge compositor (all Wayland globals bound)
-- ✅ Wine desktop renders via SHM buffers through the bridge (PATH B)
+- ✅ Bridge compositor starts and accepts connections
 - ✅ vkCreateInstance succeeds for wineboot (res=0)
-- ✅ vkEnumeratePhysicalDevices NULL guards prevent the assertion crash
 - ✅ DXVK vkCreateInstance succeeds (res=0)
 - ✅ ANativeWindow pointer reaches Wine (via env var + file fallback)
 - ✅ Turnip driver found dynamically for AHB→Vulkan import
@@ -40,53 +48,48 @@ PATH B works — the Wine desktop (explorer.exe shell) renders through the Wayla
 - ✅ winewayland.drv init.c patched to fake ChangeDisplaySettingsEx success
 - ✅ DXVK gets past "Setting display mode" (was crashing with page fault at 0x00000000)
 
-### What's Broken — THE BLOCKER
-
-**DXVK initializes successfully but produces no visible game graphics.** After "Setting display mode" succeeds, DXVK should:
-1. Call `vkCreateWin32SurfaceKHR` (translated to `vkCreateXlibSurfaceKHR` with ANativeWindow)
-2. Call `vkCreateSwapchainKHR`
-3. Call `vkQueuePresentKHR` to render frames
-
-**What actually happens:** The game process either:
-- Stalls after "Setting display mode" with no swapchain creation
-- OR creates a swapchain but `vkQueuePresentKHR` goes nowhere (no frames reach SurfaceFlinger)
-
-**No game graphics appear on screen.** The Wine desktop (PATH B) renders fine, but the game window never shows.
+**But none of this produces visible output.** The desktop flashes and crashes. No game has ever rendered.
 
 ## Root Cause Hypotheses (untested)
 
-### Hypothesis 1: Surface creation fails silently
-DXVK calls `vkCreateWin32SurfaceKHR`. Wine's winewayland.drv should translate this to a Wayland surface OR an Xlib surface with the ANativeWindow. If the translation fails, DXVK gets a null surface and can't create a swapchain.
+### Hypothesis 1: Bridge compositor crashes on first real frame
+The bridge receives SHM buffers from explorer.exe and tries to convert them to AHB. This conversion may crash (segfault in native code) after a few frames, causing the desktop to flash and disappear.
 
-**Test:** Add `fprintf(stderr, ...)` logging to `winewayland.drv/vulkan.c` in the `vkCreateWin32SurfaceKHR` path to see if it's called and what it returns.
+**Test:** Run with `WAYLANDIE_HAS_AHARDWAREBUFFER` disabled. If the desktop renders stably without AHB conversion, the crash is in the SHM→AHB path.
 
-### Hypothesis 2: Swapchain present goes to wrong destination
-DXVK's `vkQueuePresentKHR` might be presenting to a Wayland surface (via the bridge) instead of directly to the ANativeWindow. In PATH A, the game should present DIRECTLY to ANativeWindow — bypassing the bridge entirely.
+### Hypothesis 2: winewayland.drv creates wrong surface type
+winewayland.drv's `vkCreateWin32SurfaceKHR` should create a Wayland surface (wl_surface) that the bridge compositor can receive dmabuf on. If it creates an Xlib surface or headless surface instead, DXVK frames never reach the bridge.
 
-**Test:** Check if `vkQueuePresentKHR` in winevulkan.so routes through the bridge or directly to ANativeWindow. The bridge is for desktop (PATH B), not game frames (PATH A).
+**Test:** Add `fprintf(stderr, ...)` logging to `winewayland.drv/vulkan.c` in the `vkCreateWin32SurfaceKHR` path. Check what surface type is actually created.
 
-### Hypothesis 3: ANativeWindow not properly bound to Vulkan surface
-The ANativeWindow pointer is passed via `WAYLANDIE_ANATIVE_WINDOW` env var. `vkCreateXlibSurfaceKHR` uses it as a fake Xlib Window handle. But Turnip's `vkCreateXlibSurfaceKHR` might not accept an ANativeWindow pointer — it might need `vkCreateAndroidSurfaceKHR` instead.
+### Hypothesis 3: dmabuf export from DXVK's VkImage fails
+Even if the surface is correct, DXVK's `vkQueuePresentKHR` needs to export the rendered VkImage as a dmabuf fd and send it to the bridge via `zwp_linux_dmabuf_v1`. If the dmabuf export fails (Turnip doesn't support `VK_EXT_image_drm_format_modifier` or `vkGetMemoryFdKHR`), no frame reaches the bridge.
 
-**Test:** Try `vkCreateAndroidSurfaceKHR` with the ANativeWindow instead of `vkCreateXlibSurfaceKHR`. This was attempted in commit `b6f4259` (system Vulkan driver) but reverted in `fca1a58` because Wine's `convert_instance_create_info` can't translate `win32_surface → android_surface`.
+**Test:** Check if `vkGetMemoryFdKHR` is available and succeeds in winevulkan.so. Add logging to the present path.
 
-### Hypothesis 4: winewayland.drv creates a headless surface
-winewayland.drv's `vkCreateWin32SurfaceKHR` implementation might create a headless Wayland surface (no display) instead of binding to the ANativeWindow. This would explain why DXVK creates a swapchain but no frames appear.
+### Hypothesis 4: Bridge socket connection drops under load
+The bridge uses a Unix socket (`waylandie.display.bridge.v1`). Under frame delivery load, the socket buffer may overflow or the connection may drop, causing the compositor to lose its client and crash.
 
-**Test:** Read `app/src/main/cpp/winewayland-drv/vulkan.c` and check what `wayland_create_win32_surface` actually does. Does it use the ANativeWindow? Or does it create a wl_surface backed by the bridge?
+**Test:** Add socket error handling and reconnection logic. Check `waylandie-wayland-bridge.c` for socket buffer size and error recovery.
+
+### Hypothesis 5: Java presenter crashes on dmabuf import
+`WaylandBridgeServer.java` receives the dmabuf fd and imports it via adrenotools + Turnip. If the import fails (wrong format, wrong usage flags, missing extension), the Java side may throw an unhandled exception that kills the bridge.
+
+**Test:** Wrap the dmabuf import in try/catch with detailed logging. Check `WaylandBridgeServer.java` native present path.
 
 ## Key Files
 
 | File | Purpose |
 |------|---------|
-| `app/src/main/cpp/winewayland-drv/vulkan.c` | winewayland.drv Vulkan surface creation — **PRIMARY SUSPECT** |
-| `app/src/main/cpp/waylandie-wayland-bridge.c` | Wayland compositor (5059 lines) — for PATH B desktop |
+| `app/src/main/cpp/waylandie-wayland-bridge.c` | Wayland compositor (5059 lines) — THE BRIDGE |
 | `app/src/main/cpp/waylandie_display_native.c` | JNI native code for AHB presentation |
-| `app/src/main/cpp/winlator/vulkan.c` | adrenotools + Turnip loading + ANativeWindow |
-| `app/src/main/runtime/display/environment/components/WaylandBridgeServer.java` | Java presenter for dmabuf (PATH B) |
-| `app/src/main/runtime/display/ui/XServerSurfaceView.java` | SurfaceView, sets WAYLANDIE_ANATIVE_WINDOW |
+| `app/src/main/cpp/winewayland-drv/vulkan.c` | winewayland.drv Vulkan surface creation |
+| `app/src/main/cpp/winewayland-drv/wayland_dmabuf.c` | dmabuf handling in winewayland.drv |
+| `app/src/main/cpp/winlator/vulkan.c` | adrenotools + Turnip loading |
+| `app/src/main/runtime/display/environment/components/WaylandBridgeServer.java` | Java presenter for dmabuf |
+| `app/src/main/runtime/display/environment/components/WaylandBridgeComponent.java` | Bridge process launcher |
+| `app/src/main/runtime/display/ui/XServerSurfaceView.java` | SurfaceView, ANativeWindow |
 | `app/src/main/runtime/display/XServerDisplayActivity.java` | Main activity, env vars, launch command |
-| `app/src/main/runtime/display/environment/components/GuestProgramLauncherComponent.java` | Sets LD_LIBRARY_PATH, VK_LAYER_PATH, env vars |
 | `.github/scripts/build-winewayland-driver.sh` | Builds winevulkan, applies ALL patches |
 
 ## Environment Variables
@@ -106,36 +109,38 @@ winewayland.drv's `vkCreateWin32SurfaceKHR` implementation might create a headle
 ## What Was Tried and Abandoned
 
 ### Direct Composition (DC) / ASurfaceControl — REVERTED
-We spent 7 commits (`ce599f0` through `a6080bf`) porting PR #584's Direct Composition (ASurfaceControl) fast path from Vower2993/WinNative-wayland. This was a **tangent** — DC optimizes the X11/DRI3 path, NOT the Wayland path. It was reverted because:
-- DC only works in X11 mode (Wayland direct-render bypasses VulkanRenderer entirely)
-- The AHBs from DRI3 socket-import lack COMPOSER_OVERLAY, causing DC to self-disable
-- Wine-side ADPF with 8ms target caused 90%+ CPU and 45°C heat
-- The user wanted Wayland rendering, not X11 optimization
+7 commits added Direct Composition (ASurfaceControl) from PR #584. This was a **tangent** — DC bypasses the Wayland bridge entirely and goes direct to SurfaceFlinger via the X11/DRI3 path. Reverted because it defeats the purpose of the Wayland bridge.
 
 ### System Vulkan driver — REVERTED
-Commit `b6f4259` tried using the system Vulkan driver with `vkCreateAndroidSurfaceKHR`. Reverted in `fca1a58` because Wine's `convert_instance_create_info` can't translate `win32_surface → android_surface` (only supports win32↔xlib↔wayland).
+Tried using `vkCreateAndroidSurfaceKHR` with the system Vulkan driver. Reverted because Wine's `convert_instance_create_info` can't translate `win32_surface → android_surface`.
 
 ### PE proxy DLL (vulkan-1.dll) — FAILED
-Commit `e0f2cef` tried a PE proxy DLL for DAC zero-copy. CI compilation failed. Abandoned.
+Tried a PE proxy DLL for DAC zero-copy. CI compilation failed. Abandoned.
 
 ### ELF Vulkan layer — BLOCKED
 adrenotools isolated namespace blocks VK_LAYER_PATH. The dmabuf layer dlopens but never enters the dispatch chain.
 
 ## Immediate Next Steps for the Next Agent
 
-1. **Read `app/src/main/cpp/winewayland-drv/vulkan.c` completely.** This is the primary suspect. Understand what `wayland_create_win32_surface` does — does it bind to ANativeWindow or create a headless wl_surface?
+1. **Get the desktop to render STABLY first.** Before attempting games, the Wine desktop (explorer.exe) must render through the bridge without crashing. Currently it flashes and dies. Fix the desktop crash before anything else.
 
-2. **Add diagnostic logging** to winewayland.drv's Vulkan surface creation path. Use `fprintf(stderr, ...)` — Wine's `ERR()` macro and `__android_log_print` don't work reliably in the wine/FEX process.
+2. **Read `app/src/main/cpp/waylandie-wayland-bridge.c` completely.** This is the core compositor. Look for:
+   - SHM→AHB conversion crash points
+   - Socket buffer overflow handling
+   - Frame lifecycle (receive → convert → present → release)
+   - Error recovery on client disconnect
 
-3. **Test with LIMBO (32-bit DX9)** — it's simpler than DMC5 and faster to iterate. If LIMBO renders, the path works for DX9. If only DMC5 fails, it's a DX11-specific issue.
+3. **Read `app/src/main/cpp/winewayland-drv/vulkan.c`.** Understand what surface type `wayland_create_win32_surface` creates. It MUST create a wl_surface that the bridge can receive dmabuf on.
 
-4. **Check if vkQueuePresentKHR reaches ANativeWindow.** The game's present path should go DIRECTLY to ANativeWindow (SurfaceFlinger), NOT through the Wayland bridge. If it goes through the bridge, that's the bug.
+4. **Add diagnostic logging** using `fprintf(stderr, ...)` — Wine's `ERR()` macro and `__android_log_print` don't work reliably in the wine/FEX process.
 
-5. **Consider vkCreateAndroidSurfaceKHR** — despite the `convert_instance_create_info` limitation, maybe we can patch winevulkan.so to call `vkCreateAndroidSurfaceKHR` directly when it detects an ANativeWindow. This would bypass the win32_surface→xlib_surface translation entirely.
+5. **Test with the desktop only first** — no game. Just `explorer /desktop=shell,1280x720`. If the desktop renders stably, move to LIMBO (32-bit DX9). If the desktop crashes, fix that before anything else.
 
-6. **DO NOT add DC/ADPF/ASurfaceControl features.** Stay focused on the core goal: get game frames to render in Wayland mode. X11 mode already works — don't touch it.
+6. **The dmabuf path is the goal.** Once the desktop is stable, ensure DXVK frames go through the bridge as dmabuf (not SHM). The bridge's `zwp_linux_dmabuf_v1` handler must receive and present them.
 
-7. **DO NOT merge with WinNative 0.3.1-beta yet.** The merge is a separate 55-commit rebase that would take a full session. Get Wayland rendering working first.
+7. **DO NOT add DC/ADPF/ASurfaceControl features.** Stay focused on the core goal: stable rendering through the Wayland bridge with zero-copy dmabuf.
+
+8. **DO NOT merge with WinNative 0.3.1-beta yet.** The merge is a separate 55-commit rebase. Get Wayland rendering working first.
 
 ## Build System
 
@@ -153,6 +158,6 @@ adrenotools isolated namespace blocks VK_LAYER_PATH. The dmabuf layer dlopens bu
 
 ## The Single Question to Answer
 
-**Why does DXVK create a swapchain but no game frames appear on screen?**
+**Why does the Wine desktop flash and crash instead of rendering stably through the Wayland bridge?**
 
-Answer that, and Wayland mode renders games. Everything else is secondary.
+Fix the desktop stability first. Then: why do DXVK game frames not reach the bridge as dmabuf? Answer both, and Wayland mode works.
