@@ -5511,7 +5511,11 @@ Java_com_winlator_cmod_runtime_display_environment_components_WaylandBridgeServe
             native_ahb_vk_buffer_release);
     acquire_fence_fd = -1;
     release_context = NULL;
-    ASurfaceTransaction_setZOrder(transaction, surface_control, 0x7FFFFFFF);
+    // Do NOT override z-order here — the Java side sets it via
+    // SurfaceControl.Transaction.setLayer(presentLayer, 10) in
+    // ensurePresentLayer(). Setting INT32_MAX here forces the desktop
+    // overlay above the game's SurfaceView, causing a black screen
+    // when explorer.exe fails (the desktop is just a taskbar strip).
     ASurfaceTransaction_setVisibility(
             transaction,
             surface_control,
