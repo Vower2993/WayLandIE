@@ -33,6 +33,7 @@ public class WaylandBridgeServer {
     private int height = 1080;
     private int frameIndex = 0;
     private Runnable preloaderDismissCallback = null;
+    private Runnable onFirstFrameCallback = null;
 
     // Native methods — implemented in waylandie_display_native.c
     private static native String nativePresentAhbVkDmaBufFrame(
@@ -60,6 +61,10 @@ public class WaylandBridgeServer {
 
     public void setPreloaderDismissCallback(Runnable callback) {
         this.preloaderDismissCallback = callback;
+    }
+
+    public void setOnFirstFrameCallback(Runnable callback) {
+        this.onFirstFrameCallback = callback;
     }
 
     public void start(SurfaceView view) {
@@ -474,6 +479,9 @@ public class WaylandBridgeServer {
                 Log.i(TAG, "First frame presented — dismissing preloader");
                 if (preloaderDismissCallback != null) {
                     preloaderDismissCallback.run();
+                }
+                if (onFirstFrameCallback != null) {
+                    onFirstFrameCallback.run();
                 }
             }
             return "waylandie-bridge dmabuf-present status=pass";

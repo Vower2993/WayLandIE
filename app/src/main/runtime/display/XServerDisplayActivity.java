@@ -6729,6 +6729,10 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
                     preloaderDialog.closeOnUiThread();
                 }
             });
+            // Restart explorer after first Wayland frame — explorer races
+            // with winewayland.drv init and fails to create the desktop.
+            waylandBridgeServer.setOnFirstFrameCallback(
+                this::restartExplorerForWayland);
             waylandBridgeServer.start(xServerView, this);
             // Disable GL rendering in Wayland mode — the bridge presents
             // frames via SurfaceControl (ASurfaceTransaction), and the
@@ -6837,7 +6841,17 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
         AppUtils.observeSoftKeyboardVisibility(displayHostComposeView, renderer::setScreenOffsetYRelativeToCursor);
     }
 
-
+    /** Restart explorer after winewayland.drv is ready (first frame). */
+    private void restartExplorerForWayland() {
+        runOnUiThread(() -> {
+            if (winHandler != null && !isFinishing() && !isDestroyed()) {
+                Log.i("XServerDisplayActivity",
+                    "First Wayland frame — restarting explorer");
+                winHandler.exec("explorer /desktop=shell,"
+                    + Container.DEFAULT_SCREEN_SIZE);
+            }
+        });
+    }
 
     private ActivityResultLauncher<Intent> controlsEditorActivityResultLauncher = registerForActivityResult(
             new ActivityResultContracts.StartActivityForResult(),
