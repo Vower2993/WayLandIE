@@ -6729,19 +6729,6 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
                     preloaderDialog.closeOnUiThread();
                 }
             });
-            // Restart explorer after winewayland.drv is ready (first frame).
-            // Explorer fails early because the Wayland driver isn't loaded yet;
-            // by the time the first frame arrives, the driver is initialized.
-            waylandBridgeServer.setOnFirstFrameCallback(() -> {
-                runOnUiThread(() -> {
-                    if (winHandler != null && !isFinishing() && !isDestroyed()) {
-                        Log.i("XServerDisplayActivity",
-                            "First Wayland frame — restarting explorer");
-                        winHandler.exec(
-                            "explorer /desktop=shell," + screenSize);
-                    }
-                });
-            });
             waylandBridgeServer.start(xServerView, this);
             // Disable GL rendering in Wayland mode — the bridge presents
             // frames via SurfaceControl (ASurfaceTransaction), and the
