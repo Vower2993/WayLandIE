@@ -6730,6 +6730,11 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
                 }
             });
             waylandBridgeServer.start(xServerView, this);
+            // Disable GL rendering in Wayland mode — the bridge presents
+            // frames via SurfaceControl (ASurfaceTransaction), and the
+            // GLSurfaceView's VulkanRenderer would otherwise draw black
+            // on top of the bridge's presentLayer, hiding it.
+            xServerView.setWaylandMode(true);
             // NOTE: The ANativeWindow pointer wait is done in the background
             // executor (setupXEnvironment), NOT here. This method runs on the
             // UI thread — blocking it would prevent surfaceCreated from firing.

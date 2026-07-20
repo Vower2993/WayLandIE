@@ -350,6 +350,12 @@ public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Cal
                     if (fd >= 0) {
                         closeFd(fd);
                     }
+                } else if (waylandMode) {
+                    // Wayland mode, no dmabuf frame: skip GL rendering.
+                    // The bridge presents via SurfaceControl (ASurfaceTransaction),
+                    // so the GLSurfaceView MUST NOT draw anything — its black
+                    // clear color would occlude the bridge's presentLayer.
+                    // Just wait for the next cycle.
                 } else {
                     try { renderer.onDrawFrame(); } catch (Throwable ignore) {}
                 }
