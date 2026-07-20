@@ -40,9 +40,9 @@ endif()
 
 add_subdirectory(patchelf)
 add_subdirectory(adrenotools)
-# SKIPPED for local build (requires Rust/cargo): add_subdirectory(wn-steam-client)
-# SKIPPED for local build (requires Rust/cargo): add_subdirectory(wn-steam-bootstrap)
-# SKIPPED for local build (requires Rust/cargo): add_subdirectory(wn-libsteamclient)
+add_subdirectory(wn-steam-client)
+add_subdirectory(wn-steam-bootstrap)
+add_subdirectory(wn-libsteamclient)
 
 find_package(curl REQUIRED CONFIG)
 
