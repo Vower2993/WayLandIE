@@ -103,6 +103,7 @@ typedef struct {
     PFN_vkFreeCommandBuffers free_cmd_bufs;
     PFN_vkBeginCommandBuffer begin_cmd;
     PFN_vkEndCommandBuffer end_cmd;
+    PFN_vkResetCommandBuffer reset_cmd_buf;
     PFN_vkQueueSubmit queue_submit;
     PFN_vkQueueWaitIdle queue_wait_idle;
     PFN_vkCreateFence create_fence;
@@ -739,17 +740,20 @@ VkResult layer_get_swapchain_images(VkDevice device, VkSwapchainKHR sw,
         }
         return VK_ERROR_INITIALIZATION_FAILED;
     }
-    /* DAC: Return STAGING images — DXVK renders directly into these exportable
-     * images. No blit needed — on present, the staging dmabuf is sent to the
-     * bridge directly. The real swapchain images are never used for rendering. */
+    /* Return REAL swapchain images — DXVK renders to OPTIMAL-tiled images
+     * that support COLOR_ATTACHMENT usage (required by Adreno/Turnip).
+     * LINEAR staging images do NOT support COLOR_ATTACHMENT on mobile GPUs,
+     * so returning them would cause DXVK's render pass creation to fail.
+     *
+     * The blit from real→staging happens in layer_queue_present (see above). */
     if (!images || *count < s->image_count) {
         *count = s->image_count;
         return images ? VK_INCOMPLETE : VK_SUCCESS;
     }
     *count = s->image_count;
     for (uint32_t i = 0; i < s->image_count; i++)
-        images[i] = s->images[i].staging_img;
-    LOGI("get_swapchain_images: returned %u STAGING images (DAC zero-blit)", s->image_count);
+        images[i] = s->real_images[i];
+    LOGI("get_swapchain_images: returned %u REAL images (OPTIMAL tiling)", s->image_count);
     return VK_SUCCESS;
 }
 
@@ -771,18 +775,47 @@ VkResult layer_acquire_next_image(VkDevice device, VkSwapchainKHR sw,
 }
 
 VkResult layer_queue_present(VkQueue queue, const VkPresentInfoKHR *info) {
-    pthread_mutex_lock(&g_lock);
-    device_data *dd = g_devices;
-    pthread_mutex_unlock(&g_lock);
-
-    /* Passthrough or disabled: resolve real present and delegate */
-    if (!dd || !is_enabled() || is_passthrough()) {
-        if (dd) {
-            ensure_swapchain_vtable(dd->device, dd);
-            if (dd->vtable.real_present)
-                return dd->vtable.real_present(queue, info);
+    /* Passthrough or disabled: resolve real present from ANY device and delegate */
+    if (!is_enabled() || is_passthrough()) {
+        pthread_mutex_lock(&g_lock);
+        device_data *any_dd = g_devices;
+        pthread_mutex_unlock(&g_lock);
+        if (any_dd) {
+            ensure_swapchain_vtable(any_dd->device, any_dd);
+            if (any_dd->vtable.real_present)
+                return any_dd->vtable.real_present(queue, info);
         }
         LOGE("present: no real_present available (passthrough/degraded)");
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+
+    /* ACTIVE MODE: find the correct device_data from the swapchain.
+     *
+     * Analysis of Impact: The previous code used `dd = g_devices` which
+     * unconditionally picks the FIRST device in the global linked list.
+     * This is wrong when multiple VkDevices exist (e.g. Vulkan 1.3
+     * physical device groups, or multi-GPU setups). The VkQueue handle
+     * belongs to exactly one VkDevice, and the present info's swapchains
+     * belong to that same device. We must resolve the device_data
+     * from the swapchain, NOT from the global list head.
+     *
+     * Fix: walk info->pSwapchains to find the first swapchain_data
+     * that we own (find_swapchain returns non-NULL). Its dev_data field
+     * points to the correct device_data. If no owned swapchain is found,
+     * fall back to the global list head (backward-compatible). */
+    device_data *dd = NULL;
+    for (uint32_t i = 0; i < info->swapchainCount; i++) {
+        swapchain_data *s = find_swapchain(info->pSwapchains[i]);
+        if (s) { dd = s->dev_data; break; }
+    }
+    if (!dd) {
+        pthread_mutex_lock(&g_lock);
+        dd = g_devices;  /* fallback: first available device */
+        pthread_mutex_unlock(&g_lock);
+    }
+
+    if (!dd) {
+        LOGE("present: no device_data (no devices created)");
         return VK_ERROR_INITIALIZATION_FAILED;
     }
 
@@ -792,9 +825,14 @@ VkResult layer_queue_present(VkQueue queue, const VkPresentInfoKHR *info) {
         return VK_ERROR_INITIALIZATION_FAILED;
     }
 
-    /* DAC mode: DXVK rendered directly into the staging images (returned by
-     * layer_get_swapchain_images). No blit needed — just wait for rendering
-     * to complete, then send the dmabuf to the bridge. */
+    /* BLIT mode: DXVK rendered to REAL swapchain images (returned by
+     * layer_get_swapchain_images as real images). On present, we blit
+     * real_image -> staging_image, then send the staging dmabuf fd to
+     * the bridge. This is the CORRECT approach because REAL swapchain
+     * images have OPTIMAL tiling (required for COLOR_ATTACHMENT usage
+     * on mobile GPUs like Adreno/Turnip). LINEAR staging images do NOT
+     * support COLOR_ATTACHMENT on these GPUs, so DXVK cannot render
+     * to them directly. */
     bool any_layer_swapchain = false;
     bool semaphores_consumed = false;
 
@@ -805,13 +843,17 @@ VkResult layer_queue_present(VkQueue queue, const VkPresentInfoKHR *info) {
         uint32_t idx = info->pImageIndices[i];
         if (idx >= s->image_count) continue;
 
-        swapchain_image *img = &s->images[idx];
+        swapchain_image *staging = &s->images[idx];
+        VkImage real_img = s->real_images[idx];
 
-        /* Wait for DXVK's rendering semaphores — ensures the GPU has finished
-         * writing to the staging image before we send its dmabuf to the bridge.
-         * We consume them via a no-op submit that waits on them. */
+        /* Step 1: Wait for DXVK's rendering semaphores.
+         *
+         * DXVK rendered to the REAL swapchain image (Image A). The
+         * wait semaphores signal when the GPU is done writing to it.
+         * We consume them by submitting a fence-wait job — this
+         * guarantees real_img is ready for the blit below. */
         if (info->waitSemaphoreCount > 0 && !semaphores_consumed) {
-            VkPipelineStageFlags wait = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+            VkPipelineStageFlags wait = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
             VkSubmitInfo wsi = {};
             wsi.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
             wsi.waitSemaphoreCount = info->waitSemaphoreCount;
@@ -820,29 +862,136 @@ VkResult layer_queue_present(VkQueue queue, const VkPresentInfoKHR *info) {
             dd->vtable.reset_fences(dd->device, 1, &s->blit_fence);
             dd->vtable.queue_submit(queue, 1, &wsi, s->blit_fence);
             dd->vtable.wait_fences(dd->device, 1, &s->blit_fence, VK_TRUE, 5000000000ULL);
+            dd->vtable.reset_fences(dd->device, 1, &s->blit_fence);
             semaphores_consumed = true;
         }
 
-        /* NO BLIT — DXVK already rendered directly into img->staging_img.
-         * The dmabuf fd is cached from image creation time. Send it to bridge. */
-        if (img->dmabuf_fd >= 0) {
+        /* Step 2: Blit real swapchain image (Image A) → staging (Image B).
+         *
+         * Image A (real swapchain) is OPTIMAL tiling, COLOR_ATTACHMENT —
+         * what DXVK needs for rendering. Image B (staging) is LINEAR,
+         * TRANSFER_DST | TRANSFER_SRC — what Adreno/Turnip supports for
+         * dmabuf export. The blit is a GPU-side operation, practically
+         * free on tile-based GPUs (zero-bandwidth tile resolve).
+         *
+         * We use vkCmdBlitImage which handles format conversion and
+         * color-space transforms automatically. */
+        {
+            /* Transition real image: PRESENT_SRC → TRANSFER_SRC */
+            VkImageMemoryBarrier pre_barriers[2] = {};
+            pre_barriers[0].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            pre_barriers[0].srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
+            pre_barriers[0].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            pre_barriers[0].oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+            pre_barriers[0].newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+            pre_barriers[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            pre_barriers[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            pre_barriers[0].image = real_img;
+            pre_barriers[0].subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            pre_barriers[0].subresourceRange.levelCount = 1;
+            pre_barriers[0].subresourceRange.layerCount = 1;
+
+            /* Transition staging: UNDEFINED → TRANSFER_DST */
+            pre_barriers[1].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            pre_barriers[1].srcAccessMask = 0;
+            pre_barriers[1].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            pre_barriers[1].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            pre_barriers[1].newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            pre_barriers[1].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            pre_barriers[1].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            pre_barriers[1].image = staging->staging_img;
+            pre_barriers[1].subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            pre_barriers[1].subresourceRange.levelCount = 1;
+            pre_barriers[1].subresourceRange.layerCount = 1;
+
+            dd->vtable.reset_cmd_buf(s->blit_cmd, 0);
+            VkCommandBufferBeginInfo begin_info = {};
+            begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+            begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+            dd->vtable.begin_cmd(s->blit_cmd, &begin_info);
+
+            dd->vtable.cmd_pipeline_barrier(
+                s->blit_cmd,
+                VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                0, 0, NULL, 0, NULL, 2, pre_barriers);
+
+            /* Copy: real image → staging image (must match dimensions) */
+            VkImageCopy copy = {};
+            copy.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            copy.srcSubresource.layerCount = 1;
+            copy.srcOffset.x = 0;
+            copy.srcOffset.y = 0;
+            copy.srcOffset.z = 0;
+            copy.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            copy.dstSubresource.layerCount = 1;
+            copy.dstOffset.x = 0;
+            copy.dstOffset.y = 0;
+            copy.dstOffset.z = 0;
+            copy.extent.width = s->extent.width;
+            copy.extent.height = s->extent.height;
+            copy.extent.depth = 1;
+
+            dd->vtable.cmd_copy_image(
+                s->blit_cmd,
+                real_img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                staging->staging_img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                1, &copy);
+
+            /* Transition staging back for dmabuf export */
+            VkImageMemoryBarrier post_barrier = {};
+            post_barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            post_barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            post_barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT;
+            post_barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            post_barrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+            post_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            post_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            post_barrier.image = staging->staging_img;
+            post_barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            post_barrier.subresourceRange.levelCount = 1;
+            post_barrier.subresourceRange.layerCount = 1;
+
+            dd->vtable.cmd_pipeline_barrier(
+                s->blit_cmd,
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                0, 0, NULL, 0, NULL, 1, &post_barrier);
+
+            dd->vtable.end_cmd(s->blit_cmd);
+
+            VkSubmitInfo bsi = {};
+            bsi.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+            bsi.commandBufferCount = 1;
+            bsi.pCommandBuffers = &s->blit_cmd;
+            dd->vtable.queue_submit(queue, 1, &bsi, s->blit_fence);
+            dd->vtable.wait_fences(dd->device, 1, &s->blit_fence, VK_TRUE, 5000000000ULL);
+            dd->vtable.reset_fences(dd->device, 1, &s->blit_fence);
+        }
+
+        /* Step 3: Send the staging dmabuf fd to the bridge.
+         *
+         * The dmabuf fd was exported at image creation time (cached).
+         * After the blit completes, the staging image contains the
+         * rendered frame in dmabuf-exportable memory. */
+        if (staging->dmabuf_fd >= 0) {
             if (s->bridge_sock < 0) {
                 s->bridge_sock = bridge_connect(WAYLANDIE_BRIDGE_SOCKET);
                 if (s->bridge_sock >= 0)
-                    LOGI("bridge connected sock=%d (DAC zero-blit)", s->bridge_sock);
+                    LOGI("bridge connected sock=%d", s->bridge_sock);
             }
             if (s->bridge_sock >= 0) {
-                bridge_send_dmabuf(s->bridge_sock, img->dmabuf_fd,
-                                   img->width, img->height, img->drm_format,
-                                   img->stride, img->staging_size);
+                bridge_send_dmabuf(s->bridge_sock, staging->dmabuf_fd,
+                                   staging->width, staging->height, staging->drm_format,
+                                   staging->stride, staging->staging_size);
             }
         }
 
         s->present_count++;
         if (s->present_count <= 3 || (s->present_count % 60) == 0)
-            LOGI("DAC present #%llu: %ux%u stride=%u fd=%d (zero-blit)",
+            LOGI("present #%llu: %ux%u fd=%d (blit real→staging→bridge)",
                  (unsigned long long)s->present_count,
-                 img->width, img->height, img->stride, img->dmabuf_fd);
+                 staging->width, staging->height, staging->dmabuf_fd);
     }
 
     /* Call real vkQueuePresentKHR.
@@ -852,8 +1001,6 @@ VkResult layer_queue_present(VkQueue queue, const VkPresentInfoKHR *info) {
      * wait semaphores if we consumed them above. */
     if (any_layer_swapchain) {
         VkPresentInfoKHR real_info = *info;
-        /* pSwapchains stays the same — handles are already host handles */
-        /* pImageIndices stays the same — real index == our index */
         if (semaphores_consumed) {
             real_info.waitSemaphoreCount = 0;
             real_info.pWaitSemaphores = NULL;
@@ -882,6 +1029,7 @@ static void ensure_device_vtable(device_data *data) {
     data->vtable.free_cmd_bufs = (PFN_vkFreeCommandBuffers)fp(data->device, "vkFreeCommandBuffers");
     data->vtable.begin_cmd = (PFN_vkBeginCommandBuffer)fp(data->device, "vkBeginCommandBuffer");
     data->vtable.end_cmd = (PFN_vkEndCommandBuffer)fp(data->device, "vkEndCommandBuffer");
+    data->vtable.reset_cmd_buf = (PFN_vkResetCommandBuffer)fp(data->device, "vkResetCommandBuffer");
     data->vtable.queue_submit = (PFN_vkQueueSubmit)fp(data->device, "vkQueueSubmit");
     data->vtable.queue_wait_idle = (PFN_vkQueueWaitIdle)fp(data->device, "vkQueueWaitIdle");
     data->vtable.create_fence = (PFN_vkCreateFence)fp(data->device, "vkCreateFence");
