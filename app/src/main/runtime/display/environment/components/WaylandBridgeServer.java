@@ -503,9 +503,13 @@ public class WaylandBridgeServer {
             //   - setHidden(false) — visible from creation
             //   - Transaction: setAlpha(1.0) + setBufferSize + setCrop — full-frame crop
             //     so SurfaceFlinger composites the entire buffer
+            // Create at display root level (NO parent) to avoid inheriting
+            // the SurfaceView's scale+translate transform. When parented to
+            // the SurfaceView, the presentLayer gets the transform
+            // scale(1.333) + translate(3231, 0) which pushes it off-screen.
+            // Root-level layers use screen coordinates directly.
             presentLayer = new SurfaceControl.Builder()
                 .setName("WayLandIELinuxWindowLayer:waylandie-present")
-                .setParent(hostView.getSurfaceControl())
                 .setBufferSize(layerW, layerH)
                 .setFormat(PixelFormat.RGBA_8888)
                 .setOpaque(true)
