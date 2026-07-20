@@ -492,8 +492,20 @@ public class WaylandBridgeServer {
         int layerW = hostView.getWidth();
         int layerH = hostView.getHeight();
         if (layerW <= 0 || layerH <= 0) {
-            layerW = w;
-            layerH = h;
+            // View not laid out yet — use the device's physical screen size,
+            // NOT the source frame size (which would be tiny, e.g. 1280x128,
+            // leaving most of the screen black). The native GPU blit already
+            // scales frames to the full render target (2340x1080), so the
+            // SurfaceControl buffer must match.
+            android.util.DisplayMetrics metrics = new android.util.DisplayMetrics();
+            if (hostView.getDisplay() != null) {
+                hostView.getDisplay().getRealMetrics(metrics);
+            } else if (context != null) {
+                ((android.view.WindowManager) context.getSystemService(Context.WINDOW_SERVICE))
+                        .getDefaultDisplay().getRealMetrics(metrics);
+            }
+            layerW = metrics.widthPixels > 0 ? metrics.widthPixels : 2340;
+            layerH = metrics.heightPixels > 0 ? metrics.heightPixels : 1080;
         }
         try {
             // Match the working 41d5ea6 LinuxWindowActivity.ensurePresentLayer():
@@ -515,8 +527,11 @@ public class WaylandBridgeServer {
                 .setOpaque(true)
                 .setHidden(false)
                 .build();
-            width = layerW;
-            height = layerH;
+            // Keep render target at landscape 2340x1080 (the native GPU blit
+            // target and slot buffer size). The SurfaceControl layer is sized
+            // to the full screen, and SurfaceFlinger handles scaling/rotation.
+            width = 2340;
+            height = 1080;
             new SurfaceControl.Transaction()
                 .setLayer(presentLayer, 10)
                 .setVisibility(presentLayer, true)
