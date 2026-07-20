@@ -542,7 +542,7 @@ public class WaylandBridgeServer {
             width = 2340;
             height = 1080;
             new SurfaceControl.Transaction()
-                .setLayer(presentLayer, 10)
+                .setLayer(presentLayer, Integer.MAX_VALUE)
                 .setVisibility(presentLayer, true)
                 .setAlpha(presentLayer, 1.0f)
                 .setPosition(presentLayer, 0.0f, 0.0f)
