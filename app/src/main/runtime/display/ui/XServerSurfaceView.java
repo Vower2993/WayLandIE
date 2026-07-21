@@ -8,13 +8,19 @@ import android.view.ViewGroup;
 import android.widget.FrameLayout;
 import com.winlator.cmod.runtime.display.renderer.RenderCallback;
 import com.winlator.cmod.runtime.display.renderer.VulkanRenderer;
-// In-process Wayland compositor native methods (libwaylandie_comp.so)
+import com.winlator.cmod.runtime.display.xserver.XServer;
+import java.util.ArrayDeque;
+import java.util.Deque;
+
+/** SurfaceView that drives a VulkanRenderer on a dedicated render thread. */
+@SuppressLint("ViewConstructor")
+public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Callback {
+    // In-process Wayland compositor native methods (libwaylandie_comp.so)
     private static native void nativeCompStart(android.view.Surface surface, String xdgRuntimeDir,
         String driverPath, String libraryName, String nativeLibDir);
     private static native void nativeCompSetSurface(android.view.Surface surface);
     private static native void nativeCompSendPointer(int action, int x, int y);
     private static native void nativeCompSendKey(int evdev, int state);
-    // Callback from native when first frame is presented
     public static void onCompFirstFrame() {
         android.util.Log.i("XServerSurfaceView", "First compositor frame!");
     }
@@ -24,13 +30,6 @@ import com.winlator.cmod.runtime.display.renderer.VulkanRenderer;
             android.util.Log.w("XServerSurfaceView", "waylandie_comp not loaded: " + e.getMessage());
         }
     }
-import com.winlator.cmod.runtime.display.xserver.XServer;
-import java.util.ArrayDeque;
-import java.util.Deque;
-
-/** SurfaceView that drives a VulkanRenderer on a dedicated render thread. */
-@SuppressLint("ViewConstructor")
-public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Callback {
     public static final int RENDERMODE_WHEN_DIRTY  = 0;
     public static final int RENDERMODE_CONTINUOUSLY = 1;
     private static final long TRANSIENT_FRAME_INTERVAL_NS = 1_000_000_000L / 120L;
