@@ -463,7 +463,7 @@ target_link_libraries(waylandie_comp
     ${nativewindow-lib}
     ${CMAKE_CURRENT_SOURCE_DIR}/waylandcomp/prebuilt/lib/libwayland-server.so
     vulkan
+    adrenotools
     dl
-
 )
 
