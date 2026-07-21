@@ -68,6 +68,12 @@ def installVulkanValidationLayer = tasks.register("installVulkanValidationLayer"
 
 ksp {
     arg("room.schemaLocation", "$projectDir/schemas")
+    // Workaround for KSP NPE at KSClassDeclarationJavaImpl.simpleName
+    // https://github.com/google/ksp/issues/1641
+    // KSP2 has a bug processing Java files with native method declarations
+    // in non-standard srcDirs. Disabling KSP2 falls back to the legacy
+    // KSP1 processor which handles Java files correctly.
+    arg("ksp.useKSP2", "false")
 }
 
 def appVersionName = providers.gradleProperty("VERSION_NAME")
