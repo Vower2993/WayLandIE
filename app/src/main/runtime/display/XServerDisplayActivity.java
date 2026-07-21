@@ -156,6 +156,7 @@ import com.winlator.cmod.runtime.display.environment.components.SysVSharedMemory
 import com.winlator.cmod.runtime.display.environment.components.XServerComponent;
 import com.winlator.cmod.runtime.display.environment.components.WaylandBridgeComponent;
 import com.winlator.cmod.runtime.display.environment.components.WaylandBridgeServer;
+import com.winlator.cmod.runtime.display.wayland.WaylandCompositor;
 import com.winlator.cmod.runtime.display.xserver.Atom;
 import com.winlator.cmod.runtime.display.xserver.Pointer;
 import com.winlator.cmod.runtime.display.xserver.Property;
@@ -2964,6 +2965,10 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
                 waylandBridgeServer.stop();
                 waylandBridgeServer = null;
             }
+            // Stop the in-process Wayland compositor too
+            try {
+                com.winlator.cmod.runtime.display.wayland.WaylandCompositor.stop();
+            } catch (Throwable ignored) {}
             xServerView = null;
 
             if (remaining.isEmpty()) {
@@ -6742,6 +6747,20 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
             // NOTE: The ANativeWindow pointer wait is done in the background
             // executor (setupXEnvironment), NOT here. This method runs on the
             // UI thread — blocking it would prevent surfaceCreated from firing.
+
+            // Also start the in-process Wayland compositor (libwaylandie_comp.so).
+            // This is Bannerlator's proven architecture: the compositor runs
+            // in-process, receiving dmabuf fds directly from winewayland.drv
+            // via wl_surface.commit — no Unix socket IPC, no SCM_RIGHTS.
+            // The compositor presents to the SurfaceView's Surface via
+            // VK_KHR_android_surface + VkSwapchainKHR (Turnip via adrenotools).
+            //
+            // The old bridge (WaylandBridgeServer) still runs for SHM desktop
+            // frames and ASurfaceControl presentation. The new in-process
+            // compositor handles dmabuf game frames with zero-copy.
+            //
+            // The compositor is started after the SurfaceView's Surface is
+            // created (in the surfaceCreated callback, not here).
         }
         final VulkanRenderer renderer = xServerView.getRenderer();
         // Match guest libvulkan so imported AHB tiling matches the producer.

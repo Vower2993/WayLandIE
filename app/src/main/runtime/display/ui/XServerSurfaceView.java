@@ -8,6 +8,7 @@ import android.view.ViewGroup;
 import android.widget.FrameLayout;
 import com.winlator.cmod.runtime.display.renderer.RenderCallback;
 import com.winlator.cmod.runtime.display.renderer.VulkanRenderer;
+import com.winlator.cmod.runtime.display.wayland.WaylandCompositor;
 import com.winlator.cmod.runtime.display.xserver.XServer;
 import java.util.ArrayDeque;
 import java.util.Deque;
@@ -204,6 +205,42 @@ public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Cal
         // Notify any thread waiting for the surface to be created (Option A: delay Wine launch).
         synchronized (surfaceCreatedLock) {
             surfaceCreatedLock.notifyAll();
+        }
+
+        // Start the in-process Wayland compositor (Bannerlator architecture).
+        // This runs in-process — the compositor receives dmabuf fds directly
+        // from winewayland.drv via wl_surface.commit, no Unix socket IPC.
+        // It creates a VkSwapchainKHR on this Surface and blits incoming
+        // dmabuf/shm buffers to it via Turnip.
+        if (waylandMode) {
+            try {
+                String rtDir = getContext().getFilesDir().getAbsolutePath() + "/imagefs/usr/tmp/runtime";
+                // Get the Turnip driver path from the app's ContentsManager
+                // For now, use the same path the existing bridge uses
+                String nativeLibDir = getContext().getApplicationInfo().nativeLibraryDir;
+                String driverPath = getContext().getFilesDir().getAbsolutePath()
+                    + "/contents/adrenotools/0/";
+                String libraryName = "libvulkan_freedreno.so";
+
+                // Check if driver dir exists, fall back to system driver
+                java.io.File driverDir = new java.io.File(driverPath);
+                if (!driverDir.exists()) {
+                    android.util.Log.w("XServerSurfaceView",
+                        "Turnip driver dir not found: " + driverPath
+                        + " — compositor will use system Vulkan");
+                    driverPath = null;
+                    libraryName = null;
+                }
+
+                WaylandCompositor.startWithSurface(
+                    holder.getSurface(), rtDir,
+                    driverPath, libraryName, nativeLibDir);
+                android.util.Log.i("XServerSurfaceView",
+                    "In-process Wayland compositor started (Bannerlator architecture)");
+            } catch (Exception e) {
+                android.util.Log.e("XServerSurfaceView",
+                    "Failed to start in-process Wayland compositor", e);
+            }
         }
 
         startRenderThreadIfNeeded();

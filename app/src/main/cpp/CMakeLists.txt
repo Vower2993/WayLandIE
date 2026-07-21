@@ -398,3 +398,72 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/bionic-libs/lib/libwayland-server.a")
 else()
     message(STATUS "bionic-libs NOT found — skipping waylandie targets (will use X11 fallback)")
 endif()
+
+# ====================================================================
+# In-process Wayland compositor (ported from Bannerlator)
+#
+# This is a SHARED LIBRARY loaded by System.loadLibrary("waylandie_comp")
+# that runs the Wayland compositor IN-PROCESS — no subprocess, no IPC,
+# no Unix socket for buffer transfer. The compositor thread runs
+# wl_display_run() and directly calls vk_present_commit_dmabuf/shm()
+# when a client commits a buffer.
+#
+# This replaces the old multi-process bridge architecture:
+#   OLD: Wine → bridge subprocess → Unix socket → JVM → SurfaceFlinger
+#   NEW: Wine → compositor .so (in-process) → VkSwapchainKHR → SurfaceFlinger
+#
+# The key advantage: dmabuf fds are passed as function arguments, not
+# over Unix sockets. This eliminates the SCM_RIGHTS fd-passing race
+# that causes the "desktop flashes and crashes" symptom.
+# ====================================================================
+
+add_library(waylandie_comp SHARED
+    waylandcomp/src/compositor.c
+    waylandcomp/src/vk_present.c
+    waylandcomp/src/vk_loader.c
+    waylandcomp/src/vk_import.c
+    waylandcomp/src/waylandcomp_jni.c
+    waylandcomp/generated/xdg-shell-protocol.c
+    waylandcomp/generated/linux-dmabuf-v1-protocol.c
+    waylandcomp/generated/viewporter-protocol.c
+)
+
+set_target_properties(waylandie_comp PROPERTIES
+    PREFIX "lib"
+    OUTPUT_NAME "waylandie_comp"
+    SUFFIX ".so"
+)
+
+target_include_directories(waylandie_comp PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/waylandcomp/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/waylandcomp/generated
+    ${CMAKE_CURRENT_SOURCE_DIR}/waylandcomp/prebuilt/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/adrenotools/include
+)
+
+target_compile_definitions(waylandie_comp PRIVATE
+    _GNU_SOURCE
+    VK_USE_PLATFORM_ANDROID_KHR=1
+    __ANDROID_MIN_SDK_VERSION__=31
+)
+
+target_compile_options(waylandie_comp PRIVATE
+    -fPIC -O2 -Wno-unused-function -Wno-implicit-function-declaration
+    -include ${CMAKE_CURRENT_SOURCE_DIR}/android_api_override.h
+)
+
+find_library(log-lib-comp log)
+find_library(android-lib-comp android)
+find_library(nativewindow-lib nativewindow)
+
+target_link_libraries(waylandie_comp
+    ${log-lib-comp}
+    ${android-lib-comp}
+    ${nativewindow-lib}
+    ${CMAKE_CURRENT_SOURCE_DIR}/waylandcomp/prebuilt/lib/libwayland-server.so
+    vulkan
+    dl
+    pthread
+)
+
