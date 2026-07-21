@@ -8,7 +8,7 @@ import android.view.ViewGroup;
 import android.widget.FrameLayout;
 import com.winlator.cmod.runtime.display.renderer.RenderCallback;
 import com.winlator.cmod.runtime.display.renderer.VulkanRenderer;
-import com.winlator.cmod.runtime.display.wayland.WaylandCompositor;
+// WaylandCompositor removed — native methods now in WaylandBridgeServer
 import com.winlator.cmod.runtime.display.xserver.XServer;
 import java.util.ArrayDeque;
 import java.util.Deque;
@@ -232,7 +232,7 @@ public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Cal
                     libraryName = null;
                 }
 
-                WaylandCompositor.startWithSurface(
+                com.winlator.cmod.runtime.display.environment.components.WaylandBridgeServer.startCompositor(
                     holder.getSurface(), rtDir,
                     driverPath, libraryName, nativeLibDir);
                 android.util.Log.i("XServerSurfaceView",

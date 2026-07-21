@@ -156,7 +156,6 @@ import com.winlator.cmod.runtime.display.environment.components.SysVSharedMemory
 import com.winlator.cmod.runtime.display.environment.components.XServerComponent;
 import com.winlator.cmod.runtime.display.environment.components.WaylandBridgeComponent;
 import com.winlator.cmod.runtime.display.environment.components.WaylandBridgeServer;
-import com.winlator.cmod.runtime.display.wayland.WaylandCompositor;
 import com.winlator.cmod.runtime.display.xserver.Atom;
 import com.winlator.cmod.runtime.display.xserver.Pointer;
 import com.winlator.cmod.runtime.display.xserver.Property;
@@ -2967,7 +2966,7 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
             }
             // Stop the in-process Wayland compositor too
             try {
-                com.winlator.cmod.runtime.display.wayland.WaylandCompositor.stop();
+                com.winlator.cmod.runtime.display.environment.components.WaylandBridgeServer.stopCompositor();
             } catch (Throwable ignored) {}
             xServerView = null;
 

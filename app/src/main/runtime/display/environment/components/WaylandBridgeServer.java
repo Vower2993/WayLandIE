@@ -51,6 +51,37 @@ public class WaylandBridgeServer {
     // Returns the ANativeWindow pointer as a decimal string (for envVars).
     public static native String nativeSetAnativeWindow(android.view.Surface surface);
 
+    // --- In-process Wayland compositor (Bannerlator architecture) ---
+    // These native methods are implemented in libwaylandie_comp.so (waylandcomp/src/waylandcomp_jni.c)
+    // The compositor runs in-process — receives dmabuf fds directly from winewayland.drv
+    // via wl_surface.commit, no Unix socket IPC.
+    public static native void nativeCompStart(Surface surface, String xdgRuntimeDir,
+        String driverPath, String libraryName, String nativeLibDir);
+    public static native void nativeCompSetSurface(Surface surface);
+    public static native void nativeCompSendPointer(int action, int x, int y);
+    public static native void nativeCompSendKey(int evdev, int state);
+
+    // Called from native code when first frame is presented
+    public static void onCompFirstFrame() {
+        Log.i(TAG, "First compositor frame presented!");
+    }
+
+    /** Start the in-process Wayland compositor */
+    public static void startCompositor(Surface surface, String xdgRuntimeDir,
+                                        String driverPath, String libraryName, String nativeLibDir) {
+        try {
+            nativeCompStart(surface, xdgRuntimeDir, driverPath, libraryName, nativeLibDir);
+            Log.i(TAG, "In-process Wayland compositor started");
+        } catch (UnsatisfiedLinkError e) {
+            Log.e(TAG, "waylandie_comp not loaded — compositor unavailable", e);
+        }
+    }
+
+    /** Stop the in-process Wayland compositor */
+    public static void stopCompositor() {
+        try { nativeCompSetSurface(null); } catch (UnsatisfiedLinkError ignored) {}
+    }
+
     static {
         try {
             System.loadLibrary("waylandie_display_native");

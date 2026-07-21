@@ -20,18 +20,18 @@ extern void banner_wayland_send_key(int evdev, int state);
 
 static JavaVM *g_jvm;
 static jclass g_compositor_cls;      /* global ref */
-static jmethodID g_on_first_frame;   /* static void onFirstFramePresented() */
+static jmethodID g_on_first_frame;   /* static void onCompFirstFrame() */
 
 JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
     (void)reserved;
     g_jvm = vm;
     JNIEnv *env;
     if ((*vm)->GetEnv(vm, (void **)&env, JNI_VERSION_1_6) == JNI_OK) {
-        jclass c = (*env)->FindClass(env, "com/winlator/cmod/runtime/display/wayland/WaylandCompositor");
+        jclass c = (*env)->FindClass(env, "com/winlator/cmod/runtime/display/environment/components/WaylandBridgeServer");
         if (c) {
             g_compositor_cls = (*env)->NewGlobalRef(env, c);
             g_on_first_frame = (*env)->GetStaticMethodID(env, g_compositor_cls,
-                                                         "onFirstFramePresented", "()V");
+                                                         "onCompFirstFrame", "()V");
         }
     }
     return JNI_VERSION_1_6;
@@ -79,13 +79,7 @@ static void start_thread(void) {
         __android_log_print(ANDROID_LOG_ERROR, TAG, "pthread_create failed");
 }
 
-/* Headless start (no output window) — used for bring-up tests. */
-JNIEXPORT void JNICALL
-Java_com_winlator_cmod_runtime_display_wayland_WaylandCompositor_nativeStart(JNIEnv *env, jclass clazz,
-                                                             jstring xdgRuntimeDir) {
-    set_runtime_dir(env, xdgRuntimeDir);
-    start_thread();
-}
+
 
 static char *dup_jstr(JNIEnv *env, jstring s) {
     if (!s) return NULL;
@@ -98,7 +92,7 @@ static char *dup_jstr(JNIEnv *env, jstring s) {
 /* Start with a real output Surface + the container's Turnip driver (adrenotools).
  * Frames committed by clients are composited to this Surface via Turnip. */
 JNIEXPORT void JNICALL
-Java_com_winlator_cmod_runtime_display_wayland_WaylandCompositor_nativeStartWithSurface(
+Java_com_winlator_cmod_runtime_display_environment_components_WaylandBridgeServer_nativeCompStart(
         JNIEnv *env, jclass clazz, jobject surface, jstring xdgRuntimeDir,
         jstring driverPath, jstring libraryName, jstring nativeLibDir) {
     set_runtime_dir(env, xdgRuntimeDir);
@@ -109,7 +103,7 @@ Java_com_winlator_cmod_runtime_display_wayland_WaylandCompositor_nativeStartWith
     free(dp); free(ln); free(nl);
     if (surface) {
         ANativeWindow *win = ANativeWindow_fromSurface(env, surface);
-        vk_present_set_window(win); /* backend acquires; released on nativeSetSurface(null) */
+        vk_present_set_window(win); /* backend acquires; released on nativeCompSetSurface(null) */
         __android_log_print(ANDROID_LOG_INFO, TAG, "output window bound (%p)", (void *)win);
     }
     start_thread();
@@ -118,21 +112,21 @@ Java_com_winlator_cmod_runtime_display_wayland_WaylandCompositor_nativeStartWith
 /* Inject a pointer event from the Android SurfaceView touch listener (UI thread).
  * action: 0=down 1=move 2=up; x/y in output space (0..1919, 0..1079). */
 JNIEXPORT void JNICALL
-Java_com_winlator_cmod_runtime_display_wayland_WaylandCompositor_nativeSendPointer(
+Java_com_winlator_cmod_runtime_display_environment_components_WaylandBridgeServer_nativeCompSendPointer(
         JNIEnv *env, jclass clazz, jint action, jint x, jint y) {
     banner_wayland_send_pointer(action, x, y);
 }
 
 /* Inject a key event. evdev = Linux input keycode (KEY_A=30…); state 1=down 0=up. */
 JNIEXPORT void JNICALL
-Java_com_winlator_cmod_runtime_display_wayland_WaylandCompositor_nativeSendKey(
+Java_com_winlator_cmod_runtime_display_environment_components_WaylandBridgeServer_nativeCompSendKey(
         JNIEnv *env, jclass clazz, jint evdev, jint state) {
     banner_wayland_send_key(evdev, state);
 }
 
 /* Swap/clear the output window (e.g. SurfaceView recreated/destroyed). */
 JNIEXPORT void JNICALL
-Java_com_winlator_cmod_runtime_display_wayland_WaylandCompositor_nativeSetSurface(
+Java_com_winlator_cmod_runtime_display_environment_components_WaylandBridgeServer_nativeCompSetSurface(
         JNIEnv *env, jclass clazz, jobject surface) {
     if (surface) {
         vk_present_set_window(ANativeWindow_fromSurface(env, surface));
