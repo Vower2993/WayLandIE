@@ -464,6 +464,6 @@ target_link_libraries(waylandie_comp
     ${CMAKE_CURRENT_SOURCE_DIR}/waylandcomp/prebuilt/lib/libwayland-server.so
     vulkan
     dl
-    pthread
+
 )
 
