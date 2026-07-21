@@ -27,7 +27,7 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
     g_jvm = vm;
     JNIEnv *env;
     if ((*vm)->GetEnv(vm, (void **)&env, JNI_VERSION_1_6) == JNI_OK) {
-        jclass c = (*env)->FindClass(env, "com/winlator/cmod/runtime/display/environment/components/WaylandBridgeServer");
+        jclass c = (*env)->FindClass(env, "com/winlator/cmod/runtime/display/ui/XServerSurfaceView");
         if (c) {
             g_compositor_cls = (*env)->NewGlobalRef(env, c);
             g_on_first_frame = (*env)->GetStaticMethodID(env, g_compositor_cls,
@@ -92,7 +92,7 @@ static char *dup_jstr(JNIEnv *env, jstring s) {
 /* Start with a real output Surface + the container's Turnip driver (adrenotools).
  * Frames committed by clients are composited to this Surface via Turnip. */
 JNIEXPORT void JNICALL
-Java_com_winlator_cmod_runtime_display_environment_components_WaylandBridgeServer_nativeCompStart(
+Java_com_winlator_cmod_runtime_display_ui_XServerSurfaceView_nativeCompStart(
         JNIEnv *env, jclass clazz, jobject surface, jstring xdgRuntimeDir,
         jstring driverPath, jstring libraryName, jstring nativeLibDir) {
     set_runtime_dir(env, xdgRuntimeDir);
@@ -112,21 +112,21 @@ Java_com_winlator_cmod_runtime_display_environment_components_WaylandBridgeServe
 /* Inject a pointer event from the Android SurfaceView touch listener (UI thread).
  * action: 0=down 1=move 2=up; x/y in output space (0..1919, 0..1079). */
 JNIEXPORT void JNICALL
-Java_com_winlator_cmod_runtime_display_environment_components_WaylandBridgeServer_nativeCompSendPointer(
+Java_com_winlator_cmod_runtime_display_ui_XServerSurfaceView_nativeCompSendPointer(
         JNIEnv *env, jclass clazz, jint action, jint x, jint y) {
     banner_wayland_send_pointer(action, x, y);
 }
 
 /* Inject a key event. evdev = Linux input keycode (KEY_A=30…); state 1=down 0=up. */
 JNIEXPORT void JNICALL
-Java_com_winlator_cmod_runtime_display_environment_components_WaylandBridgeServer_nativeCompSendKey(
+Java_com_winlator_cmod_runtime_display_ui_XServerSurfaceView_nativeCompSendKey(
         JNIEnv *env, jclass clazz, jint evdev, jint state) {
     banner_wayland_send_key(evdev, state);
 }
 
 /* Swap/clear the output window (e.g. SurfaceView recreated/destroyed). */
 JNIEXPORT void JNICALL
-Java_com_winlator_cmod_runtime_display_environment_components_WaylandBridgeServer_nativeCompSetSurface(
+Java_com_winlator_cmod_runtime_display_ui_XServerSurfaceView_nativeCompSetSurface(
         JNIEnv *env, jclass clazz, jobject surface) {
     if (surface) {
         vk_present_set_window(ANativeWindow_fromSurface(env, surface));

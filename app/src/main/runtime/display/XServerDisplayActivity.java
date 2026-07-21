@@ -2966,7 +2966,7 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
             }
             // Stop the in-process Wayland compositor too
             try {
-                com.winlator.cmod.runtime.display.environment.components.WaylandBridgeServer.stopCompositor();
+                xServerView.nativeCompSetSurface(null);
             } catch (Throwable ignored) {}
             xServerView = null;
 
