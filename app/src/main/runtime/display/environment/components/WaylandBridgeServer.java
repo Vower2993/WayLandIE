@@ -54,6 +54,7 @@ public class WaylandBridgeServer {
     static {
         try {
             System.loadLibrary("waylandie_display_native");
+            try { System.loadLibrary("waylandie_comp"); } catch (UnsatisfiedLinkError e) { Log.e("WaylandBridgeServer", "waylandie_comp not loaded", e); }
         } catch (UnsatisfiedLinkError e) {
             Log.e(TAG, "Failed to load waylandie_display_native", e);
         }
