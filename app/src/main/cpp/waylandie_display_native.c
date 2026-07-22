@@ -14,6 +14,7 @@
 // instead, so the include is not needed.
 #include <errno.h>
 #include <dlfcn.h>
+#include <android/log.h>
 #include <fcntl.h>
 #include <poll.h>
 #include <pthread.h>
@@ -5967,6 +5968,7 @@ Java_com_winlator_cmod_runtime_display_ui_XServerSurfaceView_nativeCloseFd(
  * ==================================================================== */
 
 #include <dlfcn.h>
+#include <android/log.h>
 
 static void *g_comp_handle = NULL;
 static pthread_t g_comp_thread;
