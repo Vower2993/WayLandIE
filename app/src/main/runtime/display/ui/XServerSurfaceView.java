@@ -15,21 +15,6 @@ import java.util.Deque;
 /** SurfaceView that drives a VulkanRenderer on a dedicated render thread. */
 @SuppressLint("ViewConstructor")
 public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Callback {
-    // In-process Wayland compositor native methods (libwaylandie_comp.so)
-    private static native void nativeCompStart(android.view.Surface surface, String xdgRuntimeDir,
-        String driverPath, String libraryName, String nativeLibDir);
-    private static native void nativeCompSetSurface(android.view.Surface surface);
-    private static native void nativeCompSendPointer(int action, int x, int y);
-    private static native void nativeCompSendKey(int evdev, int state);
-    public static void onCompFirstFrame() {
-        android.util.Log.i("XServerSurfaceView", "First compositor frame!");
-    }
-    static {
-        try { System.loadLibrary("waylandie_comp"); }
-        catch (UnsatisfiedLinkError e) {
-            android.util.Log.w("XServerSurfaceView", "waylandie_comp not loaded: " + e.getMessage());
-        }
-    }
     public static final int RENDERMODE_WHEN_DIRTY  = 0;
     public static final int RENDERMODE_CONTINUOUSLY = 1;
     private static final long TRANSIENT_FRAME_INTERVAL_NS = 1_000_000_000L / 120L;
@@ -219,42 +204,6 @@ public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Cal
         // Notify any thread waiting for the surface to be created (Option A: delay Wine launch).
         synchronized (surfaceCreatedLock) {
             surfaceCreatedLock.notifyAll();
-        }
-
-        // Start the in-process Wayland compositor (Bannerlator architecture).
-        // This runs in-process — the compositor receives dmabuf fds directly
-        // from winewayland.drv via wl_surface.commit, no Unix socket IPC.
-        // It creates a VkSwapchainKHR on this Surface and blits incoming
-        // dmabuf/shm buffers to it via Turnip.
-        if (waylandMode) {
-            try {
-                String rtDir = getContext().getFilesDir().getAbsolutePath() + "/imagefs/usr/tmp/runtime";
-                // Get the Turnip driver path from the app's ContentsManager
-                // For now, use the same path the existing bridge uses
-                String nativeLibDir = getContext().getApplicationInfo().nativeLibraryDir;
-                String driverPath = getContext().getFilesDir().getAbsolutePath()
-                    + "/contents/adrenotools/0/";
-                String libraryName = "libvulkan_freedreno.so";
-
-                // Check if driver dir exists, fall back to system driver
-                java.io.File driverDir = new java.io.File(driverPath);
-                if (!driverDir.exists()) {
-                    android.util.Log.w("XServerSurfaceView",
-                        "Turnip driver dir not found: " + driverPath
-                        + " — compositor will use system Vulkan");
-                    driverPath = null;
-                    libraryName = null;
-                }
-
-                nativeCompStart(
-                    holder.getSurface(), rtDir,
-                    driverPath, libraryName, nativeLibDir);
-                android.util.Log.i("XServerSurfaceView",
-                    "In-process Wayland compositor started (Bannerlator architecture)");
-            } catch (Exception e) {
-                android.util.Log.e("XServerSurfaceView",
-                    "Failed to start in-process Wayland compositor", e);
-            }
         }
 
         startRenderThreadIfNeeded();

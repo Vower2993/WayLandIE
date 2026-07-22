@@ -121,18 +121,6 @@ public final class WaylandDriverInstaller {
                 // NOTE: winevulkan.dll NOT copied to arm64ec — stock Proton version used
             }
 
-            // DEAD CODE: Binary-patching is no longer needed with the Bannerlator
-            // in-process Wayland compositor. The compositor receives dmabuf through
-            // Wayland protocol (zwp_linux_dmabuf_v1), NOT through VK_KHR_wayland_surface.
-            // Wine's winewayland.drv creates wl_surface + dmabuf buffers, which the
-            // compositor imports and blits to a VkSwapchainKHR on the Android Surface.
-            //
-            // The patching below was a workaround for building Wine WITHOUT --with-wayland.
-            // Bannerlator builds Wine WITH --with-wayland, so winewayland.drv is a proper
-            // builtin driver that doesn't need binary patching.
-            //
-            // DISABLED — kept for reference:
-            // --- BEGIN DISABLED PATCHING ---
             // Binary-patch winevulkan.dll to replace VK_KHR_wayland_surface → VK_KHR_xlib_surface.
             //
             // Our source-built winevulkan.dll contains "VK_KHR_wayland_surface" in its
@@ -154,56 +142,55 @@ public final class WaylandDriverInstaller {
 
             // NOTE: syswow64/winevulkan.dll is NOT replaced — stock Proton version used
 
-            // DEAD CODE: patchSurfaceExtension(winevulkanAarch64);
-            // DEAD CODE: patchSurfaceExtension(winevulkanArm64ec);
-            // DEAD CODE: patchSurfaceExtension(winevulkanPrefix);
-            // DEAD CODE: patchSurfaceExtension(winevulkanSyswow64);
+            patchSurfaceExtension(winevulkanAarch64);
+            patchSurfaceExtension(winevulkanArm64ec);
+            patchSurfaceExtension(winevulkanPrefix);
+            patchSurfaceExtension(winevulkanSyswow64);
             // Also patch winex11.drv — it also contains VK_KHR_wayland_surface
             File winex11Aarch64 = new File(wineAarch64Windows, "winex11.drv");
             File winex11Prefix = new File(prefix, "drive_c/windows/system32/winex11.drv");
-            // DEAD CODE: patchSurfaceExtension(winex11Aarch64);
-            // DEAD CODE: patchSurfaceExtension(winex11Prefix);
+            patchSurfaceExtension(winex11Aarch64);
+            patchSurfaceExtension(winex11Prefix);
             // Also patch winewayland.so (in case it has the string too)
-            // DEAD CODE: patchSurfaceExtension(new File(wineAarch64Unix, "winewayland.so"));
-            // DEAD CODE: patchSurfaceExtension(new File(prefix, "lib/wine/aarch64-unix/winewayland.so"));
+            patchSurfaceExtension(new File(wineAarch64Unix, "winewayland.so"));
+            patchSurfaceExtension(new File(prefix, "lib/wine/aarch64-unix/winewayland.so"));
 
             // CRITICAL: Binary-patch to neutralize VK_EXT_surface_maintenance1.
             //
             // DIAGNOSTIC: Scan ALL .so files to find where the string lives.
             Log.i(TAG, "DIAGNOSTIC: scanning all .so files for VK_EXT_surface_maintenance1");
-            // DEAD CODE: scanAllSoForString(winePath, "VK_EXT_surface_maintenance1");
-            // DEAD CODE: scanAllSoForString(winePath, "VK_EXT_swapchain_maintenance1");
+            scanAllSoForString(winePath, "VK_EXT_surface_maintenance1");
+            scanAllSoForString(winePath, "VK_EXT_swapchain_maintenance1");
             File prefixLib = new File(prefix, "lib/wine");
             if (prefixLib.isDirectory()) {
-                // DEAD CODE: scanAllSoForString(prefixLib, "VK_EXT_surface_maintenance1");
-                // DEAD CODE: scanAllSoForString(prefixLib, "VK_EXT_swapchain_maintenance1");
+                scanAllSoForString(prefixLib, "VK_EXT_surface_maintenance1");
+                scanAllSoForString(prefixLib, "VK_EXT_swapchain_maintenance1");
             }
 
             // Patch files that DIAGNOSTIC found containing the string.
             // CI #326 results: win32u.so (1x), winevulkan.dll aarch64 (7x), winevulkan.dll i386 (4x)
             File win32uSo = new File(wineAarch64Unix, "win32u.so");
-            // DEAD CODE: patchExtensionString(win32uSo,
+            patchExtensionString(win32uSo,
                 "VK_EXT_surface_maintenance1", "VK_EXT_surface_maintenance0");
-            // DEAD CODE: patchExtensionString(win32uSo,
+            patchExtensionString(win32uSo,
                 "VK_EXT_swapchain_maintenance1", "VK_EXT_swapchain_maintenance0");
             // Patch winevulkan.dll — PE side, has 7 occurrences (aarch64) + 4 (i386)
             File winevulkanDllAarch64 = new File(wineAarch64Windows, "winevulkan.dll");
-            // DEAD CODE: patchExtensionString(winevulkanDllAarch64,
+            patchExtensionString(winevulkanDllAarch64,
                 "VK_EXT_surface_maintenance1", "VK_EXT_surface_maintenance0");
-            // DEAD CODE: patchExtensionString(winevulkanDllAarch64,
+            patchExtensionString(winevulkanDllAarch64,
                 "VK_EXT_swapchain_maintenance1", "VK_EXT_swapchain_maintenance0");
             File winevulkanDllSys32 = new File(prefix, "drive_c/windows/system32/winevulkan.dll");
-            // DEAD CODE: patchExtensionString(winevulkanDllSys32,
+            patchExtensionString(winevulkanDllSys32,
                 "VK_EXT_surface_maintenance1", "VK_EXT_surface_maintenance0");
-            // DEAD CODE: patchExtensionString(winevulkanDllSys32,
+            patchExtensionString(winevulkanDllSys32,
                 "VK_EXT_swapchain_maintenance1", "VK_EXT_swapchain_maintenance0");
             File winevulkanDllArm64ec = new File(winePath, "lib/wine/arm64ec-windows/winevulkan.dll");
-            // DEAD CODE: patchExtensionString(winevulkanDllArm64ec,
+            patchExtensionString(winevulkanDllArm64ec,
                 "VK_EXT_surface_maintenance1", "VK_EXT_surface_maintenance0");
-            // DEAD CODE: patchExtensionString(winevulkanDllArm64ec,
+            patchExtensionString(winevulkanDllArm64ec,
                 "VK_EXT_swapchain_maintenance1", "VK_EXT_swapchain_maintenance0");
 
-            // --- END DISABLED PATCHING ---
             // Do NOT patch DXVK DLLs — DXVK should request VK_KHR_win32_surface
             // (its natural behavior). Wine's wayland_map_instance_extensions
             // maps win32_surface → xlib_surface internally at the flag level.
@@ -504,7 +491,7 @@ public final class WaylandDriverInstaller {
      * for a specific ASCII string. Logs every file that contains the string.
      * Used to find which .so file contains VK_EXT_surface_maintenance1.
      */
-    private static void // DEAD CODE: scanAllSoForString(File rootDir, String searchStr) {
+    private static void scanAllSoForString(File rootDir, String searchStr) {
         if (rootDir == null || !rootDir.isDirectory()) return;
         byte[] search = searchStr.getBytes(java.nio.charset.StandardCharsets.US_ASCII);
         int totalFound = scanDirRecursive(rootDir, search, searchStr);
@@ -568,7 +555,7 @@ public final class WaylandDriverInstaller {
      * (which is not rebuilt from source) to prevent the auto-enable that
      * causes DXVK vkCreateInstance -7.
      */
-    private static void // DEAD CODE: patchExtensionString(File soFile, String searchStr, String replaceStr) {
+    private static void patchExtensionString(File soFile, String searchStr, String replaceStr) {
         if (soFile == null || !soFile.exists()) {
             Log.w(TAG, "patchExtensionString: file not found: " + soFile);
             return;
@@ -603,7 +590,7 @@ public final class WaylandDriverInstaller {
         }
     }
 
-    private static void // DEAD CODE: patchSurfaceExtension(File soFile) {
+    private static void patchSurfaceExtension(File soFile) {
         if (soFile == null || !soFile.exists()) {
             Log.w(TAG, "patchSurfaceExtension: file not found: " + soFile);
             return;
