@@ -51,6 +51,13 @@ public class WaylandBridgeServer {
     // Returns the ANativeWindow pointer as a decimal string (for envVars).
     public static native String nativeSetAnativeWindow(android.view.Surface surface);
 
+    // In-process Wayland compositor (Bannerlator architecture).
+    // Implemented in waylandie_display_native.c via dlopen("libwaylandie_comp.so").
+    // No System.loadLibrary needed — dlopen + dlsym calls the compositor directly.
+    public static native boolean nativeStartCompositor(android.view.Surface surface,
+        String xdgRuntimeDir, String driverPath, String libraryName, String nativeLibDir);
+    public static native void nativeStopCompositor();
+
     static {
         try {
             System.loadLibrary("waylandie_display_native");

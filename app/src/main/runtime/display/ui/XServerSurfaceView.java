@@ -206,6 +206,34 @@ public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Cal
             surfaceCreatedLock.notifyAll();
         }
 
+        // Start the in-process Wayland compositor (Bannerlator architecture).
+        // dlopen's libwaylandie_comp.so and starts banner_wayland_run() on a thread.
+        // No System.loadLibrary — avoids KSP bug with Java static initializers.
+        if (waylandMode) {
+            try {
+                String rtDir = getContext().getFilesDir().getAbsolutePath() + "/imagefs/usr/tmp/runtime";
+                String nativeLibDir = getContext().getApplicationInfo().nativeLibraryDir;
+                String driverPath = getContext().getFilesDir().getAbsolutePath()
+                    + "/contents/adrenotools/0/";
+                String libraryName = "libvulkan_freedreno.so";
+                java.io.File driverDir = new java.io.File(driverPath);
+                if (!driverDir.exists()) {
+                    android.util.Log.w("XServerSurfaceView",
+                        "Turnip driver dir not found: " + driverPath);
+                    driverPath = null;
+                    libraryName = null;
+                }
+                com.winlator.cmod.runtime.display.environment.components.WaylandBridgeServer
+                    .nativeStartCompositor(holder.getSurface(), rtDir,
+                        driverPath, libraryName, nativeLibDir);
+                android.util.Log.i("XServerSurfaceView",
+                    "In-process Wayland compositor started");
+            } catch (Exception e) {
+                android.util.Log.e("XServerSurfaceView",
+                    "Failed to start compositor", e);
+            }
+        }
+
         startRenderThreadIfNeeded();
     }
 

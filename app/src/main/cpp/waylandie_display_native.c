@@ -5949,3 +5949,141 @@ Java_com_winlator_cmod_runtime_display_ui_XServerSurfaceView_nativeCloseFd(
     (void)env; (void)clazz;
     if (fd >= 0) close((int)fd);
 }
+
+/* ====================================================================
+ * In-process Wayland compositor launcher (Bannerlator architecture)
+ *
+ * Instead of System.loadLibrary("waylandie_comp") (which triggers a KSP
+ * bug in the Java compiler), we dlopen the .so from here and call its
+ * entry points directly via dlsym.
+ *
+ * The compositor .so (libwaylandie_comp.so) exports:
+ *   - banner_wayland_run() — starts the wl_display event loop (blocks)
+ *   - vk_present_set_window(ANativeWindow*) — sets the output surface
+ *   - vk_present_set_driver(path, lib, dir) — sets Turnip driver paths
+ *
+ * We call vk_present_set_window + vk_present_set_driver before starting
+ * the compositor on a dedicated thread.
+ * ==================================================================== */
+
+#include <dlfcn.h>
+
+static void *g_comp_handle = NULL;
+static pthread_t g_comp_thread;
+
+/* Function pointer types from the compositor .so */
+typedef int (*banner_wayland_run_fn)(void);
+typedef void (*vk_present_set_window_fn)(ANativeWindow*);
+typedef void (*vk_present_set_driver_fn)(const char*, const char*, const char*);
+
+static banner_wayland_run_fn g_banner_run = NULL;
+static vk_present_set_window_fn g_set_window = NULL;
+static vk_present_set_driver_fn g_set_driver = NULL;
+
+static void *comp_thread_func(void *arg) {
+    (void)arg;
+    if (g_banner_run) {
+        g_banner_run();  /* blocks in wl_display_run() */
+    }
+    return NULL;
+}
+
+/* JNI: Start the in-process Wayland compositor.
+ * Called from WaylandBridgeServer.nativeStartCompositor() */
+JNIEXPORT jboolean JNICALL
+Java_com_winlator_cmod_runtime_display_environment_components_WaylandBridgeServer_nativeStartCompositor(
+        JNIEnv* env, jclass clazz,
+        jobject surface, jstring xdgRuntimeDir,
+        jstring driverPath, jstring libraryName, jstring nativeLibDir) {
+    (void)clazz;
+
+    if (g_comp_handle) {
+        return JNI_TRUE;  /* already running */
+    }
+
+    /* dlopen the compositor .so */
+    g_comp_handle = dlopen("libwaylandie_comp.so", RTLD_NOW | RTLD_LOCAL);
+    if (!g_comp_handle) {
+        __android_log_print(ANDROID_LOG_ERROR, "WaylandBridgeServer",
+            "Failed to dlopen libwaylandie_comp.so: %s", dlerror());
+        return JNI_FALSE;
+    }
+
+    /* Resolve function pointers */
+    g_banner_run = (banner_wayland_run_fn)dlsym(g_comp_handle, "banner_wayland_run");
+    g_set_window = (vk_present_set_window_fn)dlsym(g_comp_handle, "vk_present_set_window");
+    g_set_driver = (vk_present_set_driver_fn)dlsym(g_comp_handle, "vk_present_set_driver");
+
+    if (!g_banner_run || !g_set_window) {
+        __android_log_print(ANDROID_LOG_ERROR, "WaylandBridgeServer",
+            "Missing compositor symbols: run=%p set_window=%p",
+            (void*)g_banner_run, (void*)g_set_window);
+        dlclose(g_comp_handle);
+        g_comp_handle = NULL;
+        return JNI_FALSE;
+    }
+
+    /* Set XDG_RUNTIME_DIR */
+    if (xdgRuntimeDir) {
+        const char *rt = (*env)->GetStringUTFChars(env, xdgRuntimeDir, NULL);
+        if (rt) {
+            setenv("XDG_RUNTIME_DIR", rt, 1);
+            /* Clean up stale sockets */
+            char sock_path[512];
+            snprintf(sock_path, sizeof(sock_path), "%s/wayland-0", rt);
+            unlink(sock_path);
+            snprintf(sock_path, sizeof(sock_path), "%s/wayland-0.lock", rt);
+            unlink(sock_path);
+            (*env)->ReleaseStringUTFChars(env, xdgRuntimeDir, rt);
+        }
+    }
+
+    /* Set the Turnip driver paths (if provided) */
+    if (g_set_driver && driverPath && libraryName && nativeLibDir) {
+        const char *dp = (*env)->GetStringUTFChars(env, driverPath, NULL);
+        const char *ln = (*env)->GetStringUTFChars(env, libraryName, NULL);
+        const char *nl = (*env)->GetStringUTFChars(env, nativeLibDir, NULL);
+        if (dp && ln && nl) {
+            g_set_driver(dp, ln, nl);
+        }
+        if (dp) (*env)->ReleaseStringUTFChars(env, driverPath, dp);
+        if (ln) (*env)->ReleaseStringUTFChars(env, libraryName, ln);
+        if (nl) (*env)->ReleaseStringUTFChars(env, nativeLibDir, nl);
+    }
+
+    /* Set the output ANativeWindow from the Surface */
+    if (surface) {
+        ANativeWindow *win = ANativeWindow_fromSurface(env, surface);
+        if (win) {
+            g_set_window(win);
+            __android_log_print(ANDROID_LOG_INFO, "WaylandBridgeServer",
+                "Compositor output window set: %p", (void*)win);
+        }
+    }
+
+    /* Start the compositor on a dedicated thread (banner_wayland_run blocks) */
+    if (pthread_create(&g_comp_thread, NULL, comp_thread_func, NULL) == 0) {
+        pthread_detach(g_comp_thread);
+        __android_log_print(ANDROID_LOG_INFO, "WaylandBridgeServer",
+            "In-process Wayland compositor started (Bannerlator architecture)");
+        return JNI_TRUE;
+    }
+
+    __android_log_print(ANDROID_LOG_ERROR, "WaylandBridgeServer",
+        "Failed to create compositor thread");
+    dlclose(g_comp_handle);
+    g_comp_handle = NULL;
+    return JNI_FALSE;
+}
+
+/* JNI: Stop the in-process Wayland compositor */
+JNIEXPORT void JNICALL
+Java_com_winlator_cmod_runtime_display_environment_components_WaylandBridgeServer_nativeStopCompositor(
+        JNIEnv* env, jclass clazz) {
+    (void)env; (void)clazz;
+    if (g_set_window) {
+        g_set_window(NULL);  /* signals the compositor to tear down */
+    }
+    /* Note: we don't dlclose here because the compositor thread may still
+     * be running. The process will clean up on exit. */
+}
