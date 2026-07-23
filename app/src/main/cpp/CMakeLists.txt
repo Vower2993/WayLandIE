@@ -457,11 +457,28 @@ find_library(log-lib-comp log)
 find_library(android-lib-comp android)
 find_library(nativewindow-lib nativewindow)
 
+# Link the STATIC libwayland-server.a (built by tools/build-bionic-bridge.sh
+# and cached into bionic-libs/ by CI) instead of the prebuilt .so.
+#
+# Why: the prebuilt libwayland-server.so has a dynamic NEEDED entry for
+# libffi.so, which is NOT packaged in the APK. At runtime, dlopen() of
+# libwaylandie_comp.so fails with:
+#   dlopen failed: library "libffi.so" not found: needed by libwayland-server.so
+# Linking the static .a (and static libffi.a alongside it) eliminates the
+# runtime dependency entirely — all wayland-server + libffi symbols are
+# resolved at link time and baked into libwaylandie_comp.so.
+#
+# --whole-archive is required because libwayland-server.a registers
+# protocol dispatch tables via constructor functions that the linker would
+# otherwise GC as unreferenced.
 target_link_libraries(waylandie_comp
     ${log-lib-comp}
     ${android-lib-comp}
     ${nativewindow-lib}
-    ${CMAKE_CURRENT_SOURCE_DIR}/waylandcomp/prebuilt/lib/libwayland-server.so
+    -Wl,--whole-archive
+    ${CMAKE_CURRENT_SOURCE_DIR}/bionic-libs/lib/libwayland-server.a
+    ${CMAKE_CURRENT_SOURCE_DIR}/bionic-libs/lib/libffi.a
+    -Wl,--no-whole-archive
     vulkan
     adrenotools
     dl

@@ -213,16 +213,40 @@ public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Cal
             try {
                 String rtDir = getContext().getFilesDir().getAbsolutePath() + "/imagefs/usr/tmp/runtime";
                 String nativeLibDir = getContext().getApplicationInfo().nativeLibraryDir;
-                String driverPath = getContext().getFilesDir().getAbsolutePath()
-                    + "/contents/adrenotools/0/";
+
+                // Resolve the Turnip driver path. The OLD hardcoded path
+                //   files/contents/adrenotools/0/
+                // is wrong on most devices — the adrenotools driver is installed
+                // at files/contents/adrenotools/<index>/ where <index> varies.
+                // Probe the directory and find the first subdirectory containing
+                // libvulkan_freedreno.so. This mirrors the resolution logic in
+                // WaylandBridgeServer.java (dmabuf-present path) so both the
+                // in-process compositor and the legacy bridge find the same driver.
+                String driverPath = null;
                 String libraryName = "libvulkan_freedreno.so";
-                java.io.File driverDir = new java.io.File(driverPath);
-                if (!driverDir.exists()) {
+                java.io.File adrenotoolsDir = new java.io.File(
+                    getContext().getFilesDir().getAbsolutePath(), "contents/adrenotools");
+                if (adrenotoolsDir.isDirectory()) {
+                    java.io.File[] driverDirs = adrenotoolsDir.listFiles();
+                    if (driverDirs != null) {
+                        for (java.io.File d : driverDirs) {
+                            java.io.File freedreno = new java.io.File(d, "libvulkan_freedreno.so");
+                            if (freedreno.exists() && freedreno.length() > 1000) {
+                                driverPath = d.getAbsolutePath();
+                                android.util.Log.i("XServerSurfaceView",
+                                    "Found Turnip driver at " + freedreno.getAbsolutePath());
+                                break;
+                            }
+                        }
+                    }
+                }
+                if (driverPath == null) {
                     android.util.Log.w("XServerSurfaceView",
-                        "Turnip driver dir not found: " + driverPath);
-                    driverPath = null;
+                        "Turnip driver dir not found under " + adrenotoolsDir.getAbsolutePath()
+                        + " — compositor will fall back to system Vulkan");
                     libraryName = null;
                 }
+
                 com.winlator.cmod.runtime.display.environment.components.WaylandBridgeServer
                     .nativeStartCompositor(holder.getSurface(), rtDir,
                         driverPath, libraryName, nativeLibDir);

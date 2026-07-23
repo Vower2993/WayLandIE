@@ -6718,26 +6718,18 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
         FrameLayout rootView = xServerDisplayFrame;
         xServerView = new XServerSurfaceView(this, xServer);
 
-        // Start Wayland bridge server only when display mode is "wayland"
+        // In Wayland mode, the in-process compositor (libwaylandie_comp.so)
+        // handles everything — started by XServerSurfaceView.surfaceCreated()
+        // via nativeStartCompositor(). The OLD multi-process bridge
+        // (WaylandBridgeServer + WaylandBridgeComponent) is NOT started:
+        //   - It would race the in-process compositor for the wayland-0 socket
+        //     in the shared XDG_RUNTIME_DIR (imagefs/usr/tmp/runtime/).
+        //   - One would win the bind(), the other would silently fail.
+        //   - Even if both ran, only one set of wl_surface.commit callbacks
+        //     would fire, splitting the render path.
+        // The in-process compositor replaces the bridge entirely — no IPC,
+        // no SCM_RIGHTS fd passing, no second process.
         if ("wayland".equals(displayMode)) {
-            xServerView.setWaylandMode(true);
-            waylandBridgeServer = new WaylandBridgeServer();
-            // In Wayland mode, dismiss the preloader when the first frame
-            // is presented (not when an X11 window appears, which never happens)
-            waylandBridgeServer.setPreloaderDismissCallback(() -> {
-                if (preloaderDialog != null) {
-                    preloaderDialog.closeOnUiThread();
-                }
-            });
-            // Restart explorer after first Wayland frame — explorer races
-            // with winewayland.drv init and fails to create the desktop.
-            waylandBridgeServer.setOnFirstFrameCallback(
-                this::restartExplorerForWayland);
-            waylandBridgeServer.start(xServerView, this);
-            // Disable GL rendering in Wayland mode — the bridge presents
-            // frames via SurfaceControl (ASurfaceTransaction), and the
-            // GLSurfaceView's VulkanRenderer would otherwise draw black
-            // on top of the bridge's presentLayer, hiding it.
             xServerView.setWaylandMode(true);
             // NOTE: The ANativeWindow pointer wait is done in the background
             // executor (setupXEnvironment), NOT here. This method runs on the

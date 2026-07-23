@@ -121,79 +121,69 @@ public final class WaylandDriverInstaller {
                 // NOTE: winevulkan.dll NOT copied to arm64ec — stock Proton version used
             }
 
-            // Binary-patch winevulkan.dll to replace VK_KHR_wayland_surface → VK_KHR_xlib_surface.
+            // === Binary patching DISABLED ===
             //
-            // Our source-built winevulkan.dll contains "VK_KHR_wayland_surface" in its
-            // extension list (from proton-wine source). The Android Vulkan driver (Turnip)
-            // doesn't support VK_KHR_wayland_surface, so we patch it to VK_KHR_xlib_surface.
+            // All patchSurfaceExtension() and patchExtensionString() calls are
+            // disabled because they actively break the in-process Wayland
+            // compositor render path:
             //
-            // We do NOT patch VK_KHR_win32_surface — it must stay as-is because:
-            // 1. DXVK requests VK_KHR_win32_surface (its natural behavior)
-            // 2. Our winevulkan.so (built with VK_USE_PLATFORM_WIN32_KHR) now has
-            //    vkCreateWin32SurfaceKHR in its dispatch table
-            // 3. wayland_map_instance_extensions in vulkan.c maps win32_surface → xlib_surface
-            //    at the flag level for the HOST driver
+            //   - patchSurfaceExtension() replaces VK_KHR_wayland_surface →
+            //     VK_KHR_xlib_surface in winevulkan.dll / winex11.drv /
+            //     winewayland.so. With the in-process compositor, Wine's
+            //     winewayland.drv creates real wl_surface objects and attaches
+            //     dmabuf buffers via zwp_linux_dmabuf_v1. The patch doesn't
+            //     affect that path directly, but the win32_surface → xlib_surface
+            //     translation it enables is actively counterproductive —
+            //     winewayland.drv creates its own wl_surface, so translating
+            //     to xlib guarantees frames never reach a Wayland compositor.
             //
-            // winevulkan.dll locations — patch ALL copies that wine might load:
+            //   - patchExtensionString() neutralizes VK_EXT_surface_maintenance1
+            //     by renaming it to VK_EXT_surface_maintenance0. That was a
+            //     workaround for a Turnip driver bug that has since been fixed
+            //     in the Turnip builds we ship. The patch is dead code that
+            //     adds confusion.
+            //
+            // The ensureDriverInstalled() logic that copies winewayland.drv +
+            // winewayland.so to the prefix still runs (below).
+            //
+            // winevulkan.dll / winex11.drv locations — declared for diagnostic
+            // logging only. Binary patching is DISABLED (see comment above).
             File winevulkanAarch64 = new File(wineAarch64Windows, "winevulkan.dll");
-            File winevulkanArm64ec = new File(winePath, "lib/wine/arm64ec-windows/winevulkan.dll");
-            File winevulkanPrefix = new File(prefix, "drive_c/windows/system32/winevulkan.dll");
-            File winevulkanSyswow64 = new File(prefix, "drive_c/windows/syswow64/winevulkan.dll");
-
-            // NOTE: syswow64/winevulkan.dll is NOT replaced — stock Proton version used
-
-            patchSurfaceExtension(winevulkanAarch64);
-            patchSurfaceExtension(winevulkanArm64ec);
-            patchSurfaceExtension(winevulkanPrefix);
-            patchSurfaceExtension(winevulkanSyswow64);
-            // Also patch winex11.drv — it also contains VK_KHR_wayland_surface
             File winex11Aarch64 = new File(wineAarch64Windows, "winex11.drv");
-            File winex11Prefix = new File(prefix, "drive_c/windows/system32/winex11.drv");
-            patchSurfaceExtension(winex11Aarch64);
-            patchSurfaceExtension(winex11Prefix);
-            // Also patch winewayland.so (in case it has the string too)
-            patchSurfaceExtension(new File(wineAarch64Unix, "winewayland.so"));
-            patchSurfaceExtension(new File(prefix, "lib/wine/aarch64-unix/winewayland.so"));
+            Log.i(TAG, "Binary patching disabled. winevulkan: " + winevulkanAarch64
+                + ", winex11: " + winex11Aarch64 + " (unpatched)");
 
-            // CRITICAL: Binary-patch to neutralize VK_EXT_surface_maintenance1.
+            // === All patchSurfaceExtension() and patchExtensionString() calls below
+            //     are intentionally commented out. Do NOT re-enable. ===
+            // patchSurfaceExtension(winevulkanAarch64);
+            // patchSurfaceExtension(winevulkanArm64ec);
+            // patchSurfaceExtension(winevulkanPrefix);
+            // patchSurfaceExtension(winevulkanSyswow64);
+            // patchSurfaceExtension(winex11Aarch64);
+            // patchSurfaceExtension(winex11Prefix);
+            // patchSurfaceExtension(new File(wineAarch64Unix, "winewayland.so"));
+            // patchSurfaceExtension(new File(prefix, "lib/wine/aarch64-unix/winewayland.so"));
             //
-            // DIAGNOSTIC: Scan ALL .so files to find where the string lives.
-            Log.i(TAG, "DIAGNOSTIC: scanning all .so files for VK_EXT_surface_maintenance1");
-            scanAllSoForString(winePath, "VK_EXT_surface_maintenance1");
-            scanAllSoForString(winePath, "VK_EXT_swapchain_maintenance1");
-            File prefixLib = new File(prefix, "lib/wine");
-            if (prefixLib.isDirectory()) {
-                scanAllSoForString(prefixLib, "VK_EXT_surface_maintenance1");
-                scanAllSoForString(prefixLib, "VK_EXT_swapchain_maintenance1");
-            }
-
-            // Patch files that DIAGNOSTIC found containing the string.
-            // CI #326 results: win32u.so (1x), winevulkan.dll aarch64 (7x), winevulkan.dll i386 (4x)
-            File win32uSo = new File(wineAarch64Unix, "win32u.so");
-            patchExtensionString(win32uSo,
-                "VK_EXT_surface_maintenance1", "VK_EXT_surface_maintenance0");
-            patchExtensionString(win32uSo,
-                "VK_EXT_swapchain_maintenance1", "VK_EXT_swapchain_maintenance0");
-            // Patch winevulkan.dll — PE side, has 7 occurrences (aarch64) + 4 (i386)
-            File winevulkanDllAarch64 = new File(wineAarch64Windows, "winevulkan.dll");
-            patchExtensionString(winevulkanDllAarch64,
-                "VK_EXT_surface_maintenance1", "VK_EXT_surface_maintenance0");
-            patchExtensionString(winevulkanDllAarch64,
-                "VK_EXT_swapchain_maintenance1", "VK_EXT_swapchain_maintenance0");
-            File winevulkanDllSys32 = new File(prefix, "drive_c/windows/system32/winevulkan.dll");
-            patchExtensionString(winevulkanDllSys32,
-                "VK_EXT_surface_maintenance1", "VK_EXT_surface_maintenance0");
-            patchExtensionString(winevulkanDllSys32,
-                "VK_EXT_swapchain_maintenance1", "VK_EXT_swapchain_maintenance0");
-            File winevulkanDllArm64ec = new File(winePath, "lib/wine/arm64ec-windows/winevulkan.dll");
-            patchExtensionString(winevulkanDllArm64ec,
-                "VK_EXT_surface_maintenance1", "VK_EXT_surface_maintenance0");
-            patchExtensionString(winevulkanDllArm64ec,
-                "VK_EXT_swapchain_maintenance1", "VK_EXT_swapchain_maintenance0");
-
-            // Do NOT patch DXVK DLLs — DXVK should request VK_KHR_win32_surface
-            // (its natural behavior). Wine's wayland_map_instance_extensions
-            // maps win32_surface → xlib_surface internally at the flag level.
+            // File win32uSo = new File(wineAarch64Unix, "win32u.so");
+            // patchExtensionString(win32uSo,
+            //     "VK_EXT_surface_maintenance1", "VK_EXT_surface_maintenance0");
+            // patchExtensionString(win32uSo,
+            //     "VK_EXT_swapchain_maintenance1", "VK_EXT_swapchain_maintenance0");
+            // File winevulkanDllAarch64 = new File(wineAarch64Windows, "winevulkan.dll");
+            // patchExtensionString(winevulkanDllAarch64,
+            //     "VK_EXT_surface_maintenance1", "VK_EXT_surface_maintenance0");
+            // patchExtensionString(winevulkanDllAarch64,
+            //     "VK_EXT_swapchain_maintenance1", "VK_EXT_swapchain_maintenance0");
+            // File winevulkanDllSys32 = new File(prefix, "drive_c/windows/system32/winevulkan.dll");
+            // patchExtensionString(winevulkanDllSys32,
+            //     "VK_EXT_surface_maintenance1", "VK_EXT_surface_maintenance0");
+            // patchExtensionString(winevulkanDllSys32,
+            //     "VK_EXT_swapchain_maintenance1", "VK_EXT_swapchain_maintenance0");
+            // File winevulkanDllArm64ec = new File(winePath, "lib/wine/arm64ec-windows/winevulkan.dll");
+            // patchExtensionString(winevulkanDllArm64ec,
+            //     "VK_EXT_surface_maintenance1", "VK_EXT_surface_maintenance0");
+            // patchExtensionString(winevulkanDllArm64ec,
+            //     "VK_EXT_swapchain_maintenance1", "VK_EXT_swapchain_maintenance0");
         } else {
             Log.w(TAG, "ensureDriverInstalled: winePath is null or not a directory — "
                     + "cannot copy .so companion, driver will fail to load");

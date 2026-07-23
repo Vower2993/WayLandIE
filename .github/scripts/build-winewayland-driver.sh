@@ -780,6 +780,7 @@ export ac_cv_lib_EGL_eglGetProcAddress=yes
   --enable-archs=arm64ec,aarch64 \
   --with-mingw=$LLVM_MINGW_DIR/bin/clang \
   --with-pthread \
+  --with-wayland \
   --disable-tests \
   2>&1 | tail -40
 
