@@ -34,6 +34,8 @@ static VkSemaphore g_acq, g_rnd;
 static VkFence g_fence;
 static int g_first_frame_done; /* one-shot: fire banner_on_first_frame() on first present */
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_idle = PTHREAD_COND_INITIALIZER;
+static int g_inflight; /* commits currently using the swapchain (teardown guard) */
 static int g_desired_w, g_desired_h; /* 0 = use the window's own size */
 
 /* Implemented in waylandcomp_jni.c — notifies Java (dismiss launch overlay). */
@@ -62,6 +64,12 @@ void vk_present_set_driver(const char *driver_path, const char *library_name,
 
 void vk_present_set_window(ANativeWindow *window) {
     pthread_mutex_lock(&g_lock);
+    /* A teardown must never destroy the swapchain while a commit is using it:
+     * wait until all in-flight commits finish before touching g_swapchain. */
+    if (!window) {
+        while (g_inflight > 0)
+            pthread_cond_wait(&g_idle, &g_lock);
+    }
     if (!window && g_inited == 1) {
         g_vk.DeviceWaitIdle(g_dev);
         if (g_swapchain) g_vk.DestroySwapchainKHR(g_dev, g_swapchain, NULL);
@@ -72,6 +80,21 @@ void vk_present_set_window(ANativeWindow *window) {
     }
     if (window && g_inited == -1) g_inited = 0; /* allow a retry with a fresh window */
     g_window = window;
+    pthread_mutex_unlock(&g_lock);
+}
+
+/* Called from the compositor thread around the swapchain-using section of a
+ * commit so set_window(NULL) can wait for it before tearing down. */
+static void commit_begin(void) {
+    pthread_mutex_lock(&g_lock);
+    g_inflight++;
+    pthread_mutex_unlock(&g_lock);
+}
+
+static void commit_end(void) {
+    pthread_mutex_lock(&g_lock);
+    if (--g_inflight == 0)
+        pthread_cond_broadcast(&g_idle);
     pthread_mutex_unlock(&g_lock);
 }
 
@@ -342,6 +365,7 @@ int vk_present_commit_dmabuf(int fd, uint32_t drm_format, uint64_t modifier, int
     }
 
     uint32_t img = 0;
+    commit_begin();
     VkResult ar;
     {
         pthread_mutex_lock(&g_lock);
@@ -354,11 +378,13 @@ int vk_present_commit_dmabuf(int fd, uint32_t drm_format, uint64_t modifier, int
     ar = g_vk.AcquireNextImageKHR(g_dev, g_swapchain, 1000000000ULL, g_acq, VK_NULL_HANDLE, &img);
     if (ar == VK_ERROR_OUT_OF_DATE_KHR || ar == VK_SUBOPTIMAL_KHR) {
         if (recreate_swapchain() != 0) {
+            commit_end();
             g_vk.FreeMemory(g_dev, srcMem, NULL); g_vk.DestroyImage(g_dev, src, NULL); return -1;
         }
         ar = g_vk.AcquireNextImageKHR(g_dev, g_swapchain, 1000000000ULL, g_acq, VK_NULL_HANDLE, &img);
     }
     if (ar != VK_SUCCESS) {
+        commit_end();
         g_vk.FreeMemory(g_dev, srcMem, NULL); g_vk.DestroyImage(g_dev, src, NULL); return -1;
     }
 
@@ -423,6 +449,7 @@ int vk_present_commit_dmabuf(int fd, uint32_t drm_format, uint64_t modifier, int
         g_first_frame_done = 1;
         banner_on_first_frame();
     }
+    commit_end();
     return 0;
 }
 
@@ -477,6 +504,7 @@ int vk_present_commit_shm(const void *data, int w, int h, int stride, uint32_t w
     g_vk.UnmapMemory(g_dev, srcMem); /* coherent: visible to the queue at submit */
 
     uint32_t img = 0;
+    commit_begin();
     VkResult ar;
     {
         pthread_mutex_lock(&g_lock);
@@ -489,11 +517,13 @@ int vk_present_commit_shm(const void *data, int w, int h, int stride, uint32_t w
     ar = g_vk.AcquireNextImageKHR(g_dev, g_swapchain, 1000000000ULL, g_acq, VK_NULL_HANDLE, &img);
     if (ar == VK_ERROR_OUT_OF_DATE_KHR || ar == VK_SUBOPTIMAL_KHR) {
         if (recreate_swapchain() != 0) {
+            commit_end();
             g_vk.FreeMemory(g_dev, srcMem, NULL); g_vk.DestroyImage(g_dev, src, NULL); return -1;
         }
         ar = g_vk.AcquireNextImageKHR(g_dev, g_swapchain, 1000000000ULL, g_acq, VK_NULL_HANDLE, &img);
     }
     if (ar != VK_SUCCESS) {
+        commit_end();
         g_vk.FreeMemory(g_dev, srcMem, NULL); g_vk.DestroyImage(g_dev, src, NULL); return -1;
     }
 
@@ -554,5 +584,6 @@ int vk_present_commit_shm(const void *data, int w, int h, int stride, uint32_t w
     g_vk.DestroyImage(g_dev, src, NULL);
 
     if (!g_first_frame_done) { g_first_frame_done = 1; banner_on_first_frame(); }
+    commit_end();
     return 0;
 }
