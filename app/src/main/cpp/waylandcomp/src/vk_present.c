@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <pthread.h>
 #include <android/log.h>
 
 #define TAG "BannerWayland"
@@ -32,11 +33,24 @@ static VkCommandBuffer g_cmd;
 static VkSemaphore g_acq, g_rnd;
 static VkFence g_fence;
 static int g_first_frame_done; /* one-shot: fire banner_on_first_frame() on first present */
+static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
+static int g_desired_w, g_desired_h; /* 0 = use the window's own size */
 
 /* Implemented in waylandcomp_jni.c — notifies Java (dismiss launch overlay). */
 extern void banner_on_first_frame(void);
 
-static VkFormat drm_to_vk(uint32_t drm) { (void)drm; return VK_FORMAT_B8G8R8A8_UNORM; }
+static VkFormat drm_to_vk(uint32_t drm) {
+    /* DRM fourccs are little-endian byte orders. AR24/XR24 (ARGB/XRGB8888)
+     * are stored as bytes B,G,R,A/X -> B8G8R8A8_UNORM. AB24/XB24
+     * (ABGR/XBGR8888) are stored as bytes R,G,B,A/X -> R8G8B8A8_UNORM. */
+    switch (drm) {
+    case 0x34324241u: /* AB24 */
+    case 0x34324258u: /* XB24 */
+        return VK_FORMAT_R8G8B8A8_UNORM;
+    default: /* AR24 / XR24 */
+        return VK_FORMAT_B8G8R8A8_UNORM;
+    }
+}
 
 void vk_present_set_driver(const char *driver_path, const char *library_name,
                            const char *native_lib_dir) {
@@ -47,7 +61,7 @@ void vk_present_set_driver(const char *driver_path, const char *library_name,
 }
 
 void vk_present_set_window(ANativeWindow *window) {
-    g_window = window;
+    pthread_mutex_lock(&g_lock);
     if (!window && g_inited == 1) {
         g_vk.DeviceWaitIdle(g_dev);
         if (g_swapchain) g_vk.DestroySwapchainKHR(g_dev, g_swapchain, NULL);
@@ -56,6 +70,17 @@ void vk_present_set_window(ANativeWindow *window) {
         g_surface = VK_NULL_HANDLE;
         g_inited = 0; /* re-init swapchain on next window+commit */
     }
+    if (window && g_inited == -1) g_inited = 0; /* allow a retry with a fresh window */
+    g_window = window;
+    pthread_mutex_unlock(&g_lock);
+}
+
+/* Android surface size changed -> the next commit recreates the swapchain. */
+void vk_present_set_size(int w, int h) {
+    pthread_mutex_lock(&g_lock);
+    g_desired_w = w > 0 ? w : 0;
+    g_desired_h = h > 0 ? h : 0;
+    pthread_mutex_unlock(&g_lock);
 }
 
 static int has_ext(VkExtensionProperties *e, uint32_t n, const char *name) {
@@ -64,9 +89,92 @@ static int has_ext(VkExtensionProperties *e, uint32_t n, const char *name) {
     return 0;
 }
 
+/* Create (or recreate) the swapchain on the current g_surface using the latest
+ * window size / format. Returns 0 on success; leaves g_swapchain valid. */
+static int create_swapchain(void) {
+    VkSurfaceCapabilitiesKHR caps;
+    g_vk.GetPhysicalDeviceSurfaceCapabilitiesKHR(g_pd, g_surface, &caps);
+
+    uint32_t nfmt = 0;
+    g_vk.GetPhysicalDeviceSurfaceFormatsKHR(g_pd, g_surface, &nfmt, NULL);
+    VkSurfaceFormatKHR fmts[32]; if (nfmt > 32) nfmt = 32;
+    g_vk.GetPhysicalDeviceSurfaceFormatsKHR(g_pd, g_surface, &nfmt, fmts);
+    if (!nfmt) { LOGE("present: no surface formats"); return -1; }
+
+    VkSurfaceFormatKHR chosen = fmts[0];
+    if (chosen.format == VK_FORMAT_UNDEFINED) {
+        for (uint32_t i = 0; i < nfmt; i++)
+            if (fmts[i].format == VK_FORMAT_B8G8R8A8_UNORM ||
+                fmts[i].format == VK_FORMAT_R8G8B8A8_UNORM) { chosen = fmts[i]; break; }
+    }
+    if (chosen.format == VK_FORMAT_UNDEFINED) {
+        LOGE("present: no usable surface format (all UNDEFINED)");
+        return -1;
+    }
+
+    pthread_mutex_lock(&g_lock);
+    int dw = g_desired_w, dh = g_desired_h;
+    pthread_mutex_unlock(&g_lock);
+    g_extent = caps.currentExtent;
+    if (g_extent.width == 0xFFFFFFFFu || g_extent.width == 0 ||
+        g_extent.height == 0xFFFFFFFFu || g_extent.height == 0) {
+        g_extent.width = dw > 0 ? (uint32_t)dw : (uint32_t)ANativeWindow_getWidth(g_window);
+        g_extent.height = dh > 0 ? (uint32_t)dh : (uint32_t)ANativeWindow_getHeight(g_window);
+    }
+    if (g_extent.width == 0 || g_extent.height == 0) {
+        LOGE("present: zero surface extent; cannot create swapchain");
+        return -1;
+    }
+
+    uint32_t want = caps.minImageCount + 1;
+    if (caps.maxImageCount && want > caps.maxImageCount) want = caps.maxImageCount;
+
+    /* Use IDENTITY preTransform when the surface supports it (see comment in
+     * the original inline block: our blit does not rotate). */
+    VkSurfaceTransformFlagBitsKHR pretrans =
+        (caps.supportedTransforms & VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR)
+            ? VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR : caps.currentTransform;
+
+    VkSwapchainCreateInfoKHR sci = {
+        .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR, .surface = g_surface,
+        .minImageCount = want, .imageFormat = chosen.format, .imageColorSpace = chosen.colorSpace,
+        .imageExtent = g_extent, .imageArrayLayers = 1,
+        .imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+        .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE, .preTransform = pretrans,
+        .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
+        .presentMode = VK_PRESENT_MODE_FIFO_KHR, .clipped = VK_TRUE};
+    if (g_vk.CreateSwapchainKHR(g_dev, &sci, NULL, &g_swapchain) != VK_SUCCESS) {
+        LOGE("present: vkCreateSwapchainKHR failed");
+        return -1;
+    }
+    g_vk.GetSwapchainImagesKHR(g_dev, g_swapchain, &g_nimg, NULL);
+    free(g_images);
+    g_images = calloc(g_nimg, sizeof(VkImage));
+    g_vk.GetSwapchainImagesKHR(g_dev, g_swapchain, &g_nimg, g_images);
+    LOGI("present: swapchain up %ux%u, %u images, format=%d",
+         g_extent.width, g_extent.height, g_nimg, (int)chosen.format);
+    return 0;
+}
+
+static int recreate_swapchain(void) {
+    if (!g_dev || !g_surface) return -1;
+    g_vk.DeviceWaitIdle(g_dev);
+    if (g_swapchain) {
+        g_vk.DestroySwapchainKHR(g_dev, g_swapchain, NULL);
+        g_swapchain = VK_NULL_HANDLE;
+    }
+    free(g_images); g_images = NULL; g_nimg = 0;
+    return create_swapchain();
+}
+
 static int ensure_init(void) {
-    if (g_inited != 0) return g_inited == 1 ? 0 : -1;
-    if (!g_window) return -1;
+    pthread_mutex_lock(&g_lock);
+    int st = g_inited;
+    ANativeWindow *win = g_window;
+    int dw = g_desired_w, dh = g_desired_h;
+    pthread_mutex_unlock(&g_lock);
+    if (st != 0) return st == 1 ? 0 : -1;
+    if (!win) return -1;
 
     /* Load Turnip (adrenotools) and its entry points — NOT the system driver. */
     if (vk_loader_open(g_driver_path, g_library_name, g_native_lib_dir) != 0) {
@@ -87,8 +195,16 @@ static int ensure_init(void) {
     }
     vk_loader_load_instance(g_inst);
 
+    /* Pin the surface's buffer geometry to RGBA8888 so the swapchain format we
+     * pick matches what the window can actually present. SurfaceView surfaces
+     * can default to RGB565, which makes BGRA8 blits fail or render black. */
+    ANativeWindow_setBuffersGeometry(win,
+        dw > 0 ? dw : ANativeWindow_getWidth(win),
+        dh > 0 ? dh : ANativeWindow_getHeight(win),
+        WINDOW_FORMAT_RGBA_8888);
+
     VkAndroidSurfaceCreateInfoKHR aci = {
-        .sType = VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR, .window = g_window};
+        .sType = VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR, .window = win};
     if (g_vk.CreateAndroidSurfaceKHR(g_inst, &aci, NULL, &g_surface) != VK_SUCCESS) {
         LOGE("present: create android surface failed"); g_inited = -1; return -1;
     }
@@ -142,46 +258,7 @@ static int ensure_init(void) {
     vk_loader_load_device(g_dev);
     g_vk.GetDeviceQueue(g_dev, g_qfam, 0, &g_queue);
 
-    VkSurfaceCapabilitiesKHR caps;
-    g_vk.GetPhysicalDeviceSurfaceCapabilitiesKHR(g_pd, g_surface, &caps);
-    uint32_t nfmt = 0;
-    g_vk.GetPhysicalDeviceSurfaceFormatsKHR(g_pd, g_surface, &nfmt, NULL);
-    VkSurfaceFormatKHR fmts[32]; if (nfmt > 32) nfmt = 32;
-    g_vk.GetPhysicalDeviceSurfaceFormatsKHR(g_pd, g_surface, &nfmt, fmts);
-    VkSurfaceFormatKHR chosen = fmts[0];
-
-    g_extent = caps.currentExtent;
-    if (g_extent.width == 0xFFFFFFFF) {
-        g_extent.width = ANativeWindow_getWidth(g_window);
-        g_extent.height = ANativeWindow_getHeight(g_window);
-    }
-    uint32_t want = caps.minImageCount + 1;
-    if (caps.maxImageCount && want > caps.maxImageCount) want = caps.maxImageCount;
-
-    /* Use IDENTITY preTransform when the surface supports it. Setting preTransform =
-     * currentTransform tells the presentation engine our content is ALREADY pre-rotated by
-     * that amount — but our blit doesn't rotate, so on a device whose surface reports a 90°
-     * currentTransform the display then rotates our upright frame 90° (game shows sideways).
-     * IDENTITY = "don't rotate what I present", which is what we want. */
-    VkSurfaceTransformFlagBitsKHR pretrans =
-        (caps.supportedTransforms & VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR)
-            ? VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR : caps.currentTransform;
-
-    VkSwapchainCreateInfoKHR sci = {
-        .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR, .surface = g_surface,
-        .minImageCount = want, .imageFormat = chosen.format, .imageColorSpace = chosen.colorSpace,
-        .imageExtent = g_extent, .imageArrayLayers = 1,
-        .imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
-        .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE, .preTransform = pretrans,
-        .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
-        .presentMode = VK_PRESENT_MODE_FIFO_KHR, .clipped = VK_TRUE};
-    if (g_vk.CreateSwapchainKHR(g_dev, &sci, NULL, &g_swapchain) != VK_SUCCESS) {
-        LOGE("present: vkCreateSwapchainKHR failed"); g_inited = -1; return -1;
-    }
-    g_vk.GetSwapchainImagesKHR(g_dev, g_swapchain, &g_nimg, NULL);
-    free(g_images);
-    g_images = calloc(g_nimg, sizeof(VkImage));
-    g_vk.GetSwapchainImagesKHR(g_dev, g_swapchain, &g_nimg, g_images);
+    if (create_swapchain() != 0) { g_inited = -1; return -1; }
 
     VkCommandPoolCreateInfo pci = {.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
                                    .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
@@ -252,7 +329,11 @@ static int import_image(int fd, uint32_t drm_format, uint64_t modifier, int w, i
 
 int vk_present_commit_dmabuf(int fd, uint32_t drm_format, uint64_t modifier, int w, int h,
                              uint32_t stride, uint32_t offset) {
-    if (!g_window || modifier == MOD_INVALID) return -1;
+    if (modifier == MOD_INVALID) modifier = 0; /* implicit -> linear */
+    pthread_mutex_lock(&g_lock);
+    int have_win = g_window != NULL;
+    pthread_mutex_unlock(&g_lock);
+    if (!have_win) return -1;
     if (ensure_init() != 0) return -1;
 
     VkImage src; VkDeviceMemory srcMem;
@@ -261,8 +342,23 @@ int vk_present_commit_dmabuf(int fd, uint32_t drm_format, uint64_t modifier, int
     }
 
     uint32_t img = 0;
-    VkResult ar = g_vk.AcquireNextImageKHR(g_dev, g_swapchain, UINT64_MAX, g_acq, VK_NULL_HANDLE, &img);
-    if (ar != VK_SUCCESS && ar != VK_SUBOPTIMAL_KHR) {
+    VkResult ar;
+    {
+        pthread_mutex_lock(&g_lock);
+        int want_w = g_desired_w, want_h = g_desired_h;
+        pthread_mutex_unlock(&g_lock);
+        if (want_w > 0 && want_h > 0 &&
+            (g_extent.width != (uint32_t)want_w || g_extent.height != (uint32_t)want_h))
+            recreate_swapchain();
+    }
+    ar = g_vk.AcquireNextImageKHR(g_dev, g_swapchain, 1000000000ULL, g_acq, VK_NULL_HANDLE, &img);
+    if (ar == VK_ERROR_OUT_OF_DATE_KHR || ar == VK_SUBOPTIMAL_KHR) {
+        if (recreate_swapchain() != 0) {
+            g_vk.FreeMemory(g_dev, srcMem, NULL); g_vk.DestroyImage(g_dev, src, NULL); return -1;
+        }
+        ar = g_vk.AcquireNextImageKHR(g_dev, g_swapchain, 1000000000ULL, g_acq, VK_NULL_HANDLE, &img);
+    }
+    if (ar != VK_SUCCESS) {
         g_vk.FreeMemory(g_dev, srcMem, NULL); g_vk.DestroyImage(g_dev, src, NULL); return -1;
     }
 
@@ -306,12 +402,15 @@ int vk_present_commit_dmabuf(int fd, uint32_t drm_format, uint64_t modifier, int
                        .pWaitSemaphores = &g_acq, .pWaitDstStageMask = &wait, .commandBufferCount = 1,
                        .pCommandBuffers = &g_cmd, .signalSemaphoreCount = 1, .pSignalSemaphores = &g_rnd};
     g_vk.ResetFences(g_dev, 1, &g_fence);
-    g_vk.QueueSubmit(g_queue, 1, &si, g_fence);
+    VkResult sr = g_vk.QueueSubmit(g_queue, 1, &si, g_fence);
+    if (sr != VK_SUCCESS) LOGE("present: QueueSubmit failed (%d)", sr);
 
     VkPresentInfoKHR pi = {.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .waitSemaphoreCount = 1,
                            .pWaitSemaphores = &g_rnd, .swapchainCount = 1,
                            .pSwapchains = &g_swapchain, .pImageIndices = &img};
-    g_vk.QueuePresentKHR(g_queue, &pi);
+    sr = g_vk.QueuePresentKHR(g_queue, &pi);
+    if (sr != VK_SUCCESS && sr != VK_SUBOPTIMAL_KHR)
+        LOGE("present: QueuePresentKHR failed (%d)", sr);
     g_vk.WaitForFences(g_dev, 1, &g_fence, VK_TRUE, UINT64_MAX);
     g_vk.QueueWaitIdle(g_queue);
 
@@ -333,7 +432,11 @@ int vk_present_commit_dmabuf(int fd, uint32_t drm_format, uint64_t modifier, int
  * exactly like the dmabuf path. Expects BGRA/XRGB8888 bytes (winewayland's shm format). */
 int vk_present_commit_shm(const void *data, int w, int h, int stride, uint32_t wl_format) {
     (void)wl_format; /* ARGB8888/XRGB8888 -> little-endian BGRA bytes == B8G8R8A8_UNORM */
-    if (!g_window || !data || w <= 0 || h <= 0) return -1;
+    if (!data || w <= 0 || h <= 0) return -1;
+    pthread_mutex_lock(&g_lock);
+    int have_win = g_window != NULL;
+    pthread_mutex_unlock(&g_lock);
+    if (!have_win) return -1;
     if (ensure_init() != 0) return -1;
 
     VkImageCreateInfo ici = {
@@ -374,8 +477,23 @@ int vk_present_commit_shm(const void *data, int w, int h, int stride, uint32_t w
     g_vk.UnmapMemory(g_dev, srcMem); /* coherent: visible to the queue at submit */
 
     uint32_t img = 0;
-    VkResult ar = g_vk.AcquireNextImageKHR(g_dev, g_swapchain, UINT64_MAX, g_acq, VK_NULL_HANDLE, &img);
-    if (ar != VK_SUCCESS && ar != VK_SUBOPTIMAL_KHR) {
+    VkResult ar;
+    {
+        pthread_mutex_lock(&g_lock);
+        int want_w = g_desired_w, want_h = g_desired_h;
+        pthread_mutex_unlock(&g_lock);
+        if (want_w > 0 && want_h > 0 &&
+            (g_extent.width != (uint32_t)want_w || g_extent.height != (uint32_t)want_h))
+            recreate_swapchain();
+    }
+    ar = g_vk.AcquireNextImageKHR(g_dev, g_swapchain, 1000000000ULL, g_acq, VK_NULL_HANDLE, &img);
+    if (ar == VK_ERROR_OUT_OF_DATE_KHR || ar == VK_SUBOPTIMAL_KHR) {
+        if (recreate_swapchain() != 0) {
+            g_vk.FreeMemory(g_dev, srcMem, NULL); g_vk.DestroyImage(g_dev, src, NULL); return -1;
+        }
+        ar = g_vk.AcquireNextImageKHR(g_dev, g_swapchain, 1000000000ULL, g_acq, VK_NULL_HANDLE, &img);
+    }
+    if (ar != VK_SUCCESS) {
         g_vk.FreeMemory(g_dev, srcMem, NULL); g_vk.DestroyImage(g_dev, src, NULL); return -1;
     }
 
@@ -420,12 +538,15 @@ int vk_present_commit_shm(const void *data, int w, int h, int stride, uint32_t w
                        .pWaitSemaphores = &g_acq, .pWaitDstStageMask = &wait, .commandBufferCount = 1,
                        .pCommandBuffers = &g_cmd, .signalSemaphoreCount = 1, .pSignalSemaphores = &g_rnd};
     g_vk.ResetFences(g_dev, 1, &g_fence);
-    g_vk.QueueSubmit(g_queue, 1, &si, g_fence);
+    VkResult sr = g_vk.QueueSubmit(g_queue, 1, &si, g_fence);
+    if (sr != VK_SUCCESS) LOGE("present: QueueSubmit failed (%d)", sr);
 
     VkPresentInfoKHR pi = {.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .waitSemaphoreCount = 1,
                            .pWaitSemaphores = &g_rnd, .swapchainCount = 1,
                            .pSwapchains = &g_swapchain, .pImageIndices = &img};
-    g_vk.QueuePresentKHR(g_queue, &pi);
+    sr = g_vk.QueuePresentKHR(g_queue, &pi);
+    if (sr != VK_SUCCESS && sr != VK_SUBOPTIMAL_KHR)
+        LOGE("present: QueuePresentKHR failed (%d)", sr);
     g_vk.WaitForFences(g_dev, 1, &g_fence, VK_TRUE, UINT64_MAX);
     g_vk.QueueWaitIdle(g_queue);
 

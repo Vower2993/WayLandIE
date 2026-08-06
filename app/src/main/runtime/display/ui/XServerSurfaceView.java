@@ -274,6 +274,17 @@ public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Cal
         }
 
         if (!waylandMode) renderer.notifySurfaceChanged(w, h);
+        else {
+            // Forward the new size to the in-process compositor so it can
+            // recreate the Vulkan swapchain at the current surface extent.
+            try {
+                com.winlator.cmod.runtime.display.environment.components.WaylandBridgeServer
+                    .nativeCompositorSurfaceChanged(w, h);
+            } catch (Throwable t) {
+                android.util.Log.w("XServerSurfaceView",
+                    "nativeCompositorSurfaceChanged failed", t);
+            }
+        }
         synchronized (renderLock) {
             width = w;
             height = h;

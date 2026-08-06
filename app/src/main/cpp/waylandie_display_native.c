@@ -5969,6 +5969,8 @@ Java_com_winlator_cmod_runtime_display_ui_XServerSurfaceView_nativeCloseFd(
 
 #include <dlfcn.h>
 #include <android/log.h>
+#include <sys/stat.h>
+#include <errno.h>
 
 static void *g_comp_handle = NULL;
 static pthread_t g_comp_thread;
@@ -5981,6 +5983,22 @@ typedef void (*vk_present_set_driver_fn)(const char*, const char*, const char*);
 static banner_wayland_run_fn g_banner_run = NULL;
 static vk_present_set_window_fn g_set_window = NULL;
 static vk_present_set_driver_fn g_set_driver = NULL;
+
+/* Create $XDG_RUNTIME_DIR if missing (0700, as Wayland requires) so
+ * wl_display_add_socket() cannot fail on a fresh container. */
+static void ensure_runtime_dir(const char *path) {
+    if (!path || !*path) return;
+    char tmp[512];
+    snprintf(tmp, sizeof(tmp), "%s", path);
+    for (char *p = tmp + 1; *p; p++) {
+        if (*p == '/') {
+            *p = '\0';
+            if (mkdir(tmp, 0700) != 0 && errno != EEXIST) return;
+            *p = '/';
+        }
+    }
+    mkdir(tmp, 0700);
+}
 
 static void *comp_thread_func(void *arg) {
     (void)arg;
@@ -6029,6 +6047,7 @@ Java_com_winlator_cmod_runtime_display_environment_components_WaylandBridgeServe
     if (xdgRuntimeDir) {
         const char *rt = (*env)->GetStringUTFChars(env, xdgRuntimeDir, NULL);
         if (rt) {
+            ensure_runtime_dir(rt);
             setenv("XDG_RUNTIME_DIR", rt, 1);
             /* Clean up stale sockets */
             char sock_path[512];
@@ -6088,4 +6107,18 @@ Java_com_winlator_cmod_runtime_display_environment_components_WaylandBridgeServe
     }
     /* Note: we don't dlclose here because the compositor thread may still
      * be running. The process will clean up on exit. */
+}
+
+/* JNI: Android surface size changed (rotation/resize). Forward to the present
+ * backend so it can recreate the swapchain at the new extent. */
+JNIEXPORT void JNICALL
+Java_com_winlator_cmod_runtime_display_environment_components_WaylandBridgeServer_nativeCompositorSurfaceChanged(
+        JNIEnv* env, jclass clazz, jint width, jint height) {
+    (void)env; (void)clazz;
+    if (!g_comp_handle) return;
+    typedef void (*vk_present_set_size_fn)(int, int);
+    static vk_present_set_size_fn set_size = NULL;
+    if (!set_size)
+        set_size = (vk_present_set_size_fn)dlsym(g_comp_handle, "vk_present_set_size");
+    if (set_size) set_size((int)width, (int)height);
 }

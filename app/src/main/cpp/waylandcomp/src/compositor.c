@@ -474,10 +474,13 @@ static void present_committed_buffer(struct wl_resource *buffer) {
     if (!buffer) return;
     if (wl_resource_instance_of(buffer, &wl_buffer_interface, &dbuf_buffer_impl)) {
         struct dmabuf_buffer *b = wl_resource_get_user_data(buffer);
-        if (b && b->n_planes >= 1) {
+        if (b && b->n_planes == 1) {
             if (b->width > 0 && b->height > 0) { g_vis_w = b->width; g_vis_h = b->height; }
             vk_present_commit_dmabuf(b->fd[0], b->format, b->modifier, b->width,
                                      b->height, b->stride[0], b->offset[0]);
+        } else if (b) {
+            WLOGE("dmabuf with %d planes not supported by present backend "
+                  "(only single-plane RGBA buffers) - frame skipped", b->n_planes);
         }
         return;
     }
@@ -527,7 +530,10 @@ static struct wl_resource *params_do_create(struct wl_client *c,
     struct dmabuf_buffer *b = calloc(1, sizeof(*b));
     b->n_planes = p->n_planes;
     b->width = w; b->height = h; b->format = format;
-    b->modifier = p->modifier[0];
+    /* A client that sends MOD_INVALID in the params means "use the implicit
+     * (linear) layout" — normalize it so the import path treats it as LINEAR
+     * instead of dropping the frame. */
+    b->modifier = (p->modifier[0] == 0x00ffffffffffffffULL) ? 0 : p->modifier[0];
     fprintf(stderr,
             "[srv] *** DMABUF RECEIVED via zwp_linux_dmabuf: %dx%d "
             "format=0x%08x(%c%c%c%c) modifier=0x%016llx planes=%d\n",

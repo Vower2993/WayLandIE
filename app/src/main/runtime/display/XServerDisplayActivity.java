@@ -154,7 +154,6 @@ import com.winlator.cmod.runtime.display.environment.components.PulseAudioCompon
 import com.winlator.cmod.runtime.display.environment.components.SteamClientComponent;
 import com.winlator.cmod.runtime.display.environment.components.SysVSharedMemoryComponent;
 import com.winlator.cmod.runtime.display.environment.components.XServerComponent;
-import com.winlator.cmod.runtime.display.environment.components.WaylandBridgeComponent;
 import com.winlator.cmod.runtime.display.environment.components.WaylandBridgeServer;
 import com.winlator.cmod.runtime.display.xserver.Atom;
 import com.winlator.cmod.runtime.display.xserver.Pointer;
@@ -6284,7 +6283,11 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
             } catch (Exception e) {
                 Log.e("XServerDisplayActivity", "Failed to ensure Wayland driver installed", e);
             }
-            environment.addComponent(new WaylandBridgeComponent());
+            // The in-process compositor (libwaylandie_comp.so, started by
+            // XServerSurfaceView.surfaceCreated) is the ONLY Wayland server.
+            // Do NOT add WaylandBridgeComponent here: its legacy bridge process
+            // unlinks wayland-0 and races the in-process compositor for the
+            // socket, which causes a black screen.
         }
         environment.addComponent(new NetworkInfoUpdateComponent());
 

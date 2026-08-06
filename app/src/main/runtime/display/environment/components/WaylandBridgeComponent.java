@@ -34,6 +34,12 @@ public class WaylandBridgeComponent extends EnvironmentComponent {
 
     @Override
     public void start() {
+        Log.w(TAG, "WaylandBridgeComponent.start() disabled: the in-process "
+                + "compositor (libwaylandie_comp.so) is the only Wayland server. "
+                + "Starting the legacy bridge would race it for wayland-0 and "
+                + "produce a black screen.");
+        return;
+        /*
         XEnvironment env = environment;
         if (env == null) {
             Log.e(TAG, "Environment not set");
@@ -187,6 +193,7 @@ public class WaylandBridgeComponent extends EnvironmentComponent {
             Log.e(TAG, "Failed to start bridge", e);
             writeDiagnostic(context, "BRIDGE_EXCEPTION: " + e.getClass().getName() + ": " + e.getMessage());
         }
+        */
     }
 
     private void writeDiagnostic(Context ctx, String message) {

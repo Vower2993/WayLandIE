@@ -57,6 +57,8 @@ public class WaylandBridgeServer {
     public static native boolean nativeStartCompositor(android.view.Surface surface,
         String xdgRuntimeDir, String driverPath, String libraryName, String nativeLibDir);
     public static native void nativeStopCompositor();
+    // Android surface size changed (rotation/resize) -> swapchain recreation.
+    public static native void nativeCompositorSurfaceChanged(int width, int height);
 
     static {
         try {

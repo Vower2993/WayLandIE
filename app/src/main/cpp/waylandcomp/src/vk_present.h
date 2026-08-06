@@ -21,6 +21,9 @@ void vk_present_set_driver(const char *driver_path, const char *library_name,
 // NULL tears the swapchain down (surface destroyed).
 void vk_present_set_window(ANativeWindow *window);
 
+// Android surface size changed -> the next commit recreates the swapchain.
+void vk_present_set_size(int w, int h);
+
 // Composite one committed dmabuf frame to the screen. No-op (returns <0) if no
 // window is set or init fails. Non-fatal — never aborts the compositor.
 int vk_present_commit_dmabuf(int fd, uint32_t drm_format, uint64_t modifier,

@@ -18,7 +18,7 @@ int vk_loader_open(const char *driver_path, const char *library_name,
                    const char *native_lib_dir) {
     if (driver_path && library_name && native_lib_dir) {
         char *tmpdir = NULL;
-        if (asprintf(&tmpdir, "%stemp", driver_path) < 0) tmpdir = NULL;
+        if (asprintf(&tmpdir, "%s/temp", driver_path) < 0) tmpdir = NULL;
         if (tmpdir) mkdir(tmpdir, S_IRWXU | S_IRWXG);
         g_handle = adrenotools_open_libvulkan(
             RTLD_LOCAL | RTLD_NOW, ADRENOTOOLS_DRIVER_CUSTOM, tmpdir,
