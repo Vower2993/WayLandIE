@@ -216,6 +216,49 @@ with open('dlls/winewayland.drv/window_surface.c', 'w') as f:
     f.write(c)
 print("  [window_surface.c] NtGdiGetRegionData neutralized")
 PYNTGDI
+
+    # Instrument wayland.c: log the exact reason wl_display_connect fails
+    # (errno + env). The stock code returns FALSE silently on connect failure,
+    # which surfaces only as "Initialization of winewayland.drv failed" +
+    # nodrv_CreateWindow with zero waylanddrv traces. Printing to stderr makes
+    # the failure self-diagnosing in the captured wine log.
+    echo "  Patching wayland.c: wl_display_connect diagnostics"
+    python3 << 'PYCONNECT'
+import re
+with open('dlls/winewayland.drv/wayland.c', 'r') as f:
+    c = f.read()
+
+if '#include <errno.h>' not in c:
+    c = c.replace('#include "config.h"',
+                  '#include "config.h"\n#include <errno.h>\n#include <string.h>', 1)
+
+old = '''    process_wayland.wl_display = wl_display_connect(NULL);
+    if (!process_wayland.wl_display)
+        return FALSE;'''
+
+new = '''    process_wayland.wl_display = wl_display_connect(NULL);
+    if (!process_wayland.wl_display)
+    {
+        fprintf(stderr, "[winewayland] wl_display_connect FAILED errno=%d (%s) WAYLAND_SOCKET=%s WAYLAND_DISPLAY=%s XDG_RUNTIME_DIR=%s\\n",
+                errno, strerror(errno),
+                getenv("WAYLAND_SOCKET") ? getenv("WAYLAND_SOCKET") : "(unset)",
+                getenv("WAYLAND_DISPLAY") ? getenv("WAYLAND_DISPLAY") : "(unset)",
+                getenv("XDG_RUNTIME_DIR") ? getenv("XDG_RUNTIME_DIR") : "(unset)");
+        return FALSE;
+    }
+    fprintf(stderr, "[winewayland] wl_display_connect OK socket=%s\\n",
+            getenv("WAYLAND_SOCKET") ? getenv("WAYLAND_SOCKET") : "default");'''
+
+count = c.count(old)
+print("  wayland.c connect snippet matches:", count)
+if count != 1:
+    print("  WARNING: expected exactly 1 match, got", count)
+else:
+    c = c.replace(old, new)
+    with open('dlls/winewayland.drv/wayland.c', 'w') as f:
+        f.write(c)
+    print("  wayland.c connect diagnostics applied")
+PYCONNECT
 else
     echo "  WARNING: $WLD_SRC not found — building without dmabuf support"
 fi

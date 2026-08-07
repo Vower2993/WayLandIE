@@ -96,6 +96,11 @@ public final class WaylandDiagnostics {
                 "winewayland.so's wl_display_connect() returned NULL - the guest process could not reach the compositor socket.",
                 "Verify WAYLAND_SOCKET / XDG_RUNTIME_DIR / WAYLAND_DISPLAY in the launch env and that the socket file exists and is readable (see 'compositor_socket' stage)."),
         new Detection(
+                "\\[winewayland\\] wl_display_connect FAILED",
+                "WAYLAND_CONNECT_FAILED",
+                "winewayland.so's wl_display_connect() returned NULL. The [winewayland] line carries the exact errno and the env as seen inside the guest.",
+                "Compare the guest-visible WAYLAND_SOCKET/XDG_RUNTIME_DIR with the compositor's bound socket path and check the runtime dir/socket permissions."),
+        new Detection(
                 "Wayland compositor doesn't support",
                 "WAYLAND_PROTOCOL_GAP",
                 "The compositor is missing a protocol global that winewayland.drv requires (wl_compositor, xdg_wm_base, wl_shm, wl_subcompositor, wp_viewporter).",
@@ -370,6 +375,10 @@ public final class WaylandDiagnostics {
                     (crashed || gameCrash || nativeCrash)
                             ? "See evidence lines for the crash location (module + offset)."
                             : null);
+
+            // The recordStage() calls above each persisted their own JSON
+            // snapshot; reload so the final save below does not clobber them.
+            json = loadOrCreate(ctx);
 
             // --- root cause ---
             JSONObject failure = new JSONObject();

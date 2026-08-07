@@ -926,7 +926,13 @@ public class GuestProgramLauncherComponent extends EnvironmentComponent {
     envVars.put("USER", ImageFs.USER);
     envVars.put("TMPDIR", rootDir.getPath() + "/usr/tmp");
     envVars.put("XDG_DATA_DIRS", rootDir.getPath() + "/usr/share");
-    envVars.put("LD_LIBRARY_PATH", rootDir.getPath() + "/usr/lib" + ":" + "/system/lib64");
+    // Wine's install lib dir holds the unix driver dependencies (e.g.
+    // libandroid-sysvshm.so); it must be on LD_LIBRARY_PATH for Wine's dlopen
+    // of winewayland.so to resolve them.
+    String wineLibDir = imageFs.getWinePath() + "/lib";
+    envVars.put(
+        "LD_LIBRARY_PATH",
+        rootDir.getPath() + "/usr/lib" + ":" + wineLibDir + ":/system/lib64");
     envVars.put("XDG_CONFIG_DIRS", rootDir.getPath() + "/usr/etc/xdg");
     envVars.put("GST_PLUGIN_PATH", rootDir.getPath() + "/usr/lib/gstreamer-1.0");
     envVars.put("FONTCONFIG_PATH", rootDir.getPath() + "/usr/etc/fonts");
@@ -1163,6 +1169,22 @@ public class GuestProgramLauncherComponent extends EnvironmentComponent {
         envVars.get("FAKE_EVDEV_MEMFD_PATHS"),
         envVars.get("FAKE_UDEV_DATA_DIR"));
     FEXCorePresetManager.normalizeSmcChecksEnvVars(envVars, this.envVars);
+    if (envVars.has("WAYLANDIE_DMABUF_LAYER_ENABLE")) {
+        try {
+            java.util.HashMap<String, String> envMap = new java.util.HashMap<>();
+            for (String key : envVars) envMap.put(key, envVars.get(key));
+            WaylandDiagnostics.beginSession(
+                    context,
+                    this.container != null ? this.container.getName() : null,
+                    imageFs.getWinePath(),
+                    null);
+            WaylandDiagnostics.recordEnv(context, envMap);
+            WaylandDiagnostics.checkCompositorSocket(context, imageFs.getRootDir());
+            WaylandDiagnostics.checkLaunchEnv(context, envMap);
+        } catch (Throwable t) {
+            Log.w("GuestProgramLauncherComponent", "Wayland diagnostics failed", t);
+        }
+    }
 
     String emulator = container.getEmulator();
     String emulator64 = container.getEmulator64();
