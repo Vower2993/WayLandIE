@@ -420,8 +420,18 @@ DESTDIR="$BIONIC_LIBS" ninja -C build install 2>&1 | tail -5
 
 # Meson installs to $BIONIC_LIBS/usr/local/{lib,include} because of --prefix=/usr/local
 # But Wine expects libs in $BIONIC_LIBS/lib and headers in $BIONIC_LIBS/include
-# Copy them to the expected locations
-cp -r "$BIONIC_LIBS/usr/local/include/xkbcommon" "$BIONIC_LIBS/include/xkbcommon" 2>/dev/null ||cp "$BIONIC_LIBS/usr/local/lib/libxkbcommon.a" "$BIONIC_LIBS/lib/" 2>/dev/null ||cp "$BIONIC_LIBS/usr/local/lib/pkgconfig/xkbcommon.pc" "$BIONIC_LIBS/lib/pkgconfig/" 2>/dev/null ||
+# Copy them to the expected locations. NOTE: these must be INDEPENDENT copies -
+# the old ||-chain only ran the next cp when the previous one FAILED, so the
+# include-dir copy succeeding silently skipped libxkbcommon.a, winewayland.so
+# then failed to link (-lxkbcommon) and CI shipped an APK without the driver.
+mkdir -p "$BIONIC_LIBS/include" "$BIONIC_LIBS/lib" "$BIONIC_LIBS/lib/pkgconfig"
+cp -rT "$BIONIC_LIBS/usr/local/include/xkbcommon" "$BIONIC_LIBS/include/xkbcommon"
+cp "$BIONIC_LIBS/usr/local/lib/libxkbcommon.a" "$BIONIC_LIBS/lib/"
+cp "$BIONIC_LIBS/usr/local/lib/pkgconfig/xkbcommon.pc" "$BIONIC_LIBS/lib/pkgconfig/"
+ls -la "$BIONIC_LIBS/lib/libxkbcommon.a" || {
+  echo "FATAL: libxkbcommon.a not built for bionic"
+  exit 1
+}
 # Create a stub libxkbregistry.a so Wine's link test passes.
 # We disabled xkbregistry because it requires libxml2 (not available for bionic).
 # Wine only uses xkbregistry for keyboard layout enumeration — not needed for
@@ -903,7 +913,10 @@ fi
 if [ "$SO_SIZE" -lt 1000 ]; then
   echo "FATAL: winewayland.so missing or too small"
   echo "=== winewayland.so build output (last 80 lines) ==="
-  make -j$(nproc) dlls/winewayland.drv/winewayland.so V=1 2>&1 | tail -80 ||  exit 1
+  make -j$(nproc) dlls/winewayland.drv/winewayland.so V=1 2>&1 | tail -80
+  # pipefail is OFF in this script, so the pipe above cannot gate the build:
+  # exit explicitly or CI ships an APK without the Unix-side driver.
+  exit 1
 fi
 
 
@@ -1068,5 +1081,9 @@ fi
 
 echo "=== zip contents ==="
 unzip -l "$WORKSPACE/app/src/main/assets/winewayland-driver.zip"
+if ! unzip -l "$WORKSPACE/app/src/main/assets/winewayland-driver.zip" | grep -q "lib/wine/aarch64-unix/winewayland.so"; then
+  echo "FATAL: lib/wine/aarch64-unix/winewayland.so missing from winewayland-driver.zip"
+  exit 1
+fi
 ls -la "$WORKSPACE/app/src/main/assets/winewayland-driver.zip"
 echo "winewayland-driver.zip built"
