@@ -6848,6 +6848,17 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
         });
     }
 
+    /**
+     * First frame presented by the in-process Wayland compositor (JNI callback via
+     * XServerSurfaceView.onCompFirstFrame). Dismiss the modal preloader so it can't
+     * occlude the compositor's SurfaceView: in Wayland mode the X11 first-window
+     * path never fires, so this is the only thing that can close it.
+     */
+    public void onWaylandFirstFrame() {
+        Log.i("XServerDisplayActivity", "First Wayland frame - dismissing preloader");
+        if (preloaderDialog != null) preloaderDialog.closeOnUiThread();
+    }
+
     private ActivityResultLauncher<Intent> controlsEditorActivityResultLauncher = registerForActivityResult(
             new ActivityResultContracts.StartActivityForResult(),
             result -> {

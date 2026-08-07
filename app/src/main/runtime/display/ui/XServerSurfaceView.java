@@ -6,11 +6,13 @@ import android.view.SurfaceHolder;
 import android.view.SurfaceView;
 import android.view.ViewGroup;
 import android.widget.FrameLayout;
+import com.winlator.cmod.runtime.display.XServerDisplayActivity;
 import com.winlator.cmod.runtime.display.renderer.RenderCallback;
 import com.winlator.cmod.runtime.display.renderer.VulkanRenderer;
 import com.winlator.cmod.runtime.display.xserver.XServer;
 import java.util.ArrayDeque;
 import java.util.Deque;
+import java.lang.ref.WeakReference;
 
 /** SurfaceView that drives a VulkanRenderer on a dedicated render thread. */
 @SuppressLint("ViewConstructor")
@@ -48,6 +50,9 @@ public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Cal
     // so DXVK can create a Vulkan surface bound to this SurfaceView.
     private volatile String anativeWindowPointer = null;
     private final Object surfaceCreatedLock = new Object();
+    /* Weak handle used by the static JNI callback (banner_on_first_frame) to reach
+     * the owning activity. Kept weak so it can never pin an Activity in memory. */
+    private static volatile WeakReference<XServerSurfaceView> sActiveWaylandView;
 
     public XServerSurfaceView(Context context, XServer xServer) {
         super(context);
@@ -55,6 +60,21 @@ public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Cal
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         renderer = new VulkanRenderer(this, xServer);
         getHolder().addCallback(this);
+        sActiveWaylandView = new WeakReference<>(this);
+    }
+
+    /**
+     * JNI callback (banner_on_first_frame) — the in-process Wayland compositor has
+     * presented its first client frame. The X11 window-manager first-window path never
+     * fires in Wayland mode, so without this the modal preloader stays on top of the
+     * SurfaceView and hides the compositor output ("black screen") forever.
+     */
+    public static void onCompFirstFrame() {
+        XServerSurfaceView view = sActiveWaylandView != null ? sActiveWaylandView.get() : null;
+        if (view == null) return;
+        if (view.getContext() instanceof XServerDisplayActivity) {
+            ((XServerDisplayActivity) view.getContext()).onWaylandFirstFrame();
+        }
     }
 
     public void setWaylandMode(boolean wayland) {
@@ -252,6 +272,13 @@ public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Cal
                         driverPath, libraryName, nativeLibDir);
                 android.util.Log.i("XServerSurfaceView",
                     "In-process Wayland compositor started");
+                // Surface may have been recreated (rotation/resize) while the
+                // compositor was already running; rebind so we never present to
+                // a dead ANativeWindow (stale-surface black screen).
+                com.winlator.cmod.runtime.display.environment.components.WaylandBridgeServer
+                    .nativeCompositorSetSurface(holder.getSurface());
+                android.util.Log.i("XServerSurfaceView",
+                    "In-process Wayland compositor surface rebound");
             } catch (Exception e) {
                 android.util.Log.e("XServerSurfaceView",
                     "Failed to start compositor", e);

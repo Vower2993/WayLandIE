@@ -22,19 +22,39 @@ static JavaVM *g_jvm;
 static jclass g_compositor_cls;      /* global ref */
 static jmethodID g_on_first_frame;   /* static void onCompFirstFrame() */
 
+/* Resolve the XServerSurfaceView class + onCompFirstFrame() method. Called from
+ * JNI_OnLoad when the VM loads us, or explicitly from the JNI glue that dlopen'd
+ * this library (plain dlopen does NOT invoke JNI_OnLoad). Exceptions from a
+ * signature mismatch must be cleared so a bad lookup can't poison the thread. */
+static void init_first_frame_callback(JNIEnv *env) {
+    if (g_compositor_cls) return;
+    jclass c = (*env)->FindClass(env, "com/winlator/cmod/runtime/display/ui/XServerSurfaceView");
+    if (c) {
+        g_compositor_cls = (*env)->NewGlobalRef(env, c);
+        g_on_first_frame = (*env)->GetStaticMethodID(env, g_compositor_cls,
+                                                     "onCompFirstFrame", "()V");
+    }
+    if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+}
+
 JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
     (void)reserved;
     g_jvm = vm;
     JNIEnv *env;
-    if ((*vm)->GetEnv(vm, (void **)&env, JNI_VERSION_1_6) == JNI_OK) {
-        jclass c = (*env)->FindClass(env, "com/winlator/cmod/runtime/display/ui/XServerSurfaceView");
-        if (c) {
-            g_compositor_cls = (*env)->NewGlobalRef(env, c);
-            g_on_first_frame = (*env)->GetStaticMethodID(env, g_compositor_cls,
-                                                         "onCompFirstFrame", "()V");
-        }
-    }
+    if ((*vm)->GetEnv(vm, (void **)&env, JNI_VERSION_1_6) == JNI_OK)
+        init_first_frame_callback(env);
     return JNI_VERSION_1_6;
+}
+
+/* Explicit JVM hand-off for the dlopen path (waylandie_display_native.c):
+ * dlopen("libwaylandie_comp.so") does not run JNI_OnLoad, so the glue calls
+ * this after resolving the library so banner_on_first_frame() can reach Java. */
+void banner_comp_set_jvm(JavaVM *vm) {
+    if (!vm) return;
+    g_jvm = vm;
+    JNIEnv *env = NULL;
+    if ((*vm)->GetEnv(vm, (void **)&env, JNI_VERSION_1_6) == JNI_OK)
+        init_first_frame_callback(env);
 }
 
 /* Called from vk_present.c on the compositor thread when the first client frame is

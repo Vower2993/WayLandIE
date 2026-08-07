@@ -59,6 +59,9 @@ public class WaylandBridgeServer {
     public static native void nativeStopCompositor();
     // Android surface size changed (rotation/resize) -> swapchain recreation.
     public static native void nativeCompositorSurfaceChanged(int width, int height);
+    // SurfaceView surface recreated (rotation/resize) -> rebind the output
+    // ANativeWindow so the running compositor presents to the live surface.
+    public static native void nativeCompositorSetSurface(android.view.Surface surface);
 
     static {
         try {

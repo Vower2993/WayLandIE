@@ -37,6 +37,7 @@ static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_idle = PTHREAD_COND_INITIALIZER;
 static int g_inflight; /* commits currently using the swapchain (teardown guard) */
 static int g_desired_w, g_desired_h; /* 0 = use the window's own size */
+static int g_recreate; /* set on fence/present stall -> recreate swapchain next commit */
 
 /* Implemented in waylandcomp_jni.c — notifies Java (dismiss launch overlay). */
 extern void banner_on_first_frame(void);
@@ -64,13 +65,18 @@ void vk_present_set_driver(const char *driver_path, const char *library_name,
 
 void vk_present_set_window(ANativeWindow *window) {
     pthread_mutex_lock(&g_lock);
-    /* A teardown must never destroy the swapchain while a commit is using it:
-     * wait until all in-flight commits finish before touching g_swapchain. */
-    if (!window) {
+    /* A teardown OR window replacement must never destroy the swapchain while a
+     * commit is using it: wait until all in-flight commits finish first. The
+     * VkSurfaceKHR is bound to its ANativeWindow, so a new Surface (rotation,
+     * SurfaceView recreation) requires tearing down the old surface + swapchain
+     * and re-initializing on the next commit - otherwise we present to a dead
+     * surface and the screen goes black. */
+    int replacing = window && window != g_window && g_inited == 1;
+    if (!window || replacing) {
         while (g_inflight > 0)
             pthread_cond_wait(&g_idle, &g_lock);
     }
-    if (!window && g_inited == 1) {
+    if ((!window || replacing) && g_inited == 1) {
         g_vk.DeviceWaitIdle(g_dev);
         if (g_swapchain) g_vk.DestroySwapchainKHR(g_dev, g_swapchain, NULL);
         g_swapchain = VK_NULL_HANDLE;
@@ -137,12 +143,15 @@ static int create_swapchain(void) {
 
     pthread_mutex_lock(&g_lock);
     int dw = g_desired_w, dh = g_desired_h;
+    ANativeWindow *win = g_window;
     pthread_mutex_unlock(&g_lock);
     g_extent = caps.currentExtent;
     if (g_extent.width == 0xFFFFFFFFu || g_extent.width == 0 ||
         g_extent.height == 0xFFFFFFFFu || g_extent.height == 0) {
-        g_extent.width = dw > 0 ? (uint32_t)dw : (uint32_t)ANativeWindow_getWidth(g_window);
-        g_extent.height = dh > 0 ? (uint32_t)dh : (uint32_t)ANativeWindow_getHeight(g_window);
+        g_extent.width = dw > 0 ? (uint32_t)dw
+                                : (uint32_t)ANativeWindow_getWidth(win);
+        g_extent.height = dh > 0 ? (uint32_t)dh
+                                 : (uint32_t)ANativeWindow_getHeight(win);
     }
     if (g_extent.width == 0 || g_extent.height == 0) {
         LOGE("present: zero surface extent; cannot create swapchain");
@@ -371,9 +380,11 @@ int vk_present_commit_dmabuf(int fd, uint32_t drm_format, uint64_t modifier, int
         pthread_mutex_lock(&g_lock);
         int want_w = g_desired_w, want_h = g_desired_h;
         pthread_mutex_unlock(&g_lock);
-        if (want_w > 0 && want_h > 0 &&
-            (g_extent.width != (uint32_t)want_w || g_extent.height != (uint32_t)want_h))
+        if (g_recreate || (want_w > 0 && want_h > 0 &&
+            (g_extent.width != (uint32_t)want_w || g_extent.height != (uint32_t)want_h))) {
+            g_recreate = 0;
             recreate_swapchain();
+        }
     }
     ar = g_vk.AcquireNextImageKHR(g_dev, g_swapchain, 1000000000ULL, g_acq, VK_NULL_HANDLE, &img);
     if (ar == VK_ERROR_OUT_OF_DATE_KHR || ar == VK_SUBOPTIMAL_KHR) {
@@ -427,7 +438,8 @@ int vk_present_commit_dmabuf(int fd, uint32_t drm_format, uint64_t modifier, int
     VkSubmitInfo si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .waitSemaphoreCount = 1,
                        .pWaitSemaphores = &g_acq, .pWaitDstStageMask = &wait, .commandBufferCount = 1,
                        .pCommandBuffers = &g_cmd, .signalSemaphoreCount = 1, .pSignalSemaphores = &g_rnd};
-    g_vk.ResetFences(g_dev, 1, &g_fence);
+    VkResult rr = g_vk.ResetFences(g_dev, 1, &g_fence);
+    if (rr != VK_SUCCESS) LOGE("present: ResetFences failed (%d)", rr);
     VkResult sr = g_vk.QueueSubmit(g_queue, 1, &si, g_fence);
     if (sr != VK_SUCCESS) LOGE("present: QueueSubmit failed (%d)", sr);
 
@@ -437,8 +449,21 @@ int vk_present_commit_dmabuf(int fd, uint32_t drm_format, uint64_t modifier, int
     sr = g_vk.QueuePresentKHR(g_queue, &pi);
     if (sr != VK_SUCCESS && sr != VK_SUBOPTIMAL_KHR)
         LOGE("present: QueuePresentKHR failed (%d)", sr);
-    g_vk.WaitForFences(g_dev, 1, &g_fence, VK_TRUE, UINT64_MAX);
-    g_vk.QueueWaitIdle(g_queue);
+    /* Bounded fence wait only. The fence covers the blit submit, so the old
+     * QueueWaitIdle() (which also waits for the FIFO present to be displayed)
+     * was redundant and could stall the Wayland dispatch thread for a full frame
+     * -- or forever on a wedged queue, freezing input and the compositor. A 2s
+     * cap drops the frame and recreates the swapchain on the next commit. */
+    VkResult wr = g_vk.WaitForFences(g_dev, 1, &g_fence, VK_TRUE, 2000000000ULL);
+    if (wr != VK_SUCCESS) {
+        LOGE("present: fence wait failed (%d) - dropping frame; swapchain recreated next commit",
+             (int)wr);
+        g_recreate = 1;
+        g_vk.FreeMemory(g_dev, srcMem, NULL);
+        g_vk.DestroyImage(g_dev, src, NULL);
+        commit_end();
+        return -1;
+    }
 
     g_vk.FreeMemory(g_dev, srcMem, NULL);
     g_vk.DestroyImage(g_dev, src, NULL);
@@ -510,9 +535,11 @@ int vk_present_commit_shm(const void *data, int w, int h, int stride, uint32_t w
         pthread_mutex_lock(&g_lock);
         int want_w = g_desired_w, want_h = g_desired_h;
         pthread_mutex_unlock(&g_lock);
-        if (want_w > 0 && want_h > 0 &&
-            (g_extent.width != (uint32_t)want_w || g_extent.height != (uint32_t)want_h))
+        if (g_recreate || (want_w > 0 && want_h > 0 &&
+            (g_extent.width != (uint32_t)want_w || g_extent.height != (uint32_t)want_h))) {
+            g_recreate = 0;
             recreate_swapchain();
+        }
     }
     ar = g_vk.AcquireNextImageKHR(g_dev, g_swapchain, 1000000000ULL, g_acq, VK_NULL_HANDLE, &img);
     if (ar == VK_ERROR_OUT_OF_DATE_KHR || ar == VK_SUBOPTIMAL_KHR) {
@@ -567,7 +594,8 @@ int vk_present_commit_shm(const void *data, int w, int h, int stride, uint32_t w
     VkSubmitInfo si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .waitSemaphoreCount = 1,
                        .pWaitSemaphores = &g_acq, .pWaitDstStageMask = &wait, .commandBufferCount = 1,
                        .pCommandBuffers = &g_cmd, .signalSemaphoreCount = 1, .pSignalSemaphores = &g_rnd};
-    g_vk.ResetFences(g_dev, 1, &g_fence);
+    VkResult rr = g_vk.ResetFences(g_dev, 1, &g_fence);
+    if (rr != VK_SUCCESS) LOGE("present: ResetFences failed (%d)", rr);
     VkResult sr = g_vk.QueueSubmit(g_queue, 1, &si, g_fence);
     if (sr != VK_SUCCESS) LOGE("present: QueueSubmit failed (%d)", sr);
 
@@ -577,8 +605,20 @@ int vk_present_commit_shm(const void *data, int w, int h, int stride, uint32_t w
     sr = g_vk.QueuePresentKHR(g_queue, &pi);
     if (sr != VK_SUCCESS && sr != VK_SUBOPTIMAL_KHR)
         LOGE("present: QueuePresentKHR failed (%d)", sr);
-    g_vk.WaitForFences(g_dev, 1, &g_fence, VK_TRUE, UINT64_MAX);
-    g_vk.QueueWaitIdle(g_queue);
+    /* Bounded fence wait only (same rationale as the dmabuf path): the fence covers
+     * the blit submit, so the old QueueWaitIdle() was redundant and could stall the
+     * Wayland dispatch thread forever on a wedged queue. A 2s cap drops the frame
+     * and recreates the swapchain on the next commit. */
+    VkResult wr = g_vk.WaitForFences(g_dev, 1, &g_fence, VK_TRUE, 2000000000ULL);
+    if (wr != VK_SUCCESS) {
+        LOGE("present: fence wait failed (%d) - dropping frame; swapchain recreated next commit",
+             (int)wr);
+        g_recreate = 1;
+        g_vk.FreeMemory(g_dev, srcMem, NULL);
+        g_vk.DestroyImage(g_dev, src, NULL);
+        commit_end();
+        return -1;
+    }
 
     g_vk.FreeMemory(g_dev, srcMem, NULL);
     g_vk.DestroyImage(g_dev, src, NULL);

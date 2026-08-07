@@ -18,12 +18,14 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <errno.h>
 #include <unistd.h>
 #include <stdint.h>
 #include <fcntl.h>
 #include <time.h>
 #include <android/log.h>
 #include <wayland-server.h>
+#include "keymap_us.xkb.h"
 
 #define WLOGI(...) __android_log_print(ANDROID_LOG_INFO, "BannerWayland", __VA_ARGS__)
 #define WLOGE(...) __android_log_print(ANDROID_LOG_ERROR, "BannerWayland", __VA_ARGS__)
@@ -688,8 +690,10 @@ static void seat_get_keyboard(struct wl_client *c, struct wl_resource *r, uint32
     int fd = open(path, O_RDONLY | O_CLOEXEC);
     if (fd >= 0) {
         struct stat st;
-        if (fstat(fd, &st) == 0 && st.st_size > 0)
+        if (fstat(fd, &st) == 0 && st.st_size > 0) {
             wl_keyboard_send_keymap(k, WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1, fd, (uint32_t)st.st_size);
+            WLOGI("keymap sent: %s (%lld bytes)", path, (long long)st.st_size);
+        }
         close(fd);
     } else {
         WLOGE("keymap open failed: %s", path);
@@ -807,6 +811,26 @@ void banner_wayland_send_key(int evdev, int state) {
           (void *)g_visible_surface);
 }
 
+/* Write the embedded US keymap to $XDG_RUNTIME_DIR/keymap.xkb once at startup.
+ * seat_get_keyboard() opens that path for every new keyboard client, so without
+ * this file winewayland never receives a keymap and drops all keyboard input. */
+static void write_keymap_file(const char *rt) {
+    char path[512];
+    snprintf(path, sizeof(path), "%s/keymap.xkb", rt ? rt : ".");
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    if (fd < 0) {
+        WLOGE("keymap write failed: %s (errno=%d)", path, errno);
+        return;
+    }
+    size_t len = strlen(g_keymap_us_xkb);
+    ssize_t n = write(fd, g_keymap_us_xkb, len);
+    close(fd);
+    if (n == (ssize_t)len)
+        WLOGI("keymap written: %s (%zu bytes)", path, len);
+    else
+        WLOGE("keymap write short/failed: %s (wrote %zd/%zu errno=%d)", path, n, len, errno);
+}
+
 /* ------------------------------------------------------------------ entry
  * Lib entry point (was main() in the standalone spike). Blocks in the wl event
  * loop, so the JNI wrapper runs it on a dedicated thread. XDG_RUNTIME_DIR must
@@ -837,6 +861,8 @@ int banner_wayland_run(void) {
     }
     const char *socket = "wayland-0";
     WLOGI("listening on %s/wayland-0", rt ? rt : "?");
+
+    write_keymap_file(rt);
 
     wl_global_create(display, &wl_compositor_interface, 6, NULL, bind_compositor);
     wl_global_create(display, &wl_subcompositor_interface, 1, NULL, bind_subcompositor);

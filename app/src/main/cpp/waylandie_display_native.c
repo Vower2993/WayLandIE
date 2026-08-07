@@ -5974,6 +5974,7 @@ Java_com_winlator_cmod_runtime_display_ui_XServerSurfaceView_nativeCloseFd(
 
 static void *g_comp_handle = NULL;
 static pthread_t g_comp_thread;
+static ANativeWindow *g_comp_window = NULL; /* JNI-owned ref: released on rebind */
 
 /* Function pointer types from the compositor .so */
 typedef int (*banner_wayland_run_fn)(void);
@@ -6043,6 +6044,23 @@ Java_com_winlator_cmod_runtime_display_environment_components_WaylandBridgeServe
         return JNI_FALSE;
     }
 
+    /* Hand the JavaVM to the compositor lib so its banner_on_first_frame() JNI
+     * callback can attach and notify Java (dismiss the modal preloader that would
+     * otherwise cover the rendered surface forever). dlopen() does not run the
+     * library's JNI_OnLoad, so resolve the exported setter explicitly. */
+    typedef void (*banner_comp_set_jvm_fn)(JavaVM *);
+    banner_comp_set_jvm_fn set_jvm =
+        (banner_comp_set_jvm_fn)dlsym(g_comp_handle, "banner_comp_set_jvm");
+    JavaVM *jvm = NULL;
+    if (set_jvm && (*env)->GetJavaVM(env, &jvm) == JNI_OK) {
+        set_jvm(jvm);
+        __android_log_print(ANDROID_LOG_INFO, "WaylandBridgeServer",
+                            "compositor JVM callback wired (vm=%p)", (void *)jvm);
+    } else {
+        __android_log_print(ANDROID_LOG_WARN, "WaylandBridgeServer",
+                            "compositor JVM setter missing (set_jvm=%p)", (void *)set_jvm);
+    }
+
     /* Set XDG_RUNTIME_DIR */
     if (xdgRuntimeDir) {
         const char *rt = (*env)->GetStringUTFChars(env, xdgRuntimeDir, NULL);
@@ -6077,6 +6095,7 @@ Java_com_winlator_cmod_runtime_display_environment_components_WaylandBridgeServe
         ANativeWindow *win = ANativeWindow_fromSurface(env, surface);
         if (win) {
             g_set_window(win);
+            g_comp_window = win;
             __android_log_print(ANDROID_LOG_INFO, "WaylandBridgeServer",
                 "Compositor output window set: %p", (void*)win);
         }
@@ -6097,6 +6116,23 @@ Java_com_winlator_cmod_runtime_display_environment_components_WaylandBridgeServe
     return JNI_FALSE;
 }
 
+/* JNI: SurfaceView surface recreated (rotation/resize). Rebind the output
+ * ANativeWindow on the running compositor: vk_present_set_window() tears down the
+ * old surface+swapchain (waiting for in-flight commits) and re-initializes on the
+ * next commit, so we never present to a dead surface after Surface recreation. */
+JNIEXPORT void JNICALL
+Java_com_winlator_cmod_runtime_display_environment_components_WaylandBridgeServer_nativeCompositorSetSurface(
+        JNIEnv* env, jclass clazz, jobject surface) {
+    (void)clazz;
+    if (!g_comp_handle || !g_set_window) return;
+    ANativeWindow *win = surface ? ANativeWindow_fromSurface(env, surface) : NULL;
+    g_set_window(win);
+    if (g_comp_window) ANativeWindow_release(g_comp_window);
+    g_comp_window = win;
+    __android_log_print(ANDROID_LOG_INFO, "WaylandBridgeServer",
+                        "compositor output window rebound: %p", (void *)win);
+}
+
 /* JNI: Stop the in-process Wayland compositor */
 JNIEXPORT void JNICALL
 Java_com_winlator_cmod_runtime_display_environment_components_WaylandBridgeServer_nativeStopCompositor(
@@ -6104,6 +6140,10 @@ Java_com_winlator_cmod_runtime_display_environment_components_WaylandBridgeServe
     (void)env; (void)clazz;
     if (g_set_window) {
         g_set_window(NULL);  /* signals the compositor to tear down */
+    }
+    if (g_comp_window) {
+        ANativeWindow_release(g_comp_window);
+        g_comp_window = NULL;
     }
     /* Note: we don't dlclose here because the compositor thread may still
      * be running. The process will clean up on exit. */
