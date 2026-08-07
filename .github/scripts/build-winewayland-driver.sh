@@ -919,6 +919,18 @@ if [ "$SO_SIZE" -lt 1000 ]; then
   exit 1
 fi
 
+echo "=== winewayland.so dynamic dependencies ==="
+readelf -d "$PROTON_OUT/lib/wine/aarch64-unix/winewayland.so" 2>/dev/null | grep -E "NEEDED" || true
+# The driver must NOT depend on shared wayland/ffi libs at runtime: the guest
+# dynamic linker only searches LD_LIBRARY_PATH (imagefs/usr/lib) when resolving
+# deps of a dlopen'd .so, and only libandroid-sysvshm.so / libfreetype.so.6 are
+# shipped (they are copied to usr/lib by WaylandDriverInstaller at install time).
+if readelf -d "$PROTON_OUT/lib/wine/aarch64-unix/winewayland.so" 2>/dev/null | grep -qE "libwayland-client\.so|libffi\.so"; then
+  echo "FATAL: winewayland.so has dynamic deps on wayland-client/ffi."
+  echo "Rebuild bionic-libs as static (delete the CI bionic-libs cache) so these are linked statically."
+  exit 1
+fi
+
 
 cd "$OUTDIR"
 mkdir -p "$WORKSPACE/app/src/main/assets"
@@ -1083,6 +1095,11 @@ echo "=== zip contents ==="
 unzip -l "$WORKSPACE/app/src/main/assets/winewayland-driver.zip"
 if ! unzip -l "$WORKSPACE/app/src/main/assets/winewayland-driver.zip" | grep -q "lib/wine/aarch64-unix/winewayland.so"; then
   echo "FATAL: lib/wine/aarch64-unix/winewayland.so missing from winewayland-driver.zip"
+  exit 1
+fi
+if ! unzip -l "$WORKSPACE/app/src/main/assets/winewayland-driver.zip" | grep -q "lib/libandroid-sysvshm.so"; then
+  echo "FATAL: lib/libandroid-sysvshm.so missing from winewayland-driver.zip"
+  echo "winewayland.so links -landroid-sysvshm; without it the driver fails to dlopen in the guest."
   exit 1
 fi
 ls -la "$WORKSPACE/app/src/main/assets/winewayland-driver.zip"

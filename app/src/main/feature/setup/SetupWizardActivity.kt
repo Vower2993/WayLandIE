@@ -447,6 +447,11 @@ class SetupWizardActivity : FixedFontScaleFragmentActivity() {
                 url = "https://github.com/nicholasx417/WinNative-Components/releases/download/Stable-Dxvk/Dxvk-2.4.1-pre-reg.wcp",
             ),
             PackageSpec(
+                label = "DXVK 2.4.1 ARM64EC pre-reg GPLAsync",
+                type = ContentProfile.ContentType.CONTENT_TYPE_DXVK,
+                url = "https://github.com/nicholasx417/WinNative-Components/releases/download/Stable-Arm64ec-Dxvk/Dxvk-2.4.1-pre-reg-arm64ec-gplasync.wcp",
+            ),
+            PackageSpec(
                 label = "FEX 2605",
                 type = ContentProfile.ContentType.CONTENT_TYPE_FEXCORE,
                 url = "https://github.com/nicholasx417/WinNative-Components/releases/download/Stable-FEX/FEX-2605.wcp",

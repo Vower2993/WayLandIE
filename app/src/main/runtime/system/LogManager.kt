@@ -169,11 +169,22 @@ object LogManager {
     @JvmStatic
     fun getShareableLogFiles(context: Context): Array<File> {
         val logsDir = getLogsDir(context)
-        return logsDir
+        val files =
+            logsDir
             .listFiles()
             ?.filter {
-                it.isFile && (it.name.endsWith(".log") || it.name.endsWith(".old.log") || it.name.endsWith(".txt"))
-            }?.toTypedArray() ?: emptyArray()
+                it.isFile &&
+                    (it.name.endsWith(".log") ||
+                        it.name.endsWith(".old.log") ||
+                        it.name.endsWith(".txt") ||
+                        it.name.endsWith(".json"))
+            }?.toMutableList() ?: mutableListOf()
+        // Wine's stderr (driver load errors, e.g. "failed to load .so lib ...")
+        // is redirected to <filesDir>/wine_stderr.log by ProcessHelper, not into
+        // the logs dir. Include it so shared log zips carry the decisive error.
+        val wineStderr = File(context.getFilesDir(), "wine_stderr.log")
+        if (wineStderr.isFile && wineStderr !in files) files.add(wineStderr)
+        return files.toTypedArray()
     }
 
     /** Total bytes of all shareable log files. */

@@ -27,6 +27,7 @@ public final class WaylandDriverInstaller {
         try {
             extractZip(ctx, prefix);
             copyToSystem32(prefix);
+            copyBundledLibsToUserLib(prefix);
             // Set GraphicsDriver=winewayland.drv only when display mode is wayland
             if (!"wayland".equals(displayMode)) {
                 Log.i(TAG, "Display mode is not wayland — skipping GraphicsDriver");
@@ -189,6 +190,20 @@ public final class WaylandDriverInstaller {
                     + "cannot copy .so companion, driver will fail to load");
         }
 
+        // CRITICAL: Copy the shared libraries bundled in the driver zip
+        // (prefix/lib/*.so, e.g. libandroid-sysvshm.so and libfreetype.so.6)
+        // into imagefs/usr/lib, which is the guest's LD_LIBRARY_PATH.
+        //
+        // WHY: winewayland.so links against libandroid-sysvshm.so (and, if CI
+        // ever links it dynamically, libwayland-client.so.0 / libffi.so.*).
+        // Those libs are shipped inside the zip at lib/, but the guest loader
+        // only searches LD_LIBRARY_PATH (= imagefs/usr/lib) when dlopen-ing
+        // winewayland.so - it does NOT search the Wine install dir. If the
+        // dependency can't be resolved, Wine's dlopen of winewayland.so fails,
+        // DllMain never succeeds, and every process falls back to
+        // nodrv_CreateWindow ("The explorer process failed to start").
+        copyBundledLibsToUserLib(prefix);
+
         // Verify the driver is actually in system32 now
         if (!driverInSystem32.exists() || driverInSystem32.length() < 1000) {
             Log.e(TAG, "ensureDriverInstalled: winewayland.drv STILL missing from system32 after extraction!");
@@ -209,6 +224,22 @@ public final class WaylandDriverInstaller {
 
         // Always set GraphicsDriver (idempotent — removes old entries first)
         setGraphicsDriver(prefix);
+
+        // Record diagnostic checkpoints so the shared log zip carries a
+        // stage-by-stage report of the driver installation.
+        WaylandDiagnostics.checkDriverFiles(ctx, prefix, winePath);
+        File rootDir = prefix.getParentFile();
+        while (rootDir != null && !new File(rootDir, "usr/lib").isDirectory()) {
+            File candidate = rootDir.getParentFile();
+            if (candidate == rootDir) break;
+            rootDir = candidate;
+        }
+        WaylandDiagnostics.checkDriverDeps(
+                ctx,
+                prefix,
+                rootDir,
+                winePath != null ? winePath.getAbsolutePath() + "/lib" : null);
+        WaylandDiagnostics.checkRegistry(ctx, prefix);
 
         // Check if winevulkan.dll was patched (look for VK_KHR_xlib_surface)
         // We check ALL copies: system32 (what wine loads) AND winePath (the source)
@@ -789,6 +820,56 @@ public final class WaylandDriverInstaller {
             }
         } catch (Exception e) {
             Log.w(TAG, "Failed to set GraphicsDriver: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Copies shared libraries bundled in the driver zip (prefix/lib/) into
+     * imagefs/usr/lib, which is the guest's LD_LIBRARY_PATH.
+     *
+     * winewayland.so links against libandroid-sysvshm.so (and possibly other
+     * bionic libs). The zip ships them under lib/, but the guest dynamic
+     * linker only searches LD_LIBRARY_PATH when resolving the dependencies of
+     * a dlopen'd library - it does not search the Wine install dir. Without
+     * this copy, dlopen(winewayland.so) fails, DllMain returns FALSE, and Wine
+     * reports ERROR_DLL_INIT_FAILED -> nodrv_CreateWindow for every window.
+     */
+    private static void copyBundledLibsToUserLib(File prefix) {
+        File bundledLibDir = new File(prefix, "lib");
+        if (!bundledLibDir.isDirectory()) {
+            Log.w(TAG, "copyBundledLibsToUserLib: no lib dir at " + bundledLibDir);
+            return;
+        }
+
+        // Locate the imagefs root: walk up from prefix (= rootDir/home/xuser/.wine)
+        // until we find a directory containing usr/lib (same logic as installDmabufLayer).
+        File rootDir = prefix.getParentFile();
+        while (rootDir != null && !new File(rootDir, "usr/lib").isDirectory()) {
+            File candidate = rootDir.getParentFile();
+            if (candidate == rootDir) break;
+            rootDir = candidate;
+        }
+        if (rootDir == null) {
+            Log.w(TAG, "copyBundledLibsToUserLib: could not locate imagefs root from " + prefix);
+            return;
+        }
+
+        File targetLibDir = new File(rootDir, "usr/lib");
+        File[] bundled = bundledLibDir.listFiles((dir, name) -> name.endsWith(".so"));
+        if (bundled == null || bundled.length == 0) {
+            Log.w(TAG, "copyBundledLibsToUserLib: no bundled .so files in " + bundledLibDir);
+            return;
+        }
+        for (File so : bundled) {
+            File target = new File(targetLibDir, so.getName());
+            try {
+                copyFile(so, target);
+                Log.i(TAG, "copyBundledLibsToUserLib: " + so.getName()
+                        + " -> " + target + " (" + target.length() + " bytes)");
+            } catch (IOException e) {
+                Log.w(TAG, "copyBundledLibsToUserLib: failed to copy "
+                        + so.getName() + ": " + e.getMessage());
+            }
         }
     }
 

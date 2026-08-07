@@ -191,6 +191,16 @@ class DriversFragment : Fragment() {
                 repoUrl = WINNATIVE_COMPONENTS_REPO_URL,
                 apiUrl = WINNATIVE_COMPONENTS_API_URL,
             ),
+            DriverRepo(
+                name = WINNATIVE_DRIVERS_REPO_NAME,
+                repoUrl = WINNATIVE_DRIVERS_REPO_URL,
+                apiUrl = WINNATIVE_DRIVERS_API_URL,
+            ),
+            DriverRepo(
+                name = BANNERS_TURNIP_REPO_NAME,
+                repoUrl = BANNERS_TURNIP_REPO_URL,
+                apiUrl = BANNERS_TURNIP_API_URL,
+            ),
         )
 
     private fun loadRepos() {
@@ -589,6 +599,12 @@ class DriversFragment : Fragment() {
         private const val WINNATIVE_COMPONENTS_REPO_NAME = "WinNative Components"
         private const val WINNATIVE_COMPONENTS_REPO_URL = "https://github.com/nicholasx417/WinNative-Components/releases"
         private const val WINNATIVE_COMPONENTS_API_URL = "https://api.github.com/repos/nicholasx417/WinNative-Components/releases"
+        private const val WINNATIVE_DRIVERS_REPO_NAME = "WinNative Drivers"
+        private const val WINNATIVE_DRIVERS_REPO_URL = "https://github.com/WinNative-Emu/Drivers/releases"
+        private const val WINNATIVE_DRIVERS_API_URL = "https://api.github.com/repos/WinNative-Emu/Drivers/releases"
+        private const val BANNERS_TURNIP_REPO_NAME = "Banners-Turnip"
+        private const val BANNERS_TURNIP_REPO_URL = "https://github.com/The412Banner/Banners-Turnip/releases"
+        private const val BANNERS_TURNIP_API_URL = "https://api.github.com/repos/The412Banner/Banners-Turnip/releases"
     }
 }
 

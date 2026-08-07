@@ -6681,7 +6681,10 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
             // dlls/ntdll/unix/debug.c) so it always appears in the log, regardless
             // of WINEDEBUG settings. But the 80KB logcat buffer cap can still
             // truncate it if there's too much other output.
-            envVars.put("WINEDEBUG", "+waylanddrv");
+            // +module is required so Wine's loader prints the exact dlerror()
+            // ("failed to load .so lib ...") when winewayland.so fails to load;
+            // WaylandDiagnostics greps for it to pinpoint the failure.
+            envVars.put("WINEDEBUG", "+waylanddrv,+module");
 
             // DXVK telemetry: log extension probing and pipeline compilation stalls
             envVars.put("DXVK_LOG_LEVEL", "info");

@@ -22,6 +22,7 @@ import com.winlator.cmod.runtime.input.controls.FakeInputWriter;
 import com.winlator.cmod.runtime.system.GPUInformation;
 import com.winlator.cmod.runtime.system.ProcessHelper;
 import com.winlator.cmod.runtime.wine.EnvVars;
+import com.winlator.cmod.runtime.wine.WaylandDiagnostics;
 import com.winlator.cmod.runtime.wine.WineInfo;
 import com.winlator.cmod.shared.io.FileUtils;
 import com.winlator.cmod.shared.util.Callback;
@@ -176,12 +177,32 @@ public class GuestProgramLauncherComponent extends EnvironmentComponent {
     envVars.put("DISPLAY", ":0");
         envVars.put("WAYLAND_DISPLAY", "wayland-0");
         envVars.put("XDG_RUNTIME_DIR", imageFs.getRootDir().getPath() + "/usr/tmp/runtime");
+        // WAYLAND_SOCKET takes priority over XDG_RUNTIME_DIR/WAYLAND_DISPLAY in
+        // libwayland's wl_display_connect(). Setting the absolute socket path
+        // makes the winewayland.drv connection deterministic regardless of any
+        // namespace/env quirks in the guest.
+        envVars.put("WAYLAND_SOCKET", imageFs.getRootDir().getPath() + "/usr/tmp/runtime/wayland-0");
 
     String winePath =
         wineProfile == null
             ? imageFs.getWinePath() + "/bin"
             : ContentsManager.getSourceFile(context, wineProfile, wineProfile.wineBinPath)
                 .getAbsolutePath();
+    // Wine's install lib dir (where libandroid-sysvshm.so and other unix
+    // driver dependencies live). Must be on LD_LIBRARY_PATH: Wine's loader
+    // dlopen()s winewayland.so, and the guest dynamic linker resolves its
+    // DT_NEEDED entries only via LD_LIBRARY_PATH - not via the Wine install dir.
+    String wineLibDir;
+    if (wineProfile == null) {
+        wineLibDir = imageFs.getWinePath() + "/lib";
+    } else {
+        File wineBin = ContentsManager.getSourceFile(context, wineProfile, wineProfile.wineBinPath);
+        File binParent = wineBin != null ? wineBin.getParentFile() : null;
+        File installDir = binParent != null ? binParent.getParentFile() : null;
+        wineLibDir = installDir != null
+                ? new File(installDir, "lib").getAbsolutePath()
+                : imageFs.getWinePath() + "/lib";
+    }
     envVars.put(
         "PATH",
         winePath
@@ -190,7 +211,25 @@ public class GuestProgramLauncherComponent extends EnvironmentComponent {
             + "/usr/bin:"
             + imageFs.getRootDir().getPath()
             + "/usr/local/bin");
-    envVars.put("LD_LIBRARY_PATH", imageFs.getRootDir().getPath() + "/usr/lib");
+    envVars.put(
+        "LD_LIBRARY_PATH",
+        imageFs.getRootDir().getPath() + "/usr/lib" + ":" + wineLibDir + ":/system/lib64");
+    if (envVars.has("WAYLANDIE_DMABUF_LAYER_ENABLE")) {
+        try {
+            java.util.HashMap<String, String> envMap = new java.util.HashMap<>();
+            for (String key : envVars) envMap.put(key, envVars.get(key));
+            WaylandDiagnostics.beginSession(
+                    context,
+                    this.container != null ? this.container.getName() : null,
+                    imageFs.getWinePath(),
+                    null);
+            WaylandDiagnostics.recordEnv(context, envMap);
+            WaylandDiagnostics.checkCompositorSocket(context, imageFs.getRootDir());
+            WaylandDiagnostics.checkLaunchEnv(context, envMap);
+        } catch (Throwable t) {
+            Log.w("GuestProgramLauncherComponent", "Wayland diagnostics failed", t);
+        }
+    }
     envVars.put(
         "BOX64_LD_LIBRARY_PATH", imageFs.getRootDir().getPath() + "/usr/lib/x86_64-linux-gnu");
     envVars.put(
@@ -907,6 +946,7 @@ public class GuestProgramLauncherComponent extends EnvironmentComponent {
     envVars.put("DISPLAY", ":0");
         envVars.put("WAYLAND_DISPLAY", "wayland-0");
         envVars.put("XDG_RUNTIME_DIR", imageFs.getRootDir().getPath() + "/usr/tmp/runtime");
+        envVars.put("WAYLAND_SOCKET", imageFs.getRootDir().getPath() + "/usr/tmp/runtime/wayland-0");
     envVars.put("WINE_DISABLE_FULLSCREEN_HACK", "1");
     envVars.put("GST_PLUGIN_FEATURE_RANK", "ximagesink:3000");
     envVars.put(
@@ -1248,10 +1288,23 @@ public class GuestProgramLauncherComponent extends EnvironmentComponent {
             fw.write("[" + new java.util.Date() + "] " + exitLog + "\n");
             fw.write("  displayMode=" + envVars.get("DISPLAY") + "\n");
             fw.write("  WAYLAND_DISPLAY=" + envVars.get("WAYLAND_DISPLAY") + "\n");
+            fw.write("  WAYLAND_SOCKET=" + envVars.get("WAYLAND_SOCKET") + "\n");
+            fw.write("  XDG_RUNTIME_DIR=" + envVars.get("XDG_RUNTIME_DIR") + "\n");
+            fw.write("  LD_LIBRARY_PATH=" + envVars.get("LD_LIBRARY_PATH") + "\n");
             fw.write("  WINEDEBUG=" + envVars.get("WINEDEBUG") + "\n");
             fw.write("  WINEDLLOVERRIDES=" + envVars.get("WINEDLLOVERRIDES") + "\n");
             fw.write("  WAYLANDIE_DMABUF_LAYER_ENABLE=" + envVars.get("WAYLANDIE_DMABUF_LAYER_ENABLE") + "\n");
             fw.close();
+            if (envVars.get("WAYLANDIE_DMABUF_LAYER_ENABLE").equals("1")) {
+                try {
+                    java.util.HashMap<String, String> envMap = new java.util.HashMap<>();
+                    for (String key : envVars) envMap.put(key, envVars.get(key));
+                    WaylandDiagnostics.finalize(
+                            environment.getContext(), envMap, status, status != 0);
+                } catch (Throwable t) {
+                    Log.w("GuestProgramLauncherComponent", "Wayland diagnostics finalize failed", t);
+                }
+            }
           } catch (Exception e) {
             Log.w("GuestProgramLauncherComponent", "Failed to write exit log file", e);
           }
