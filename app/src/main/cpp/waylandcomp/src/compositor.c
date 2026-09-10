@@ -511,6 +511,22 @@ static void dbuf_buffer_resource_destroy(struct wl_resource *r) {
 }
 
 static void params_destroy(struct wl_client *c, struct wl_resource *r) {
+    /* Any plane fd still owned by the params object means the client destroyed it
+     * without calling create/create_immed (or add() was called more than once for
+     * the same plane and the slot was overwritten). params_do_create() sets the
+     * slots to -1 as it transfers ownership to the buffer, so whatever remains
+     * here is ours to close -- otherwise every abandoned params object leaks one
+     * fd per plane, and a client that abandons buffers exhausts the process fd
+     * table (the same failure mode as a per-frame leak). */
+    struct dmabuf_params *p = wl_resource_get_user_data(r);
+    if (p) {
+        for (int i = 0; i < MAX_PLANES; i++) {
+            if (p->fd[i] >= 0) {
+                close(p->fd[i]);
+                p->fd[i] = -1;
+            }
+        }
+    }
     wl_resource_destroy(r);
 }
 static void params_add(struct wl_client *c, struct wl_resource *r, int32_t fd,
@@ -518,6 +534,9 @@ static void params_add(struct wl_client *c, struct wl_resource *r, int32_t fd,
                        uint32_t mod_hi, uint32_t mod_lo) {
     struct dmabuf_params *p = wl_resource_get_user_data(r);
     if (plane >= MAX_PLANES) { close(fd); return; }
+    /* A second add() for the same plane replaces the earlier fd; close the one we
+     * are dropping, otherwise it leaks (the protocol allows a client to retry). */
+    if (p->fd[plane] >= 0) close(p->fd[plane]);
     p->fd[plane] = fd;
     p->offset[plane] = offset;
     p->stride[plane] = stride;
@@ -530,6 +549,11 @@ static struct wl_resource *params_do_create(struct wl_client *c,
                                             uint32_t flags) {
     struct dmabuf_params *p = wl_resource_get_user_data(r);
     struct dmabuf_buffer *b = calloc(1, sizeof(*b));
+    if (!b) {
+        /* Out of memory: fail the params rather than dereferencing NULL. The
+         * params object keeps ownership of its fds and closes them on destroy. */
+        return NULL;
+    }
     b->n_planes = p->n_planes;
     b->width = w; b->height = h; b->format = format;
     /* A client that sends MOD_INVALID in the params means "use the implicit
@@ -555,6 +579,14 @@ static struct wl_resource *params_do_create(struct wl_client *c,
     }
     struct wl_resource *buf =
         wl_resource_create(c, &wl_buffer_interface, 1, id);
+    if (!buf) {
+        /* Ownership of the plane fds already moved into b, so free them explicitly;
+         * wl_resource_set_implementation would never run its destructor. */
+        for (int i = 0; i < b->n_planes; i++)
+            if (b->fd[i] >= 0) close(b->fd[i]);
+        free(b);
+        return NULL;
+    }
     wl_resource_set_implementation(buf, &dbuf_buffer_impl, b,
                                    dbuf_buffer_resource_destroy);
     return buf;
@@ -562,6 +594,13 @@ static struct wl_resource *params_do_create(struct wl_client *c,
 static void params_create(struct wl_client *c, struct wl_resource *r, int32_t w,
                           int32_t h, uint32_t format, uint32_t flags) {
     struct wl_resource *buf = params_do_create(c, r, 0, w, h, format, flags);
+    /* params_do_create returns NULL only on allocation/resource failure; emitting
+     * "created" with a NULL id would corrupt the client's object map, so report
+     * the protocol-defined failure instead. */
+    if (!buf) {
+        zwp_linux_buffer_params_v1_send_failed(r);
+        return;
+    }
     zwp_linux_buffer_params_v1_send_created(r, buf); /* server-allocated new_id */
 }
 static void params_create_immed(struct wl_client *c, struct wl_resource *r,
@@ -823,12 +862,19 @@ static void write_keymap_file(const char *rt) {
         return;
     }
     size_t len = strlen(g_keymap_us_xkb);
-    ssize_t n = write(fd, g_keymap_us_xkb, len);
+    /* Write the terminating NUL as well. The client (winewayland.drv) does
+     * mmap(fd, size) followed by xkb_keymap_new_from_string(), which requires a
+     * NUL-terminated string within the mapped region. Without the NUL the client's
+     * strlen() walks past the mapping whenever the text length is an exact multiple
+     * of the page size -- today it only works because the last page happens to have
+     * zero padding after the text. The size advertised in wl_keyboard.keymap is
+     * st_size, so including the NUL keeps the two in agreement. */
+    ssize_t n = write(fd, g_keymap_us_xkb, len + 1);
     close(fd);
-    if (n == (ssize_t)len)
-        WLOGI("keymap written: %s (%zu bytes)", path, len);
+    if (n == (ssize_t)(len + 1))
+        WLOGI("keymap written: %s (%zu bytes incl. NUL)", path, len + 1);
     else
-        WLOGE("keymap write short/failed: %s (wrote %zd/%zu errno=%d)", path, n, len, errno);
+        WLOGE("keymap write short/failed: %s (wrote %zd/%zu errno=%d)", path, n, len + 1, errno);
 }
 
 /* ------------------------------------------------------------------ entry

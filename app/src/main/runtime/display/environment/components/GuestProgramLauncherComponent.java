@@ -177,11 +177,19 @@ public class GuestProgramLauncherComponent extends EnvironmentComponent {
     envVars.put("DISPLAY", ":0");
         envVars.put("WAYLAND_DISPLAY", "wayland-0");
         envVars.put("XDG_RUNTIME_DIR", imageFs.getRootDir().getPath() + "/usr/tmp/runtime");
-        // WAYLAND_SOCKET takes priority over XDG_RUNTIME_DIR/WAYLAND_DISPLAY in
-        // libwayland's wl_display_connect(). Setting the absolute socket path
-        // makes the winewayland.drv connection deterministic regardless of any
-        // namespace/env quirks in the guest.
-        envVars.put("WAYLAND_SOCKET", imageFs.getRootDir().getPath() + "/usr/tmp/runtime/wayland-0");
+        // Do NOT set WAYLAND_SOCKET. libwayland's wl_display_connect() reads it as a
+        // *file descriptor number* ("If WAYLAND_SOCKET is set, it's interpreted as a
+        // file descriptor number referring to an already opened socket. In this case,
+        // the socket is used as-is and name is ignored.") and does:
+        //     connection = getenv("WAYLAND_SOCKET");
+        //     fd = strtol(connection, &end, 10);
+        //     if (errno != 0 || connection == end || *end != '\0') return NULL;
+        // A filesystem path parses to no digits, so *end != '\0' and connect returns
+        // NULL -- silently defeating XDG_RUNTIME_DIR + WAYLAND_DISPLAY, which are the
+        // correct way to point winewayland.drv at the in-process compositor's socket
+        // ($XDG_RUNTIME_DIR/wayland-0, bound by waylandcomp/src/compositor.c). That
+        // produced "DllMain returns FALSE with no waylanddrv traces".
+        envVars.remove("WAYLAND_SOCKET");
 
     String winePath =
         wineProfile == null
@@ -952,7 +960,10 @@ public class GuestProgramLauncherComponent extends EnvironmentComponent {
     envVars.put("DISPLAY", ":0");
         envVars.put("WAYLAND_DISPLAY", "wayland-0");
         envVars.put("XDG_RUNTIME_DIR", imageFs.getRootDir().getPath() + "/usr/tmp/runtime");
-        envVars.put("WAYLAND_SOCKET", imageFs.getRootDir().getPath() + "/usr/tmp/runtime/wayland-0");
+        // See the sibling note in execShellCommand(): WAYLAND_SOCKET must be an fd
+        // number, never a path. Setting it to a pathname made wl_display_connect()
+        // return NULL and hid the compositor socket from winewayland.drv.
+        envVars.remove("WAYLAND_SOCKET");
     envVars.put("WINE_DISABLE_FULLSCREEN_HACK", "1");
     envVars.put("GST_PLUGIN_FEATURE_RANK", "ximagesink:3000");
     envVars.put(

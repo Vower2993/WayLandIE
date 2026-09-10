@@ -824,6 +824,30 @@ public final class WaylandDriverInstaller {
     }
 
     /**
+     * True for a shared-library file name, including versioned sonames.
+     *
+     * <p>A plain {@code name.endsWith(".so")} test silently drops {@code
+     * libfreetype.so.6}, which the CI driver build produces on purpose so that
+     * win32u.so can dlopen it at runtime. Because the same predicate gated the
+     * driver-deps diagnostic, the missing library was never reported either: the
+     * filter failed to copy it and then failed to notice it was missing.
+     */
+    public static boolean isSharedLibraryName(String name) {
+        if (name == null) return false;
+        if (name.endsWith(".so")) return true;
+        // Versioned soname: libfoo.so.1, libfoo.so.1.2.3
+        int idx = name.indexOf(".so.");
+        if (idx < 0) return false;
+        String suffix = name.substring(idx + 4);
+        if (suffix.isEmpty()) return false;
+        for (int i = 0; i < suffix.length(); i++) {
+            char c = suffix.charAt(i);
+            if (c != '.' && (c < '0' || c > '9')) return false;
+        }
+        return true;
+    }
+
+    /**
      * Copies shared libraries bundled in the driver zip (prefix/lib/) into
      * imagefs/usr/lib, which is the guest's LD_LIBRARY_PATH.
      *
@@ -855,7 +879,7 @@ public final class WaylandDriverInstaller {
         }
 
         File targetLibDir = new File(rootDir, "usr/lib");
-        File[] bundled = bundledLibDir.listFiles((dir, name) -> name.endsWith(".so"));
+        File[] bundled = bundledLibDir.listFiles((dir, name) -> isSharedLibraryName(name));
         if (bundled == null || bundled.length == 0) {
             Log.w(TAG, "copyBundledLibsToUserLib: no bundled .so files in " + bundledLibDir);
             return;

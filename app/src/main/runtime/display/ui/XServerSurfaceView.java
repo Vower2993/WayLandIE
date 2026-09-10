@@ -267,11 +267,25 @@ public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Cal
                     libraryName = null;
                 }
 
-                com.winlator.cmod.runtime.display.environment.components.WaylandBridgeServer
-                    .nativeStartCompositor(holder.getSurface(), rtDir,
-                        driverPath, libraryName, nativeLibDir);
-                android.util.Log.i("XServerSurfaceView",
-                    "In-process Wayland compositor started");
+                boolean compStarted =
+                    com.winlator.cmod.runtime.display.environment.components.WaylandBridgeServer
+                        .nativeStartCompositor(holder.getSurface(), rtDir,
+                            driverPath, libraryName, nativeLibDir);
+                if (!compStarted) {
+                    // The compositor library failed to load (e.g. libwaylandie_comp.so absent
+                    // from the APK) or its thread could not start. Nothing downstream recovers
+                    // from this: no client can connect, so no frame is ever presented and the
+                    // first-frame callback never fires. Report it loudly instead of claiming
+                    // success, otherwise the only symptom is a black screen behind a preloader.
+                    android.util.Log.e("XServerSurfaceView",
+                        "In-process Wayland compositor FAILED to start"
+                        + " (rtDir=" + rtDir
+                        + ", driver=" + driverPath
+                        + ") - Wayland output will be black");
+                } else {
+                    android.util.Log.i("XServerSurfaceView",
+                        "In-process Wayland compositor started");
+                }
                 // Surface may have been recreated (rotation/resize) while the
                 // compositor was already running; rebind so we never present to
                 // a dead ANativeWindow (stale-surface black screen).

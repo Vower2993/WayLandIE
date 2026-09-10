@@ -506,7 +506,9 @@ public final class WaylandDiagnostics {
         List<String> problems = new ArrayList<>();
         File bundledLibDir = new File(prefix, "lib");
         File[] bundled = bundledLibDir.isDirectory()
-                ? bundledLibDir.listFiles((dir, name) -> name.endsWith(".so")) : null;
+                ? bundledLibDir.listFiles(
+                        (dir, name) -> WaylandDriverInstaller.isSharedLibraryName(name))
+                : null;
         if (bundled == null || bundled.length == 0) {
             recordStage(ctx, "driver_deps", "Driver shared libs", "UNKNOWN",
                     "No bundled .so found in " + bundledLibDir, null);
@@ -592,8 +594,13 @@ public final class WaylandDiagnostics {
             problems.add("WAYLAND_DISPLAY unset");
         if (xdg == null || xdg.isEmpty())
             problems.add("XDG_RUNTIME_DIR unset");
-        if (socket == null || socket.isEmpty())
-            problems.add("WAYLAND_SOCKET unset");
+        // WAYLAND_SOCKET must NOT be set here: libwayland reads it as an fd NUMBER,
+        // and a pathname makes wl_display_connect() return NULL while ignoring
+        // XDG_RUNTIME_DIR/WAYLAND_DISPLAY. Leaving it unset is the correct state, so
+        // its presence is now reported as a problem rather than its absence.
+        if (socket != null && !socket.isEmpty())
+            problems.add("WAYLAND_SOCKET is set (" + socket
+                    + ") - it must be unset or an fd number, not a socket path");
         if (ld == null || !ld.contains("/usr/lib"))
             problems.add("LD_LIBRARY_PATH missing usr/lib");
         recordStage(ctx, "launch_env", "Launch environment", problems.isEmpty() ? "PASS" : "FAIL",
@@ -603,7 +610,7 @@ public final class WaylandDiagnostics {
                         + " LD_LIBRARY_PATH=" + ld
                         + (problems.isEmpty() ? "" : " | " + String.join(" | ", problems)),
                 problems.isEmpty() ? null
-                        : "GuestProgramLauncherComponent must set WAYLAND_DISPLAY/XDG_RUNTIME_DIR/WAYLAND_SOCKET and put usr/lib on LD_LIBRARY_PATH.");
+                        : "GuestProgramLauncherComponent must set WAYLAND_DISPLAY + XDG_RUNTIME_DIR, leave WAYLAND_SOCKET unset, and put usr/lib on LD_LIBRARY_PATH.");
     }
 
     // ---------- internals ----------
