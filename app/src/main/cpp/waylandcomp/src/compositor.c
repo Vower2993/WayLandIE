@@ -511,22 +511,12 @@ static void dbuf_buffer_resource_destroy(struct wl_resource *r) {
 }
 
 static void params_destroy(struct wl_client *c, struct wl_resource *r) {
-    /* Any plane fd still owned by the params object means the client destroyed it
-     * without calling create/create_immed (or add() was called more than once for
-     * the same plane and the slot was overwritten). params_do_create() sets the
-     * slots to -1 as it transfers ownership to the buffer, so whatever remains
-     * here is ours to close -- otherwise every abandoned params object leaks one
-     * fd per plane, and a client that abandons buffers exhausts the process fd
-     * table (the same failure mode as a per-frame leak). */
-    struct dmabuf_params *p = wl_resource_get_user_data(r);
-    if (p) {
-        for (int i = 0; i < MAX_PLANES; i++) {
-            if (p->fd[i] >= 0) {
-                close(p->fd[i]);
-                p->fd[i] = -1;
-            }
-        }
-    }
+    /* NOTE: deliberately no fd cleanup here. wl_resource_destroy() invokes the
+     * resource's registered destructor, and this params resource installs
+     * params_resource_destroy() (which closes every remaining plane fd and frees
+     * the struct). So destroying params without calling create/create_immed does
+     * NOT leak. The real leak was params_add() overwriting p->fd[plane], fixed
+     * there. */
     wl_resource_destroy(r);
 }
 static void params_add(struct wl_client *c, struct wl_resource *r, int32_t fd,

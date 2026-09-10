@@ -950,7 +950,14 @@ if [ "$DRV_SIZE" -lt 1000 ]; then
   echo "=== dlls/winewayland.drv/ contents ==="
   ls -la /tmp/proton-wine/dlls/winewayland.drv/ 2>/dev/null ||  echo "=== Full Wayland detection from config.log ==="
   grep -B2 -A10 "checking for wayland" /tmp/proton-wine/config.log 2>/dev/null | head -50 ||  echo "=== Makefile for winewayland.drv ==="
-  cat /tmp/proton-wine/dlls/winewayland.drv/Makefile 2>/dev/null | head -50 ||  exit 1
+  cat /tmp/proton-wine/dlls/winewayland.drv/Makefile 2>/dev/null | head -50 || true
+  # pipefail is OFF in this script, so the pipelines above report their LAST command's
+  # status, and every one of them sits on the left of a `||`. The `exit 1` that used to
+  # be chained onto the final `cat ... | head` was therefore UNREACHABLE: when the PE-side
+  # driver is missing or truncated the guard printed "FATAL" and then fell through, so CI
+  # stayed green and shipped winewayland-driver.zip without winewayland.drv (Wine would
+  # then have no Windows-side Wayland driver at all). Exit unconditionally instead.
+  exit 1
 fi
 
 if [ "$SO_SIZE" -lt 1000 ]; then
@@ -1143,6 +1150,15 @@ fi
 if ! unzip -l "$WORKSPACE/app/src/main/assets/winewayland-driver.zip" | grep -q "lib/libandroid-sysvshm.so"; then
   echo "FATAL: lib/libandroid-sysvshm.so missing from winewayland-driver.zip"
   echo "winewayland.so links -landroid-sysvshm; without it the driver fails to dlopen in the guest."
+  exit 1
+fi
+# The PE-side driver is what Wine actually loads (LoadLibraryW("winewayland.drv")). The
+# earlier DRV_SIZE guard is the primary check, but assert it in the shipped zip too: only
+# the Unix .so and libandroid-sysvshm.so were verified before, so a driver zip missing its
+# Windows-side .drv would still have been accepted here.
+if ! unzip -l "$WORKSPACE/app/src/main/assets/winewayland-driver.zip" | grep -q "lib/wine/aarch64-windows/winewayland.drv"; then
+  echo "FATAL: lib/wine/aarch64-windows/winewayland.drv missing from winewayland-driver.zip"
+  echo "Without the PE-side driver Wine cannot load a Wayland display driver at all."
   exit 1
 fi
 ls -la "$WORKSPACE/app/src/main/assets/winewayland-driver.zip"
