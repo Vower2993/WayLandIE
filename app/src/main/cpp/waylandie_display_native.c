@@ -6023,6 +6023,35 @@ Java_com_winlator_cmod_runtime_display_environment_components_WaylandBridgeServe
     (void)clazz;
 
     if (g_comp_handle) {
+        /* Already running (the thread is detached and the handle is never reset, so
+         * a second session in the same process cannot restart it). Do NOT skip the
+         * runtime-dir work: the socket has to exist on disk for the guest to connect,
+         * and something in the launch path may have removed it since. Recreate the
+         * directory if it is gone. We cannot re-bind the socket (that needs the
+         * compositor's wl_display), so report failure if it is missing rather than
+         * claiming success and letting Wine fail later with a bare errno=2. */
+        if (xdgRuntimeDir) {
+            const char *rt = (*env)->GetStringUTFChars(env, xdgRuntimeDir, NULL);
+            if (rt) {
+                ensure_runtime_dir(rt);
+                setenv("XDG_RUNTIME_DIR", rt, 1);
+                char sock_path[512];
+                snprintf(sock_path, sizeof(sock_path), "%s/wayland-0", rt);
+                struct stat st;
+                int have_sock = (stat(sock_path, &st) == 0);
+                if (!have_sock) {
+                    __android_log_print(ANDROID_LOG_ERROR, "WaylandBridgeServer",
+                        "compositor already running but socket %s is MISSING - the guest "
+                        "cannot connect; a previous launch removed it and the compositor "
+                        "cannot re-bind", sock_path);
+                } else {
+                    __android_log_print(ANDROID_LOG_INFO, "WaylandBridgeServer",
+                        "compositor already running; socket present at %s", sock_path);
+                }
+                (*env)->ReleaseStringUTFChars(env, xdgRuntimeDir, rt);
+                return have_sock ? JNI_TRUE : JNI_FALSE;
+            }
+        }
         return JNI_TRUE;  /* already running */
     }
 
