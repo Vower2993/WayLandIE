@@ -5980,10 +5980,14 @@ static ANativeWindow *g_comp_window = NULL; /* JNI-owned ref: released on rebind
 typedef int (*banner_wayland_run_fn)(void);
 typedef void (*vk_present_set_window_fn)(ANativeWindow*);
 typedef void (*vk_present_set_driver_fn)(const char*, const char*, const char*);
+typedef void (*banner_send_pointer_fn)(int action, int x, int y);
+typedef void (*banner_send_key_fn)(int evdev, int state);
 
 static banner_wayland_run_fn g_banner_run = NULL;
 static vk_present_set_window_fn g_set_window = NULL;
 static vk_present_set_driver_fn g_set_driver = NULL;
+static banner_send_pointer_fn g_send_pointer = NULL;
+static banner_send_key_fn g_send_key = NULL;
 
 /* Create $XDG_RUNTIME_DIR if missing (0700, as Wayland requires) so
  * wl_display_add_socket() cannot fail on a fresh container. */
@@ -6034,6 +6038,22 @@ Java_com_winlator_cmod_runtime_display_environment_components_WaylandBridgeServe
     g_banner_run = (banner_wayland_run_fn)dlsym(g_comp_handle, "banner_wayland_run");
     g_set_window = (vk_present_set_window_fn)dlsym(g_comp_handle, "vk_present_set_window");
     g_set_driver = (vk_present_set_driver_fn)dlsym(g_comp_handle, "vk_present_set_driver");
+    /* Input entry points. These are the ONLY way to reach the compositor's
+     * wl_seat: Java cannot call them directly, because libwaylandie_comp.so is
+     * dlopen'd from here rather than loaded with System.loadLibrary (the KSP
+     * workaround), so the Java_..._XServerSurfaceView_nativeCompSendPointer
+     * symbols in waylandcomp_jni.c are unreachable. The live path declares its
+     * natives on WaylandBridgeServer, so the calls have to be forwarded through
+     * this library, exactly like vk_present_set_window above. Without this the
+     * seat is advertised but never receives a single event, so Wine gets a dead
+     * keyboard and pointer. Optional: a missing symbol must not fail start-up. */
+    g_send_pointer = (banner_send_pointer_fn)dlsym(g_comp_handle, "banner_wayland_send_pointer");
+    g_send_key = (banner_send_key_fn)dlsym(g_comp_handle, "banner_wayland_send_key");
+    if (!g_send_pointer || !g_send_key)
+        __android_log_print(ANDROID_LOG_WARN, "WaylandBridgeServer",
+            "compositor input symbols missing: pointer=%p key=%p "
+            "(input will not reach the guest)",
+            (void*)g_send_pointer, (void*)g_send_key);
 
     if (!g_banner_run || !g_set_window) {
         __android_log_print(ANDROID_LOG_ERROR, "WaylandBridgeServer",
@@ -6161,4 +6181,34 @@ Java_com_winlator_cmod_runtime_display_environment_components_WaylandBridgeServe
     if (!set_size)
         set_size = (vk_present_set_size_fn)dlsym(g_comp_handle, "vk_present_set_size");
     if (set_size) set_size((int)width, (int)height);
+}
+
+/* JNI: forward one pointer event to the compositor's wl_seat.
+ *
+ * action: 0 = down, 1 = move, 2 = up (the compositor maps these to
+ * WL_POINTER_BUTTON_STATE_PRESSED / motion / RELEASED; see deliver_pointer()).
+ * x, y are in the compositor's OUTPUT space (0..1919, 0..1079) - the compositor
+ * rescales them to the focused surface's real size, so callers must normalise
+ * to that space rather than passing raw view pixels.
+ *
+ * Safe to call before the compositor is up: the pointer is only invoked when the
+ * handle and symbol both resolved, and the compositor itself drops events with
+ * no visible surface or no bound wl_pointer resource. */
+JNIEXPORT void JNICALL
+Java_com_winlator_cmod_runtime_display_environment_components_WaylandBridgeServer_nativeCompositorSendPointer(
+        JNIEnv* env, jclass clazz, jint action, jint x, jint y) {
+    (void)env; (void)clazz;
+    if (!g_send_pointer) return;
+    g_send_pointer((int)action, (int)x, (int)y);
+}
+
+/* JNI: forward one key event to the compositor's wl_seat.
+ * evdev is a Linux input keycode (KEY_A = 30, ...); state is 1 = down, 0 = up.
+ * Callers must translate Android KeyEvent codes to evdev codes first. */
+JNIEXPORT void JNICALL
+Java_com_winlator_cmod_runtime_display_environment_components_WaylandBridgeServer_nativeCompositorSendKey(
+        JNIEnv* env, jclass clazz, jint evdev, jint state) {
+    (void)env; (void)clazz;
+    if (!g_send_key) return;
+    g_send_key((int)evdev, (int)state);
 }

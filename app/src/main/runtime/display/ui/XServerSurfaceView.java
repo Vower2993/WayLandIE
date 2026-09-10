@@ -302,6 +302,55 @@ public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Cal
         startRenderThreadIfNeeded();
     }
 
+    /**
+     * Feed touch input into the in-process Wayland compositor's wl_seat.
+     *
+     * <p>Without this the compositor advertises WL_SEAT_CAPABILITY_POINTER and the
+     * guest binds wl_pointer, but no event ever arrives, so the desktop has a dead
+     * pointer. Only active in Wayland mode; X11 mode keeps its existing input path.
+     *
+     * <p>Coordinates are normalised to the compositor's OUTPUT space (0..1919,
+     * 0..1079) because {@code deliver_pointer()} rescales from that space to the
+     * focused surface's real size. {@code View.getWidth()/getHeight()} are the
+     * view's pixel size, so the mapping holds regardless of device resolution.
+     */
+    @Override
+    public boolean onTouchEvent(android.view.MotionEvent event) {
+        if (!waylandMode) return super.onTouchEvent(event);
+        int action;
+        switch (event.getActionMasked()) {
+            case android.view.MotionEvent.ACTION_DOWN:
+                action = 0;
+                break;
+            case android.view.MotionEvent.ACTION_MOVE:
+                action = 1;
+                break;
+            case android.view.MotionEvent.ACTION_UP:
+            case android.view.MotionEvent.ACTION_CANCEL:
+                action = 2;
+                break;
+            default:
+                // Multi-touch pointers etc. are not modelled by the seat yet.
+                return true;
+        }
+        int vw = getWidth();
+        int vh = getHeight();
+        if (vw <= 0 || vh <= 0) return true;
+        int outX = (int) Math.round(event.getX() * 1920.0 / vw);
+        int outY = (int) Math.round(event.getY() * 1080.0 / vh);
+        if (outX < 0) outX = 0;
+        else if (outX > 1919) outX = 1919;
+        if (outY < 0) outY = 0;
+        else if (outY > 1079) outY = 1079;
+        try {
+            com.winlator.cmod.runtime.display.environment.components.WaylandBridgeServer
+                .nativeCompositorSendPointer(action, outX, outY);
+        } catch (Throwable t) {
+            android.util.Log.w("XServerSurfaceView", "sendPointer failed", t);
+        }
+        return true;
+    }
+
     @Override
     public void surfaceChanged(SurfaceHolder holder, int format, int w, int h) {
         if (w <= 0 || h <= 0) {

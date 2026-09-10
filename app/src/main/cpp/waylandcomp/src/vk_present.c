@@ -152,6 +152,31 @@ static int create_swapchain(void) {
                                 : (uint32_t)ANativeWindow_getWidth(win);
         g_extent.height = dh > 0 ? (uint32_t)dh
                                  : (uint32_t)ANativeWindow_getHeight(win);
+    } else if (dw > 0 && dh > 0) {
+        /* Honour an explicitly requested size even when the surface reports a
+         * concrete currentExtent. Android's WSI normally returns a definite
+         * extent taken from the ANativeWindow geometry that ensure_init() pinned
+         * once via ANativeWindow_setBuffersGeometry(), so the g_desired_* values
+         * that vk_present_set_size() records (from Java surfaceChanged) were
+         * previously consulted ONLY in the 0/0xFFFFFFFF branch above - i.e.
+         * almost never. The request was silently dropped, g_extent kept the
+         * stale size, and the commit-time test
+         *   (g_extent.width != want_w || g_extent.height != want_h)
+         * stayed true forever, so EVERY commit ran recreate_swapchain():
+         * DeviceWaitIdle + DestroySwapchainKHR + CreateSwapchainKHR per frame on
+         * the Wayland dispatch thread. That stalls input and the compositor.
+         * The requested size is authoritative because Java's surfaceChanged
+         * dimensions are the real surface size; clamp to the surface's supported
+         * range so the swapchain stays valid. */
+        uint32_t rw = (uint32_t)dw, rh = (uint32_t)dh;
+        if (rw < caps.minImageExtent.width) rw = caps.minImageExtent.width;
+        if (rh < caps.minImageExtent.height) rh = caps.minImageExtent.height;
+        if (caps.maxImageExtent.width && rw > caps.maxImageExtent.width)
+            rw = caps.maxImageExtent.width;
+        if (caps.maxImageExtent.height && rh > caps.maxImageExtent.height)
+            rh = caps.maxImageExtent.height;
+        g_extent.width = rw;
+        g_extent.height = rh;
     }
     if (g_extent.width == 0 || g_extent.height == 0) {
         LOGE("present: zero surface extent; cannot create swapchain");

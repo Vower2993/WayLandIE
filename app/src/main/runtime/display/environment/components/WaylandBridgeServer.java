@@ -62,6 +62,12 @@ public class WaylandBridgeServer {
     // SurfaceView surface recreated (rotation/resize) -> rebind the output
     // ANativeWindow so the running compositor presents to the live surface.
     public static native void nativeCompositorSetSurface(android.view.Surface surface);
+    // Input injection into the compositor's wl_seat. Without these the seat is
+    // advertised but never receives an event, so Wine has a dead pointer and
+    // keyboard. action: 0=down 1=move 2=up; x,y in OUTPUT space (0..1919,0..1079).
+    // evdev is a Linux input keycode (KEY_A=30), state 1=down 0=up.
+    public static native void nativeCompositorSendPointer(int action, int x, int y);
+    public static native void nativeCompositorSendKey(int evdev, int state);
 
     static {
         try {
