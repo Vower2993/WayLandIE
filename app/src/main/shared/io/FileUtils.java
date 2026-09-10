@@ -132,11 +132,33 @@ public abstract class FileUtils {
   }
 
   public static boolean clear(File targetFile) {
+    return clear(targetFile, new String[0]);
+  }
+
+  /**
+   * Like {@link #clear(File)} but leaves entries whose name is listed in {@code keepNames}
+   * in place (recursing into kept directories is not performed).
+   *
+   * <p>Needed for imagefs/usr/tmp: the in-process Wayland compositor binds its listening
+   * socket at usr/tmp/runtime/wayland-0 before Wine starts, and an unconditional clear()
+   * deletes it. Wine's winewayland.drv then fails at wl_display_connect() with errno=2
+   * (No such file or directory) and every window falls back to nodrv_CreateWindow, so the
+   * guest ends up with no desktop. The rest of usr/tmp (ifaddrs, .sysvshm, .sound, breakpad)
+   * is still cleared as before.
+   */
+  public static boolean clear(File targetFile, String... keepNames) {
     if (targetFile == null) return false;
     if (targetFile.isDirectory()) {
       File[] files = targetFile.listFiles();
       if (files != null) {
         for (File file : files) {
+          if (keepNames != null) {
+            boolean keep = false;
+            for (String name : keepNames) {
+              if (name != null && name.equals(file.getName())) { keep = true; break; }
+            }
+            if (keep) continue;
+          }
           if (!delete(file)) return false;
         }
       }

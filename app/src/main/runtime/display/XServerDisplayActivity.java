@@ -6095,7 +6095,11 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
                         + " channels='" + wineDebugChannels + "' value='" + wineDebugValue + "'");
 
         String rootPath = imageFs.getRootDir().getPath();
-        FileUtils.clear(imageFs.getTmpDir());
+        // Clear stale contents of usr/tmp, but NOT usr/tmp/runtime: the in-process Wayland
+        // compositor has already bound its listening socket at runtime/wayland-0 by the time
+        // we get here (surfaceCreated starts it), and wiping it makes winewayland.drv's
+        // wl_display_connect() fail with errno=2 -> nodrv_CreateWindow -> no desktop.
+        FileUtils.clear(imageFs.getTmpDir(), "runtime");
 
 
         guestProgramLauncherComponent = new GuestProgramLauncherComponent(
