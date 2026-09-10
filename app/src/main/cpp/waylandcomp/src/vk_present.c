@@ -387,19 +387,27 @@ static int import_image(int fd, uint32_t drm_format, uint64_t modifier, int w, i
 int vk_present_commit_dmabuf(int fd, uint32_t drm_format, uint64_t modifier, int w, int h,
                              uint32_t stride, uint32_t offset) {
     if (modifier == MOD_INVALID) modifier = 0; /* implicit -> linear */
+    /* Enter the in-flight section BEFORE touching the swapchain or the device.
+     * Previously commit_begin() ran only after ensure_init() and import_image(),
+     * so g_inflight was still 0 while those functions created the device,
+     * surface and swapchain. vk_present_set_window(NULL) could therefore pass
+     * its `while (g_inflight > 0)` wait and tear the swapchain/surface down
+     * underneath an in-progress init, leaving a commit to run
+     * AcquireNextImageKHR on a destroyed swapchain. init/import are exactly the
+     * part of a commit that must not race teardown. */
+    commit_begin();
     pthread_mutex_lock(&g_lock);
     int have_win = g_window != NULL;
     pthread_mutex_unlock(&g_lock);
-    if (!have_win) return -1;
-    if (ensure_init() != 0) return -1;
+    if (!have_win) { commit_end(); return -1; }
+    if (ensure_init() != 0) { commit_end(); return -1; }
 
     VkImage src; VkDeviceMemory srcMem;
     if (import_image(fd, drm_format, modifier, w, h, stride, offset, &src, &srcMem) != 0) {
-        LOGE("present: dmabuf import failed"); return -1;
+        LOGE("present: dmabuf import failed"); commit_end(); return -1;
     }
 
     uint32_t img = 0;
-    commit_begin();
     VkResult ar;
     {
         pthread_mutex_lock(&g_lock);
@@ -408,18 +416,34 @@ int vk_present_commit_dmabuf(int fd, uint32_t drm_format, uint64_t modifier, int
         if (g_recreate || (want_w > 0 && want_h > 0 &&
             (g_extent.width != (uint32_t)want_w || g_extent.height != (uint32_t)want_h))) {
             g_recreate = 0;
-            recreate_swapchain();
+            /* If this fails the swapchain is gone and g_images is freed, so the
+             * acquire below would use a NULL handle and the blit would index a
+             * freed image array. Bail out instead of continuing. */
+            if (recreate_swapchain() != 0) {
+                g_recreate = 1;
+                commit_end();
+                g_vk.FreeMemory(g_dev, srcMem, NULL); g_vk.DestroyImage(g_dev, src, NULL);
+                return -1;
+            }
         }
     }
     ar = g_vk.AcquireNextImageKHR(g_dev, g_swapchain, 1000000000ULL, g_acq, VK_NULL_HANDLE, &img);
-    if (ar == VK_ERROR_OUT_OF_DATE_KHR || ar == VK_SUBOPTIMAL_KHR) {
+    if (ar == VK_ERROR_OUT_OF_DATE_KHR) {
+        /* Only OUT_OF_DATE means no image was acquired and the acquire semaphore
+         * is still unsignalled, so it is legal to recreate and re-acquire with
+         * the same semaphore. VK_SUBOPTIMAL_KHR is a SUCCESS code - the image WAS
+         * acquired and g_acq IS signalled - so folding the two together (as this
+         * code used to) re-used a signalled semaphore, violating
+         * VUID-vkAcquireNextImageKHR-semaphore-01286, and silently discarded the
+         * acquired image. SUBOPTIMAL is handled after present instead. */
         if (recreate_swapchain() != 0) {
+            g_recreate = 1;
             commit_end();
             g_vk.FreeMemory(g_dev, srcMem, NULL); g_vk.DestroyImage(g_dev, src, NULL); return -1;
         }
         ar = g_vk.AcquireNextImageKHR(g_dev, g_swapchain, 1000000000ULL, g_acq, VK_NULL_HANDLE, &img);
     }
-    if (ar != VK_SUCCESS) {
+    if (ar != VK_SUCCESS && ar != VK_SUBOPTIMAL_KHR) {
         commit_end();
         g_vk.FreeMemory(g_dev, srcMem, NULL); g_vk.DestroyImage(g_dev, src, NULL); return -1;
     }
@@ -464,16 +488,39 @@ int vk_present_commit_dmabuf(int fd, uint32_t drm_format, uint64_t modifier, int
                        .pWaitSemaphores = &g_acq, .pWaitDstStageMask = &wait, .commandBufferCount = 1,
                        .pCommandBuffers = &g_cmd, .signalSemaphoreCount = 1, .pSignalSemaphores = &g_rnd};
     VkResult rr = g_vk.ResetFences(g_dev, 1, &g_fence);
-    if (rr != VK_SUCCESS) LOGE("present: ResetFences failed (%d)", rr);
+    if (rr != VK_SUCCESS) {
+        /* The fence may still be signalled from the previous frame, which would
+         * make the WaitForFences below return immediately and let us free src
+         * while the GPU is still reading it. Drop the frame instead. */
+        LOGE("present: ResetFences failed (%d) - dropping frame", (int)rr);
+        g_recreate = 1;
+        commit_end();
+        g_vk.FreeMemory(g_dev, srcMem, NULL); g_vk.DestroyImage(g_dev, src, NULL);
+        return -1;
+    }
     VkResult sr = g_vk.QueueSubmit(g_queue, 1, &si, g_fence);
-    if (sr != VK_SUCCESS) LOGE("present: QueueSubmit failed (%d)", sr);
+    if (sr != VK_SUCCESS) {
+        /* Do NOT present: g_rnd is only signalled by a successful submit, so
+         * QueuePresentKHR would wait on a semaphore that never signals and wedge
+         * the queue (and then the dispatch thread). */
+        LOGE("present: QueueSubmit failed (%d) - dropping frame", (int)sr);
+        g_recreate = 1;
+        commit_end();
+        g_vk.FreeMemory(g_dev, srcMem, NULL); g_vk.DestroyImage(g_dev, src, NULL);
+        return -1;
+    }
 
     VkPresentInfoKHR pi = {.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .waitSemaphoreCount = 1,
                            .pWaitSemaphores = &g_rnd, .swapchainCount = 1,
                            .pSwapchains = &g_swapchain, .pImageIndices = &img};
     sr = g_vk.QueuePresentKHR(g_queue, &pi);
     if (sr != VK_SUCCESS && sr != VK_SUBOPTIMAL_KHR)
-        LOGE("present: QueuePresentKHR failed (%d)", sr);
+        LOGE("present: QueuePresentKHR failed (%d)", (int)sr);
+    /* SUBOPTIMAL from acquire or present means the image was still acquired and
+     * presented, so the frame is valid - but the swapchain no longer matches the
+     * surface, so rebuild it on the next commit rather than dropping the frame. */
+    if (ar == VK_SUBOPTIMAL_KHR || sr == VK_SUBOPTIMAL_KHR)
+        g_recreate = 1;
     /* Bounded fence wait only. The fence covers the blit submit, so the old
      * QueueWaitIdle() (which also waits for the FIFO present to be displayed)
      * was redundant and could stall the Wayland dispatch thread for a full frame
@@ -481,11 +528,16 @@ int vk_present_commit_dmabuf(int fd, uint32_t drm_format, uint64_t modifier, int
      * cap drops the frame and recreates the swapchain on the next commit. */
     VkResult wr = g_vk.WaitForFences(g_dev, 1, &g_fence, VK_TRUE, 2000000000ULL);
     if (wr != VK_SUCCESS) {
-        LOGE("present: fence wait failed (%d) - dropping frame; swapchain recreated next commit",
+        /* VK_TIMEOUT means the blit submit has NOT completed, so src/srcMem are
+         * still referenced by the queue: destroying them here is undefined
+         * behaviour (device hang or corruption on a still-reading GPU). Leak
+         * this one frame's import instead - it is bounded and the timeout is
+         * exceptional - and force a swapchain rebuild because g_acq/g_rnd state
+         * is no longer trustworthy after a stalled submit. */
+        LOGE("present: fence wait failed (%d) - dropping frame and leaving the "
+             "imported buffer alive (still in flight); swapchain recreated next commit",
              (int)wr);
         g_recreate = 1;
-        g_vk.FreeMemory(g_dev, srcMem, NULL);
-        g_vk.DestroyImage(g_dev, src, NULL);
         commit_end();
         return -1;
     }
@@ -510,11 +562,14 @@ int vk_present_commit_dmabuf(int fd, uint32_t drm_format, uint64_t modifier, int
 int vk_present_commit_shm(const void *data, int w, int h, int stride, uint32_t wl_format) {
     (void)wl_format; /* ARGB8888/XRGB8888 -> little-endian BGRA bytes == B8G8R8A8_UNORM */
     if (!data || w <= 0 || h <= 0) return -1;
+    /* Enter the in-flight section before touching the swapchain or the device;
+     * see the equivalent note in vk_present_commit_dmabuf(). */
+    commit_begin();
     pthread_mutex_lock(&g_lock);
     int have_win = g_window != NULL;
     pthread_mutex_unlock(&g_lock);
-    if (!have_win) return -1;
-    if (ensure_init() != 0) return -1;
+    if (!have_win) { commit_end(); return -1; }
+    if (ensure_init() != 0) { commit_end(); return -1; }
 
     VkImageCreateInfo ici = {
         .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D,
@@ -523,7 +578,9 @@ int vk_present_commit_shm(const void *data, int w, int h, int stride, uint32_t w
         .usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT, .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
         .initialLayout = VK_IMAGE_LAYOUT_PREINITIALIZED};
     VkImage src; VkDeviceMemory srcMem;
-    if (g_vk.CreateImage(g_dev, &ici, NULL, &src) != VK_SUCCESS) return -1;
+    if (g_vk.CreateImage(g_dev, &ici, NULL, &src) != VK_SUCCESS) {
+        commit_end(); return -1;
+    }
 
     VkMemoryRequirements req; g_vk.GetImageMemoryRequirements(g_dev, src, &req);
     VkPhysicalDeviceMemoryProperties mp; g_vk.GetPhysicalDeviceMemoryProperties(g_pd, &mp);
@@ -532,12 +589,12 @@ int vk_present_commit_shm(const void *data, int w, int h, int stride, uint32_t w
         if ((req.memoryTypeBits & (1u << i)) &&
             (mp.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) &&
             (mp.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) { idx = i; break; }
-    if (idx < 0) { g_vk.DestroyImage(g_dev, src, NULL); return -1; }
+    if (idx < 0) { g_vk.DestroyImage(g_dev, src, NULL); commit_end(); return -1; }
 
     VkMemoryAllocateInfo mai = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
                                 .allocationSize = req.size, .memoryTypeIndex = (uint32_t)idx};
     if (g_vk.AllocateMemory(g_dev, &mai, NULL, &srcMem) != VK_SUCCESS) {
-        g_vk.DestroyImage(g_dev, src, NULL); return -1;
+        g_vk.DestroyImage(g_dev, src, NULL); commit_end(); return -1;
     }
     g_vk.BindImageMemory(g_dev, src, srcMem, 0);
 
@@ -545,7 +602,8 @@ int vk_present_commit_shm(const void *data, int w, int h, int stride, uint32_t w
     VkSubresourceLayout lay; g_vk.GetImageSubresourceLayout(g_dev, src, &subr, &lay);
     void *map = NULL;
     if (g_vk.MapMemory(g_dev, srcMem, 0, req.size, 0, &map) != VK_SUCCESS) {
-        g_vk.FreeMemory(g_dev, srcMem, NULL); g_vk.DestroyImage(g_dev, src, NULL); return -1;
+        g_vk.FreeMemory(g_dev, srcMem, NULL); g_vk.DestroyImage(g_dev, src, NULL);
+        commit_end(); return -1;
     }
     int rowbytes = w * 4; if (stride < rowbytes) rowbytes = stride;
     for (int y = 0; y < h; y++)
@@ -554,7 +612,6 @@ int vk_present_commit_shm(const void *data, int w, int h, int stride, uint32_t w
     g_vk.UnmapMemory(g_dev, srcMem); /* coherent: visible to the queue at submit */
 
     uint32_t img = 0;
-    commit_begin();
     VkResult ar;
     {
         pthread_mutex_lock(&g_lock);
@@ -563,18 +620,29 @@ int vk_present_commit_shm(const void *data, int w, int h, int stride, uint32_t w
         if (g_recreate || (want_w > 0 && want_h > 0 &&
             (g_extent.width != (uint32_t)want_w || g_extent.height != (uint32_t)want_h))) {
             g_recreate = 0;
-            recreate_swapchain();
+            /* A failed recreate leaves g_swapchain NULL and g_images freed, so
+             * continuing would acquire on a NULL handle and blit into a freed
+             * image array. */
+            if (recreate_swapchain() != 0) {
+                g_recreate = 1;
+                commit_end();
+                g_vk.FreeMemory(g_dev, srcMem, NULL); g_vk.DestroyImage(g_dev, src, NULL);
+                return -1;
+            }
         }
     }
     ar = g_vk.AcquireNextImageKHR(g_dev, g_swapchain, 1000000000ULL, g_acq, VK_NULL_HANDLE, &img);
-    if (ar == VK_ERROR_OUT_OF_DATE_KHR || ar == VK_SUBOPTIMAL_KHR) {
+    if (ar == VK_ERROR_OUT_OF_DATE_KHR) {
+        /* Only OUT_OF_DATE leaves g_acq unsignalled; SUBOPTIMAL is a success code
+         * that already signalled it (see the dmabuf path for the full note). */
         if (recreate_swapchain() != 0) {
+            g_recreate = 1;
             commit_end();
             g_vk.FreeMemory(g_dev, srcMem, NULL); g_vk.DestroyImage(g_dev, src, NULL); return -1;
         }
         ar = g_vk.AcquireNextImageKHR(g_dev, g_swapchain, 1000000000ULL, g_acq, VK_NULL_HANDLE, &img);
     }
-    if (ar != VK_SUCCESS) {
+    if (ar != VK_SUCCESS && ar != VK_SUBOPTIMAL_KHR) {
         commit_end();
         g_vk.FreeMemory(g_dev, srcMem, NULL); g_vk.DestroyImage(g_dev, src, NULL); return -1;
     }
@@ -620,27 +688,48 @@ int vk_present_commit_shm(const void *data, int w, int h, int stride, uint32_t w
                        .pWaitSemaphores = &g_acq, .pWaitDstStageMask = &wait, .commandBufferCount = 1,
                        .pCommandBuffers = &g_cmd, .signalSemaphoreCount = 1, .pSignalSemaphores = &g_rnd};
     VkResult rr = g_vk.ResetFences(g_dev, 1, &g_fence);
-    if (rr != VK_SUCCESS) LOGE("present: ResetFences failed (%d)", rr);
+    if (rr != VK_SUCCESS) {
+        /* Same reasoning as the dmabuf path: a still-signalled fence would make
+         * the wait below return early and let the GPU-in-flight src be freed. */
+        LOGE("present: ResetFences failed (%d) - dropping frame", (int)rr);
+        g_recreate = 1;
+        g_vk.FreeMemory(g_dev, srcMem, NULL); g_vk.DestroyImage(g_dev, src, NULL);
+        commit_end(); return -1;
+    }
     VkResult sr = g_vk.QueueSubmit(g_queue, 1, &si, g_fence);
-    if (sr != VK_SUCCESS) LOGE("present: QueueSubmit failed (%d)", sr);
+    if (sr != VK_SUCCESS) {
+        /* g_rnd is only signalled by a successful submit; presenting would wait
+         * on a semaphore that never signals and wedge the queue. */
+        LOGE("present: QueueSubmit failed (%d) - dropping frame", (int)sr);
+        g_recreate = 1;
+        g_vk.FreeMemory(g_dev, srcMem, NULL); g_vk.DestroyImage(g_dev, src, NULL);
+        commit_end(); return -1;
+    }
 
     VkPresentInfoKHR pi = {.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .waitSemaphoreCount = 1,
                            .pWaitSemaphores = &g_rnd, .swapchainCount = 1,
                            .pSwapchains = &g_swapchain, .pImageIndices = &img};
     sr = g_vk.QueuePresentKHR(g_queue, &pi);
     if (sr != VK_SUCCESS && sr != VK_SUBOPTIMAL_KHR)
-        LOGE("present: QueuePresentKHR failed (%d)", sr);
+        LOGE("present: QueuePresentKHR failed (%d)", (int)sr);
+    /* SUBOPTIMAL still presented a valid frame; rebuild the swapchain next commit. */
+    if (ar == VK_SUBOPTIMAL_KHR || sr == VK_SUBOPTIMAL_KHR)
+        g_recreate = 1;
     /* Bounded fence wait only (same rationale as the dmabuf path): the fence covers
      * the blit submit, so the old QueueWaitIdle() was redundant and could stall the
      * Wayland dispatch thread forever on a wedged queue. A 2s cap drops the frame
      * and recreates the swapchain on the next commit. */
     VkResult wr = g_vk.WaitForFences(g_dev, 1, &g_fence, VK_TRUE, 2000000000ULL);
     if (wr != VK_SUCCESS) {
-        LOGE("present: fence wait failed (%d) - dropping frame; swapchain recreated next commit",
+        /* VK_TIMEOUT: the blit submit has not completed, so src/srcMem are still
+         * referenced by the queue and destroying them is undefined behaviour.
+         * Leak this one frame's upload instead (bounded, and only on a stalled
+         * GPU) and force a swapchain rebuild since g_acq/g_rnd state is no longer
+         * trustworthy. */
+        LOGE("present: fence wait failed (%d) - dropping frame and leaving the "
+             "uploaded buffer alive (still in flight); swapchain recreated next commit",
              (int)wr);
         g_recreate = 1;
-        g_vk.FreeMemory(g_dev, srcMem, NULL);
-        g_vk.DestroyImage(g_dev, src, NULL);
         commit_end();
         return -1;
     }
