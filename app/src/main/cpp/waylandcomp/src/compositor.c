@@ -765,10 +765,13 @@ static void bind_dmabuf(struct wl_client *c, void *data, uint32_t ver,
 static void output_send_current(struct wl_resource *r) {
     int w = g_out_w > 0 ? g_out_w : 1920;
     int h = g_out_h > 0 ? g_out_h : 1080;
-    /* Physical size is reported in millimetres and is only used for DPI heuristics; derive it
-     * from the real output size at the conventional 96 dpi instead of the old fixed 340x190
-     * (which described a 1920x1080 panel at ~56 dpi). */
-    wl_output_send_geometry(r, 0, 0, (w * 254 + 4800) / 9600, (h * 254 + 4800) / 9600,
+    /* Physical size is reported in millimetres and is only used for DPI heuristics. Derive it
+     * from the real output size at the conventional 96 dpi: mm = px * 25.4 / 96, i.e.
+     * px * 254 / 960 with +(960/2) for rounding. The original code hardcoded 340x190 mm for a
+     * 1920x1080 mode, which describes a ~143 dpi panel rather than a 96 dpi one; my first
+     * attempt at deriving it used /9600 and produced 52 mm (~940 dpi), which is worse. Wine
+     * reads this to scale window sizes, so a nonsense value here changes what the guest draws. */
+    wl_output_send_geometry(r, 0, 0, (w * 254 + 480) / 960, (h * 254 + 480) / 960,
                             WL_OUTPUT_SUBPIXEL_UNKNOWN,
                             "Bannerlator", "Wayland-spike",
                             WL_OUTPUT_TRANSFORM_NORMAL);
