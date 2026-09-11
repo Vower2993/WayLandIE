@@ -38,6 +38,14 @@ public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Cal
     private volatile int width;
     private volatile int height;
     private volatile boolean waylandMode;
+    /**
+     * The guest's desktop size, i.e. the coordinate space wl_output must advertise and that
+     * pointer input arrives in. Set by the activity (it is the container's screenSize, the same
+     * value the guest is launched with as /desktop=shell,WxH). Applied when the compositor
+     * starts so the size is in place before any client can bind wl_output.
+     */
+    private volatile int waylandOutputW = 0;
+    private volatile int waylandOutputH = 0;
     // Wayland dmabuf frame (set by bridge, consumed by render thread)
     private volatile int wlDmabufFd = -1;
     private volatile int wlWidth = 0;
@@ -98,6 +106,8 @@ public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Cal
      */
     public void setWaylandOutputSize(int width, int height) {
         if (width <= 0 || height <= 0) return;
+        this.waylandOutputW = width;
+        this.waylandOutputH = height;
         try {
             com.winlator.cmod.runtime.display.environment.components.WaylandBridgeServer
                 .nativeCompositorSetOutputSize(width, height);
@@ -252,7 +262,23 @@ public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Cal
         // No System.loadLibrary — avoids KSP bug with Java static initializers.
         if (waylandMode) {
             try {
+                // Logged BEFORE anything else so this line is a positive marker that the
+                // compositor-startup block was entered at all. A prior hypothesis ("setupUI
+                // never reaches the wayland branch") was wrong: setWaylandMode(true) runs, so
+                // this block runs, yet set_output_size was never logged from the compositor -
+                // so the size declaration is logged here, at the point where the compositor
+                // actually starts, rather than inferred from the other end.
+                android.util.Log.i("XServerSurfaceView",
+                    "surfaceCreated: compositor start; waylandOutput=" + waylandOutputW
+                        + "x" + waylandOutputH);
                 String rtDir = getContext().getFilesDir().getAbsolutePath() + "/imagefs/usr/tmp/runtime";
+                // Declare the output size here as well as from setupUI. This is the point where
+                // the compositor is about to start and the guest has not been launched yet, so
+                // it guarantees wl_output advertises the real desktop size even if the earlier
+                // call is lost. Harmless if redundant: the native side ignores a no-op change.
+                if (waylandOutputW > 0 && waylandOutputH > 0) {
+                    setWaylandOutputSize(waylandOutputW, waylandOutputH);
+                }
                 String nativeLibDir = getContext().getApplicationInfo().nativeLibraryDir;
 
                 // Resolve the Turnip driver path. The OLD hardcoded path
