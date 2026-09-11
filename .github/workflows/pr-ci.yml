@@ -177,6 +177,16 @@ jobs:
         export KEYSTORE_FILE="${{ github.workspace }}/release.jks"
         if [ -n "$KEYSTORE_BASE64" ]; then
           echo "$KEYSTORE_BASE64" | base64 -d > "$KEYSTORE_FILE"
+          # A decoded keystore still needs its credentials. Previously this branch
+          # read them ONLY from secrets.KEYSTORE_PASSWORD/KEY_ALIAS/KEY_PASSWORD, so
+          # setting KEYSTORE_BASE64 on its own left the password empty and the build
+          # died at :app:packagePubgDebug with
+          #   Failed to read key '' from store "release.jks": keystore password was incorrect
+          # Fall back to the same CI test credentials the throwaway branch below uses,
+          # unless real ones are supplied.
+          if [ -z "$KEYSTORE_PASSWORD" ]; then export KEYSTORE_PASSWORD="dummypass"; fi
+          if [ -z "$KEY_ALIAS" ]; then export KEY_ALIAS="winnative"; fi
+          if [ -z "$KEY_PASSWORD" ]; then export KEY_PASSWORD="dummypass"; fi
         else
           export KEYSTORE_PASSWORD="dummypass"
           export KEY_ALIAS="winnative"
