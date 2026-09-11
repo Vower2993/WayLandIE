@@ -29,6 +29,7 @@
 
 #define WLOGI(...) __android_log_print(ANDROID_LOG_INFO, "BannerWayland", __VA_ARGS__)
 #define WLOGE(...) __android_log_print(ANDROID_LOG_ERROR, "BannerWayland", __VA_ARGS__)
+#define WLOGW(...) __android_log_print(ANDROID_LOG_WARN, "BannerWayland", __VA_ARGS__)
 
 #ifndef BTN_LEFT
 #define BTN_LEFT 0x110  /* linux/input-event-codes.h */
@@ -924,9 +925,22 @@ int banner_wayland_run(void) {
     fprintf(stderr, "[srv] globals: wl_compositor v6, wl_shm, wl_output v2, "
                     "xdg_wm_base v1, zwp_linux_dmabuf_v1 v3\n");
     fflush(stderr);
+    WLOGI("compositor READY: listening on %s/%s (socket now exists on disk)",
+          rt ? rt : "(null)", socket);
 
-    wl_display_run(display); /* blocks, dispatches the event loop */
+    /* wl_display_run() returns when the event loop exits, which can happen if a
+     * client sends a fatal error or the socket becomes unusable. Log the return
+     * and an explicit "socket gone" line, because wl_display_destroy() UNLINKS the
+     * socket: without this, a disappeared wayland-0 is ambiguous between "the app
+     * deleted it" and "the compositor exited and unlinked it", and those need
+     * different fixes. */
+    int rc = wl_display_run(display);
+    WLOGW("compositor event loop RETURNED rc=%d - the compositor is stopping and "
+          "wl_display_destroy() will unlink %s/%s", rc, rt ? rt : "(null)", socket);
 
     wl_display_destroy(display);
+    WLOGW("compositor destroyed; %s/%s has been unlinked. If the guest had not "
+          "connected yet, it will now fail with wl_display_connect errno=2.",
+          rt ? rt : "(null)", socket);
     return 0;
 }
