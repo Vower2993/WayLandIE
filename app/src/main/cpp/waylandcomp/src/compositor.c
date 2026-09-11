@@ -508,30 +508,45 @@ static void present_committed_buffer(struct wl_resource *buffer) {
         if (data && w > 0 && h > 0) {
             g_vis_w = w; g_vis_h = h;
             /* Evidence for "the output is black": is the CLIENT's buffer black, or is our
-             * upload/blit producing black? Sample the buffer once every 2s (not per frame -
-             * it is a full CPU read of the surface and would eat the frame budget) and report
-             * the byte statistics. allzero=1 with nonzero_bytes=0 means Wine painted black;
-             * nonzero_bytes>0 means the desktop HAS content and the fault is in our path. */
-            static double last_shm_stat;
-            struct timespec ts;
-            clock_gettime(CLOCK_MONOTONIC, &ts);
-            double now = ts.tv_sec + ts.tv_nsec / 1e9;
-            if (now - last_shm_stat >= 2.0) {
-                last_shm_stat = now;
+             * upload/blit producing black? Sample per distinct buffer SIZE (a plain 2s
+             * time throttle sampled whichever surface happened to commit first and hid
+             * every other one - the 1280x128 taskbar got measured while the 1024x640
+             * desktop never did). Sampling is a full CPU read of the surface, so cap it
+             * at a few samples per size rather than doing it every frame.
+             *
+             * Read the B,G,R bytes only: winewayland uses WL_SHM_FORMAT_XRGB8888 (=1),
+             * where the 4th byte is X padding and is legitimately 0 - counting it as
+             * "alpha" produced a meaningless alpha_ff=0 that looked like a bug.
+             * nonzero_px==0 means the client really did paint black. */
+            #define STAT_SIZES 8
+            #define STAT_MAX_PER_SIZE 3
+            static struct { int w, h, n; } seen[STAT_SIZES];
+            static int nseen;
+            int slot = -1;
+            for (int i = 0; i < nseen; i++)
+                if (seen[i].w == w && seen[i].h == h) { slot = i; break; }
+            if (slot < 0 && nseen < STAT_SIZES) {
+                slot = nseen++;
+                seen[slot].w = w; seen[slot].h = h; seen[slot].n = 0;
+            }
+            if (slot >= 0 && seen[slot].n < STAT_MAX_PER_SIZE) {
+                seen[slot].n++;
                 const unsigned char *px = (const unsigned char *)data;
-                long nz = 0, al = 0;
-                long total = 0;
+                long nz = 0, total = 0;
+                long first_nz_x = -1, first_nz_y = -1;
                 for (int y = 0; y < h; y += 16)
                     for (int x = 0; x < w; x += 16) {
                         const unsigned char *p = px + (size_t)y * stride + (size_t)x * 4;
-                        unsigned char b0 = p[0], b1 = p[1], b2 = p[2], b3 = p[3];
-                        if (b0 || b1 || b2) nz++;
-                        if (b3 == 0xff) al++;
+                        if (p[0] || p[1] || p[2]) {
+                            nz++;
+                            if (first_nz_x < 0) { first_nz_x = x; first_nz_y = y; }
+                        }
                         total++;
                     }
-                WLOGI("shm.stats %dx%d stride=%d wl_fmt=%u sampled=%ld nonzero_px=%ld pct=%d%% "
-                      "alpha_ff=%ld", w, h, stride, wl_shm_buffer_get_format(shm), total, nz,
-                      total ? (int)(nz * 100 / total) : 0, al);
+                WLOGI("shm.stats #%d %dx%d stride=%d wl_fmt=%u sampled=%ld nonzero_px=%ld pct=%d%% "
+                      "first_nz=(%ld,%ld)", seen[slot].n, w, h, stride,
+                      wl_shm_buffer_get_format(shm), total, nz,
+                      total ? (int)(nz * 100 / total) : 0, first_nz_x, first_nz_y);
             }
             vk_present_commit_shm(data, w, h, stride, wl_shm_buffer_get_format(shm));
         }
