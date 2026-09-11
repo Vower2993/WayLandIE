@@ -217,6 +217,99 @@ with open('dlls/winewayland.drv/window_surface.c', 'w') as f:
 print("  [window_surface.c] NtGdiGetRegionData neutralized")
 PYNTGDI
 
+    # === FIX: copy_pixel_region must not silently do nothing when region data is absent ===
+    #
+    # Derived from upstream, not from any comment in this repo.
+    #
+    # Wine's copy_pixel_region (dlls/winewayland.drv/window_surface.c) is:
+    #
+    #     RGNDATA *rgndata = get_region_data(region);
+    #     ...
+    #     if (!rgndata) return;                       <-- returns having copied NOTHING
+    #     rgn_rect = (RECT *)rgndata->Buffer;
+    #     rgn_rect_end = rgn_rect + rgndata->rdh.nCount;
+    #     for (;rgn_rect < rgn_rect_end; rgn_rect++) { ...memcpy... }
+    #
+    # Every copy in that function lives inside the region loop, so a NULL rgndata means the
+    # destination buffer is never written. get_region_data() returns NULL as soon as
+    #     if (!(size = NtGdiGetRegionData(region, 0, NULL))) return NULL;
+    #
+    # The patch above neutralises NtGdiGetRegionData (it makes it evaluate to 0) to avoid a
+    # re-entrancy crash while the USER lock is held. Its stated intent was "skip the precise
+    # damage-region copy and do a full-frame copy instead" - but no full-frame copy exists, so
+    # the real effect is that wayland_shm_buffer_copy_data() copies nothing and every committed
+    # wl_shm buffer is zeroed. That matches the measured evidence exactly: three unrelated
+    # windows (1280x128 taskbars, 1024x640 wfm.exe, 1280x768 winemine) all commit 100% zero
+    # bytes while Wine still reports running the copy over the full surface.
+    #
+    # The fix keeps the crash avoidance (NtGdiGetRegionData is still never called) and restores
+    # the copy by falling back to the full destination extent when region data is unavailable.
+    # This is deliberately conservative: allocating a fresh damage region costs memory and can
+    # fail, reintroducing exactly the silent-zero problem; copying the whole buffer is always
+    # well-defined, is what the neutralisation intended, and cannot fail.
+    echo "  Patching window_surface.c: copy_pixel_region full-extent fallback"
+    python3 << 'PYFALLBACK'
+with open('dlls/winewayland.drv/window_surface.c', 'r') as f:
+    c = f.read()
+
+old = """    RGNDATA *rgndata = get_region_data(region);
+    RECT *rgn_rect;
+    RECT *rgn_rect_end;
+    int src_stride, dst_stride;
+
+    if (!rgndata) return;
+"""
+
+new = """    RGNDATA *rgndata = get_region_data(region);
+    RECT *rgn_rect;
+    RECT *rgn_rect_end;
+    int src_stride, dst_stride;
+
+    if (!rgndata)
+    {
+        /* WayLandIE: region data is unavailable (NtGdiGetRegionData is neutralised to avoid a
+         * re-entrancy crash while the USER lock is held - see build-winewayland-driver.sh).
+         * Upstream returns here, having copied nothing, which leaves the wl_shm buffer zeroed
+         * and the desktop black. Fall back to copying the whole overlapping extent so the
+         * client receives real pixels; damage tracking is simply not applied. */
+        RECT full;
+        int row, width, height;
+
+        if (!intersect_rect(&full, src_rect, dst_rect)) return;
+        width = full.right - full.left;
+        height = full.bottom - full.top;
+        if (width <= 0 || height <= 0) return;
+
+        src_stride = (src_rect->right - src_rect->left) * bpp;
+        dst_stride = (dst_rect->right - dst_rect->left) * bpp;
+
+        for (row = 0; row < height; row++)
+        {
+            const char *src = src_pixels + (full.top - src_rect->top + row) * src_stride
+                            + (full.left - src_rect->left) * bpp;
+            char *dst = dst_pixels + (full.top - dst_rect->top + row) * dst_stride
+                      + (full.left - dst_rect->left) * bpp;
+            if (force_opaque)
+            {
+                int x;
+                for (x = 0; x < width; x++)
+                    ((UINT32 *)dst)[x] = ((UINT32 *)src)[x] | 0xff000000;
+            }
+            else memcpy(dst, src, width * 4);
+        }
+        return;
+    }
+"""
+
+if old not in c:
+    print("  WARNING: copy_pixel_region preamble not found verbatim; fallback NOT applied")
+    print("           (upstream source may have changed - check the actual file)")
+else:
+    c = c.replace(old, new, 1)
+    with open('dlls/winewayland.drv/window_surface.c', 'w') as f:
+        f.write(c)
+    print("  [window_surface.c] copy_pixel_region full-extent fallback applied")
+
     # === Instrument wayland_shm_buffer_copy_data: is the SOURCE surface painted? ===
     #
     # This settles the one question the desktop work has been stuck on. On-device evidence:
