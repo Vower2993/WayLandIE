@@ -54,8 +54,13 @@ public class WaylandBridgeServer {
     // In-process Wayland compositor (Bannerlator architecture).
     // Implemented in waylandie_display_native.c via dlopen("libwaylandie_comp.so").
     // No System.loadLibrary needed — dlopen + dlsym calls the compositor directly.
+    // outWidth/outHeight are the guest desktop size (the container's screenSize, which is also
+    // what the guest is launched with as `/desktop=shell,WxH`). Passing them here declares
+    // wl_output before the compositor thread starts, so it cannot advertise the built-in
+    // 1920x1080 default to the first client that binds.
     public static native boolean nativeStartCompositor(android.view.Surface surface,
-        String xdgRuntimeDir, String driverPath, String libraryName, String nativeLibDir);
+        String xdgRuntimeDir, String driverPath, String libraryName, String nativeLibDir,
+        int outWidth, int outHeight);
     public static native void nativeStopCompositor();
     // Android surface size changed (rotation/resize) -> swapchain recreation.
     public static native void nativeCompositorSurfaceChanged(int width, int height);

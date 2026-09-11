@@ -272,13 +272,6 @@ public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Cal
                     "surfaceCreated: compositor start; waylandOutput=" + waylandOutputW
                         + "x" + waylandOutputH);
                 String rtDir = getContext().getFilesDir().getAbsolutePath() + "/imagefs/usr/tmp/runtime";
-                // Declare the output size here as well as from setupUI. This is the point where
-                // the compositor is about to start and the guest has not been launched yet, so
-                // it guarantees wl_output advertises the real desktop size even if the earlier
-                // call is lost. Harmless if redundant: the native side ignores a no-op change.
-                if (waylandOutputW > 0 && waylandOutputH > 0) {
-                    setWaylandOutputSize(waylandOutputW, waylandOutputH);
-                }
                 String nativeLibDir = getContext().getApplicationInfo().nativeLibraryDir;
 
                 // Resolve the Turnip driver path. The OLD hardcoded path
@@ -331,7 +324,8 @@ public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Cal
                 boolean compStarted =
                     com.winlator.cmod.runtime.display.environment.components.WaylandBridgeServer
                         .nativeStartCompositor(holder.getSurface(), rtDir,
-                            driverPath, libraryName, nativeLibDir);
+                            driverPath, libraryName, nativeLibDir,
+                            waylandOutputW, waylandOutputH);
                 if (!compStarted) {
                     // The compositor library failed to load (e.g. libwaylandie_comp.so absent
                     // from the APK) or its thread could not start. Nothing downstream recovers

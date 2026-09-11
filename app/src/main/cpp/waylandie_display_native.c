@@ -6016,12 +6016,19 @@ static void *comp_thread_func(void *arg) {
 }
 
 /* JNI: Start the in-process Wayland compositor.
- * Called from WaylandBridgeServer.nativeStartCompositor() */
+ * Called from WaylandBridgeServer.nativeStartCompositor().
+ *
+ * outWidth/outHeight are the guest desktop size (the container's screenSize, which is also what
+ * the guest is launched with as `/desktop=shell,WxH`). They are passed here rather than applied
+ * through a separate nativeCompositorSetOutputSize() call so the size is in place at the exact
+ * moment the compositor starts, before any client can bind wl_output - see the comment at the
+ * g_set_output_size call below for why the separate call proved unreliable. */
 JNIEXPORT jboolean JNICALL
 Java_com_winlator_cmod_runtime_display_environment_components_WaylandBridgeServer_nativeStartCompositor(
         JNIEnv* env, jclass clazz,
         jobject surface, jstring xdgRuntimeDir,
-        jstring driverPath, jstring libraryName, jstring nativeLibDir) {
+        jstring driverPath, jstring libraryName, jstring nativeLibDir,
+        jint outWidth, jint outHeight) {
     (void)clazz;
 
     if (g_comp_handle) {
@@ -6089,6 +6096,15 @@ Java_com_winlator_cmod_runtime_display_environment_components_WaylandBridgeServe
      * space instead of a hardcoded 1920x1080. A missing symbol degrades to that default. */
     g_set_output_size = (banner_set_output_size_fn)dlsym(g_comp_handle,
                                                          "banner_wayland_set_output_size");
+    /* Report the resolved pointer unconditionally. Previously a missing symbol only produced a
+     * warning, and the observed combination - Java reporting the call as successful while the
+     * native side never logged anything - was consistent with BOTH "symbol is NULL so the JNI
+     * shim no-ops" and "the symbol resolved but the call never happened", which could not be
+     * told apart from the logs. Logging the pointer removes that ambiguity for good. */
+    __android_log_print(ANDROID_LOG_INFO, "WaylandBridgeServer",
+        "compositor symbols: run=%p set_window=%p send_pointer=%p send_key=%p set_output_size=%p",
+        (void*)g_banner_run, (void*)g_set_window, (void*)g_send_pointer, (void*)g_send_key,
+        (void*)g_set_output_size);
     if (!g_set_output_size)
         __android_log_print(ANDROID_LOG_WARN, "WaylandBridgeServer",
             "banner_wayland_set_output_size missing - pointer coords will be mapped "
@@ -6157,6 +6173,27 @@ Java_com_winlator_cmod_runtime_display_environment_components_WaylandBridgeServe
             g_comp_window = win;
             __android_log_print(ANDROID_LOG_INFO, "WaylandBridgeServer",
                 "Compositor output window set: %p", (void*)win);
+        }
+    }
+
+    /* Declare the guest's desktop size BEFORE the compositor thread starts, so wl_output
+     * advertises the real screen from the first client bind. Passing it into this call removes
+     * a whole class of failure: a separate nativeCompositorSetOutputSize() JNI call reaches the
+     * compositor only through the g_set_output_size function pointer, and that pointer being
+     * NULL degrades silently - the JNI shim returns as a success and Java reports "native OK"
+     * while wl_output keeps advertising the built-in 1920x1080 default. Here the size travels
+     * with a call whose success is already observable (the compositor demonstrably starts). */
+    if (outWidth > 0 && outHeight > 0) {
+        if (g_set_output_size) {
+            g_set_output_size((int)outWidth, (int)outHeight);
+            __android_log_print(ANDROID_LOG_INFO, "WaylandBridgeServer",
+                "compositor output size set to %dx%d at start-up", (int)outWidth, (int)outHeight);
+        } else {
+            /* Loud, not silent: this is exactly the failure that cost several cycles. */
+            __android_log_print(ANDROID_LOG_ERROR, "WaylandBridgeServer",
+                "cannot declare output size %dx%d: banner_wayland_set_output_size unresolved; "
+                "wl_output will advertise the 1920x1080 default and the guest will size its "
+                "windows against the wrong screen", (int)outWidth, (int)outHeight);
         }
     }
 
