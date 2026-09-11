@@ -707,19 +707,38 @@ static void bind_dmabuf(struct wl_client *c, void *data, uint32_t ver,
 
 /* ------------------------------------------------------------------ wl_output */
 
+/* Push the current state to one wl_output resource, in the order the protocol requires:
+ * geometry, mode, scale, then done - `done` is the "these events form one atomic update"
+ * marker, so sending it before scale would publish an incomplete state. */
+static void output_send_current(struct wl_resource *r) {
+    int w = g_out_w > 0 ? g_out_w : 1920;
+    int h = g_out_h > 0 ? g_out_h : 1080;
+    /* Physical size is reported in millimetres and is only used for DPI heuristics; derive it
+     * from the real output size at the conventional 96 dpi instead of the old fixed 340x190
+     * (which described a 1920x1080 panel at ~56 dpi). */
+    wl_output_send_geometry(r, 0, 0, (w * 254 + 4800) / 9600, (h * 254 + 4800) / 9600,
+                            WL_OUTPUT_SUBPIXEL_UNKNOWN,
+                            "Bannerlator", "Wayland-spike",
+                            WL_OUTPUT_TRANSFORM_NORMAL);
+    /* The advertised mode MUST match the space the guest desktop is actually created in.
+     * This was hardcoded 1920x1080 while the guest is launched as
+     * `wine explorer /desktop=shell,1280x720`, so every client - including winewayland, which
+     * derives its notion of the screen from wl_output - was told the wrong screen size. */
+    wl_output_send_mode(r, WL_OUTPUT_MODE_CURRENT | WL_OUTPUT_MODE_PREFERRED,
+                        w, h, 60000);
+    if (wl_resource_get_version(r) >= 2) {
+        wl_output_send_scale(r, 1);
+        wl_output_send_done(r);
+    }
+}
+
 static void bind_output(struct wl_client *c, void *data, uint32_t ver,
                         uint32_t id) {
     struct wl_resource *r = wl_resource_create(c, &wl_output_interface, ver, id);
     wl_resource_set_implementation(r, NULL, NULL, NULL);
-    wl_output_send_geometry(r, 0, 0, 340, 190, WL_OUTPUT_SUBPIXEL_UNKNOWN,
-                            "Bannerlator", "Wayland-spike",
-                            WL_OUTPUT_TRANSFORM_NORMAL);
-    wl_output_send_mode(r, WL_OUTPUT_MODE_CURRENT | WL_OUTPUT_MODE_PREFERRED,
-                        1920, 1080, 60000);
-    if (ver >= 2) {
-        wl_output_send_scale(r, 1);
-        wl_output_send_done(r);
-    }
+    output_send_current(r);
+    WLOGI("wl_output advertised %dx%d (scale 1)",
+          g_out_w > 0 ? g_out_w : 1920, g_out_h > 0 ? g_out_h : 1080);
 }
 
 /* ------------------------------------------------------------------ wl_seat
@@ -877,27 +896,63 @@ static void deliver_key(const struct input_msg *m) {
     wl_display_flush_clients(g_display);
 }
 
-/* wl event-loop callback: drain queued input events written by the Android UI thread. */
+/* Compositor thread only. Re-advertise wl_output to every client that already bound it.
+ * Clients that connected before the size was known were told the default mode, and
+ * winewayland derives its notion of the screen from wl_output. Java sets the size in
+ * setupUI() (before any client connects), so this normally finds nothing to do; it matters
+ * on a rotation/resize where the surface is recreated while clients stay attached. */
+static void notify_outputs_of_size(void) {
+    if (!g_display) return;
+    struct wl_client *client;
+    struct wl_resource *res;
+    int n = 0;
+    wl_client_for_each(client, wl_display_get_client_list(g_display)) {
+        wl_resource_for_each(res, client) {
+            if (!res || !wl_resource_instance_of(res, &wl_output_interface, NULL)) continue;
+            output_send_current(res);
+            n++;
+        }
+    }
+    if (n) WLOGI("re-advertised wl_output to %d bound resource(s)", n);
+}
+
+/* Compositor thread only (dispatched from on_input_readable). */
+static void apply_output_size(int w, int h) {
+    if (w <= 0 || h <= 0) return;
+    if (w == g_out_w && h == g_out_h) return;
+    g_out_w = w;
+    g_out_h = h;
+    WLOGI("output size set to %dx%d (pointer input space + wl_output mode)", w, h);
+    notify_outputs_of_size();
+}
+
+/* wl event-loop callback: drain queued input events written by the Android UI thread.
+ * Negative types are control messages rather than input and are handled here so that every
+ * libwayland send happens on the compositor thread (libwayland is not thread-safe). */
 static int on_input_readable(int fd, uint32_t mask, void *data) {
     struct input_msg m;
     while (read(fd, &m, sizeof(m)) == (ssize_t)sizeof(m)) {
-        if (m.type == 1) deliver_key(&m);
+        if (m.type == -1) apply_output_size(m.p2, m.p3);
+        else if (m.type == 1) deliver_key(&m);
         else deliver_pointer(&m);
     }
     return 0;
 }
 
-/* Called from JNI (any thread). Sets the coordinate space that Android pointer input arrives
- * in. Java passes the guest's screen size (the container's `screenSize`, which is also what
- * winewayland is launched with as `/desktop=shell,WxH`). Without this the mapping used a
- * hardcoded 1920x1080, so every click was scaled through the wrong ratio and landed in the
- * wrong place. Only the compositor thread reads these, and an int write is atomic enough for
- * a diagnostic-grade mapping; the values are set once at surface creation. */
+/* Called from JNI (any thread). Queues the output-size change for the compositor thread.
+ * Sending wl_output events directly from here would touch libwayland from a foreign thread,
+ * which is not safe; the compositor's input pipe already exists to marshal exactly this kind
+ * of UI-thread -> event-loop work. */
 void banner_wayland_set_output_size(int w, int h) {
     if (w <= 0 || h <= 0) return;
-    g_out_w = w;
-    g_out_h = h;
-    WLOGI("output size set to %dx%d (pointer input space)", w, h);
+    if (g_input_pipe[1] < 0) { /* no event loop yet: bind_output() reads these directly */
+        g_out_w = w;
+        g_out_h = h;
+        return;
+    }
+    struct input_msg m = { -1, 0, w, h };
+    ssize_t n = write(g_input_pipe[1], &m, sizeof(m));
+    (void)n;
 }
 
 /* Called from JNI (Android UI thread). Queues a pointer event; the compositor thread

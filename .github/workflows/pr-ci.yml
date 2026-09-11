@@ -214,11 +214,25 @@ jobs:
           # Only match "(#NNN)" with parentheses to avoid matching "CI #197" etc.
           num=$(git log -1 --pretty=%s | grep -oE '\(#[0-9]+\)' | tail -1 | tr -cd '0-9')
           if [ -n "$num" ]; then
+            # A "(#N)" in any commit subject is indistinguishable from a merge reference, and
+            # this repository's commits cite issue/defect numbers the same way, so PR #N very
+            # often does not exist. `gh api` then prints a JSON error object on stdout and the
+            # old code pasted that straight into the artifact name, producing
+            #   WinNative-Debug-Pubg-PR10-{"mes.apk
+            # which made `cp` fail and the whole job fail after a successful build. Only
+            # accept the response when it really is the sha we asked for.
             pr_head_sha=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$num" --jq '.head.sha' 2>/dev/null || true)
-            if [ -n "$pr_head_sha" ] && [ "$pr_head_sha" != "null" ]; then
+            case "$pr_head_sha" in
+              [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*) ;;
+              *) pr_head_sha="" ;;
+            esac
+            if [ -n "$pr_head_sha" ]; then
               short_sha=$(printf '%s' "$pr_head_sha" | cut -c1-5)
+              echo "name=PR${num}-${short_sha}" >> "$GITHUB_OUTPUT"
+            else
+              # Not a real PR: label by commit sha like any other main build.
+              echo "name=main-${short_sha}" >> "$GITHUB_OUTPUT"
             fi
-            echo "name=PR${num}-${short_sha}" >> "$GITHUB_OUTPUT"
           else
             echo "name=main-${short_sha}" >> "$GITHUB_OUTPUT"
           fi
