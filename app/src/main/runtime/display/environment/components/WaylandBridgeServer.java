@@ -578,14 +578,57 @@ public class WaylandBridgeServer {
             // ASurfaceTransaction_setGeometry, so the earlier concern about inheriting the
             // SurfaceView's scale transform is handled by that explicit destination rect.
             SurfaceControl parent = null;
+            String parentSource = "none";
+            // AOSP's NDK header for ASurfaceTransaction_reparent is explicit:
+            //   "The new_parent can be null. Surface controls with a null parent do not
+            //    appear on the display."
+            // and the measured dumpsys confirms it: this layer sat as the last entry of
+            // the top-level hierarchy list (a sibling of Task=..., not a child of the
+            // activity), with a resolved transform, a live buffer and valid geometry -
+            // and was still not composited.
+            //
+            // So the parent is not optional. Resolve one, in descending order of
+            // correctness, and RECORD which one was used so the next dumpsys can be read
+            // against a known parent instead of guessed at.
+            //
+            //   1. Window#getRootSurfaceControl() (public since API 29) - resolves through
+            //      the activity's window. This is the SurfaceControl ViewRootImpl hands to
+            //      WindowManager, i.e. the app window's own layer, whose coordinate space
+            //      matches the window size the native destination rect (0,0,2340,1080) is
+            //      expressed in. Reached by reflection because the view is a SurfaceView
+            //      whose Context may be a ContextThemeWrapper rather than the Activity.
+            //   2. hostView.getSurfaceControl() - the SurfaceView's own child layer (public
+            //      since API 29). Usable, but its space carries the SurfaceView's placement
+            //      inside the hierarchy, so the destination rect would need re-deriving.
             try {
-                parent = hostView.getSurfaceControl();
+                android.view.Window w = null;
+                android.content.Context c = hostView.getContext();
+                if (c instanceof android.app.Activity) {
+                    w = ((android.app.Activity) c).getWindow();
+                }
+                if (w != null) {
+                    java.lang.reflect.Method m =
+                            android.view.Window.class.getMethod("getRootSurfaceControl");
+                    Object o = m.invoke(w);
+                    if (o instanceof SurfaceControl) {
+                        parent = (SurfaceControl) o;
+                        parentSource = "window-root";
+                    }
+                }
             } catch (Throwable t) {
-                Log.w(TAG, "presentLayer: hostView.getSurfaceControl() failed", t);
+                Log.w(TAG, "presentLayer: Window#getRootSurfaceControl unavailable: " + t);
             }
             if (parent == null) {
-                Log.w(TAG, "presentLayer: no host SurfaceControl — layer will be unparented "
-                        + "and may never be composited");
+                try {
+                    parent = hostView.getSurfaceControl();
+                    if (parent != null) parentSource = "surfaceview";
+                } catch (Throwable t) {
+                    Log.w(TAG, "presentLayer: hostView.getSurfaceControl() failed", t);
+                }
+            }
+            if (parent == null) {
+                Log.w(TAG, "presentLayer: NO parent SurfaceControl available — per AOSP this "
+                        + "layer will not appear on the display at all");
             }
             presentLayer = new SurfaceControl.Builder()
                 .setName("WayLandIELinuxWindowLayer:waylandie-present")
@@ -629,7 +672,7 @@ public class WaylandBridgeServer {
             txn.apply();
             Log.i(TAG, "Created presentLayer: " + layerW + "x" + layerH
                     + " (source=" + w + "x" + h + ")"
-                    + (parent != null ? " parented to host SurfaceControl" : " UNPARENTED"));
+                    + " parent=" + parentSource);
         } catch (Exception e) {
             Log.e(TAG, "Failed to create presentLayer", e);
         }

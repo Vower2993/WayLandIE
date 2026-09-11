@@ -5521,17 +5521,31 @@ Java_com_winlator_cmod_runtime_display_environment_components_WaylandBridgeServe
             transaction,
             surface_control,
             ASURFACE_TRANSACTION_VISIBILITY_SHOW);
-    /* Use OPAQUE transparency + full alpha so SurfaceFlinger actually
-     * composites the buffer. The previous TRANSLUCENT + 0.999 alpha
-     * caused the presentLayer to render as invisible/black on some
-     * devices because the parent SurfaceView (XServerSurfaceView) has
-     * no content in Wayland mode (render thread is skipped) — there's
-     * no opaque background behind the presentLayer, so a translucent
-     * layer composites against empty/black parent content. */
+    /* Transparency selection.
+     *
+     * AOSP frameworks/native/include/android/surface_control.h defines:
+     *   ASURFACE_TRANSACTION_TRANSPARENCY_TRANSPARENT = 0
+     *   ASURFACE_TRANSACTION_TRANSPARENCY_TRANSLUCENT = 1
+     *   ASURFACE_TRANSACTION_TRANSPARENCY_OPAQUE      = 2
+     * and documents setBufferTransparency as "Updates whether the content for
+     * the buffer associated with this surface is completely opaque. If true,
+     * every pixel of content inside the buffer must be opaque."
+     *
+     * surface_control_c_compat.h used to define OPAQUE as 0 (TRANSPARENT on
+     * device), so this call was asking SurfaceFlinger for a fully transparent
+     * buffer - which is exactly the measured `alpha=0.000000` in the presenter
+     * layer's LayerFE block. See that header for the corrected values.
+     *
+     * TRANSLUCENT (not OPAQUE) is the correct choice here: the bridge's
+     * shm_to_ahb path produces buffers whose untouched pixels are zeroed
+     * (measured: nonzero=10233 of 2,764,800 bytes), and declaring such a buffer
+     * OPAQUE is the documented way to get "visual errors". TRANSLUCENT tells SF
+     * to honour the buffer's own per-pixel alpha under premultiplied blending,
+     * which is what ASurfaceTransaction_setBufferAlpha(1.0f) below assumes. */
     ASurfaceTransaction_setBufferTransparency(
             transaction,
             surface_control,
-            ASURFACE_TRANSACTION_TRANSPARENCY_OPAQUE);
+            ASURFACE_TRANSACTION_TRANSPARENCY_TRANSLUCENT);
     ASurfaceTransaction_setBufferAlpha(
             transaction,
             surface_control,
@@ -5539,14 +5553,17 @@ Java_com_winlator_cmod_runtime_display_environment_components_WaylandBridgeServe
     /* Log the compositing inputs alongside the geometry. The layer composites at
      * alpha=0.000000 in its LayerFE block even though both alpha writers in this code set 1.0
      * (there and in Java), so record exactly what is being applied per frame to find which
-     * write wins. */
+     * write wins. The numeric value is logged, not just the symbolic name, so a future
+     * re-introduced enum mismatch is visible in logcat instead of hidden behind a macro. */
     {
         static int alpha_logged = 0;
         if (alpha_logged < 4) {
             alpha_logged++;
             __android_log_print(ANDROID_LOG_INFO, "BannerWayland",
-                "present-alpha #%d setBufferAlpha=1.0 transparency=OPAQUE(2) frame=%lld",
-                alpha_logged, (long long)frame_index);
+                "present-alpha #%d setBufferAlpha=1.0 transparency=TRANSLUCENT raw=%d "
+                "(TRANSPARENT=0 TRANSLUCENT=1 OPAQUE=2) frame=%lld",
+                alpha_logged, (int)ASURFACE_TRANSACTION_TRANSPARENCY_TRANSLUCENT,
+                (long long)frame_index);
         }
     }
     ASurfaceTransaction_setPosition(transaction, surface_control, 0, 0);

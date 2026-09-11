@@ -35,10 +35,25 @@ enum ASurfaceControlVisible {
     ASURFACE_TRANSACTION_VISIBILITY_SHOW = 1,
 };
 
-// Transparency enum.
+// Transparency enum — values taken verbatim from AOSP
+// frameworks/native/include/android/surface_control.h:
+//
+//   enum {
+//       ASURFACE_TRANSACTION_TRANSPARENCY_TRANSPARENT = 0,
+//       ASURFACE_TRANSACTION_TRANSPARENCY_TRANSLUCENT = 1,
+//       ASURFACE_TRANSACTION_TRANSPARENCY_OPAQUE      = 2,
+//   };
+//
+// The previous definition in this header omitted TRANSPARENT and started at
+// OPAQUE=0. That is an off-by-one against the real ABI: the value this file
+// called OPAQUE (0) is TRANSPARENT on device, so every
+// ASurfaceTransaction_setBufferTransparency(..., OPAQUE) call actually asked
+// SurfaceFlinger to treat the buffer as fully transparent. This is the
+// measured alpha=0.000000 in the presenter layer's LayerFE block.
 enum ASurfaceControlTransparency {
-    ASURFACE_TRANSACTION_TRANSPARENCY_OPAQUE = 0,
+    ASURFACE_TRANSACTION_TRANSPARENCY_TRANSPARENT = 0,
     ASURFACE_TRANSACTION_TRANSPARENCY_TRANSLUCENT = 1,
+    ASURFACE_TRANSACTION_TRANSPARENCY_OPAQUE = 2,
 };
 
 // Stats callback type (used by setOnComplete, not actually used by the
