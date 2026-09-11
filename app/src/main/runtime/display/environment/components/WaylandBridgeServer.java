@@ -601,15 +601,16 @@ public class WaylandBridgeServer {
             //      since API 29). Usable, but its space carries the SurfaceView's placement
             //      inside the hierarchy, so the destination rect would need re-deriving.
             try {
-                android.view.Window w = null;
+                // Named rootWindow, not w - `w` is this method's int width parameter.
+                android.view.Window rootWindow = null;
                 android.content.Context c = hostView.getContext();
                 if (c instanceof android.app.Activity) {
-                    w = ((android.app.Activity) c).getWindow();
+                    rootWindow = ((android.app.Activity) c).getWindow();
                 }
-                if (w != null) {
+                if (rootWindow != null) {
                     java.lang.reflect.Method m =
                             android.view.Window.class.getMethod("getRootSurfaceControl");
-                    Object o = m.invoke(w);
+                    Object o = m.invoke(rootWindow);
                     if (o instanceof SurfaceControl) {
                         parent = (SurfaceControl) o;
                         parentSource = "window-root";
