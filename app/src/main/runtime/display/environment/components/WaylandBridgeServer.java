@@ -523,10 +523,24 @@ public class WaylandBridgeServer {
 
     private void ensurePresentLayer(int w, int h) {
         if (presentLayer != null) return;
-        if (hostView == null || hostView.getSurfaceControl() == null) {
-            Log.w(TAG, "Cannot create presentLayer — hostView SurfaceControl is null");
+        if (hostView == null) {
+            Log.w(TAG, "Cannot create presentLayer — hostView is null");
             return;
         }
+        // NOTE: this deliberately does NOT bail out when hostView.getSurfaceControl() is null.
+        //
+        // The previous version returned early in that case, and because the first thing it
+        // does is `if (presentLayer != null) return;`, the failure was PERMANENT: the first
+        // frame simply arrived before the view had a SurfaceControl, the method gave up, and
+        // every later frame took the early return. The layer was then never created for that
+        // whole session - which is the reported "second launch showed just a black screen"
+        // while the first launch (where the surface happened to be ready in time) showed a
+        // desktop. It also explains the non-determinism between runs.
+        //
+        // A frame arriving before the surface exists is a normal race, not an error. The
+        // resolve below falls through to Window#getRootSurfaceControl(), and only if NO
+        // parent can be found do we skip creation - leaving presentLayer null so the next
+        // frame retries.
         int layerW = hostView.getWidth();
         int layerH = hostView.getHeight();
         if (layerW <= 0 || layerH <= 0) {
@@ -553,11 +567,6 @@ public class WaylandBridgeServer {
             //   - setHidden(false) — visible from creation
             //   - Transaction: setAlpha(1.0) + setBufferSize + setCrop — full-frame crop
             //     so SurfaceFlinger composites the entire buffer
-            // Create at display root level (NO parent) to avoid inheriting
-            // the SurfaceView's scale+translate transform. When parented to
-            // the SurfaceView, the presentLayer gets the transform
-            // scale(1.333) + translate(3231, 0) which pushes it off-screen.
-            // Root-level layers use screen coordinates directly.
             // Parent the presenter to the app's own window SurfaceControl.
             //
             // AOSP documents that a SurfaceControl's geometric properties are interpreted in its
@@ -567,39 +576,17 @@ public class WaylandBridgeServer {
             // ASurfaceTransaction_setGeometry's destination as "the rect in the parent's space
             // where this surface will be drawn ... clipped by the bounds of its parent".
             //
-            // This layer was previously built with NO parent at all, which leaves its destination
-            // rect with no parent space to be resolved against, and SurfaceFlinger never
-            // composited it: it appeared in dumpsys exactly once, as a hierarchy node with no
-            // geometry, and never in Active Layers or the composition table, while the app
-            // reported hundreds of frames of "status=pass" (a hardcoded literal).
-            //
-            // Reparenting to the host view's SurfaceControl gives it a real coordinate space.
-            // The native side now also sets source+destination atomically via
-            // ASurfaceTransaction_setGeometry, so the earlier concern about inheriting the
-            // SurfaceView's scale transform is handled by that explicit destination rect.
-            SurfaceControl parent = null;
-            String parentSource = "none";
-            // AOSP's NDK header for ASurfaceTransaction_reparent is explicit:
+            // AOSP's header for ASurfaceTransaction_reparent is equally explicit:
             //   "The new_parent can be null. Surface controls with a null parent do not
             //    appear on the display."
-            // and the measured dumpsys confirms it: this layer sat as the last entry of
-            // the top-level hierarchy list (a sibling of Task=..., not a child of the
-            // activity), with a resolved transform, a live buffer and valid geometry -
-            // and was still not composited.
-            //
-            // So the parent is not optional. Resolve one, in descending order of
-            // correctness, and RECORD which one was used so the next dumpsys can be read
-            // against a known parent instead of guessed at.
-            //
-            //   1. Window#getRootSurfaceControl() (public since API 29) - resolves through
-            //      the activity's window. This is the SurfaceControl ViewRootImpl hands to
-            //      WindowManager, i.e. the app window's own layer, whose coordinate space
-            //      matches the window size the native destination rect (0,0,2340,1080) is
-            //      expressed in. Reached by reflection because the view is a SurfaceView
-            //      whose Context may be a ContextThemeWrapper rather than the Activity.
-            //   2. hostView.getSurfaceControl() - the SurfaceView's own child layer (public
-            //      since API 29). Usable, but its space carries the SurfaceView's placement
-            //      inside the hierarchy, so the destination rect would need re-deriving.
+            // so the parent is mandatory, not a nicety.
+            SurfaceControl parent = null;
+            String parentSource = "none";
+            //   1. Window#getRootSurfaceControl() (public since API 29) - the SurfaceControl
+            //      ViewRootImpl hands to WindowManager, i.e. the app window's own layer.
+            //      Reached by reflection because the view's Context may be a ContextThemeWrapper
+            //      rather than the Activity.
+            //   2. hostView.getSurfaceControl() - the SurfaceView's own child layer.
             try {
                 // Named rootWindow, not w - `w` is this method's int width parameter.
                 android.view.Window rootWindow = null;
@@ -628,52 +615,86 @@ public class WaylandBridgeServer {
                 }
             }
             if (parent == null) {
-                Log.w(TAG, "presentLayer: NO parent SurfaceControl available — per AOSP this "
-                        + "layer will not appear on the display at all");
+                // Per AOSP this layer would not appear on the display at all, so do not create
+                // it: leaving presentLayer null lets the next frame retry once the view has
+                // been laid out. This is the only path that defers creation.
+                Log.w(TAG, "presentLayer: no parent SurfaceControl yet (hostView="
+                        + hostView.getWidth() + "x" + hostView.getHeight()
+                        + ") — deferring creation to a later frame");
+                return;
             }
+            // Sizing: the layer must be the RENDER TARGET's size, in the units the parent's
+            // space uses, or the blit output is drawn into the wrong number of parent units.
+            //
+            // Measured failure (two independent reports, one from dumpsys and one from the
+            // user watching the screen): the previous code sized the layer from
+            // hostView.getWidth()/getHeight(), which returned 1080x1080, while the parent's
+            // space is far larger. The result was a fully composited layer carrying a real
+            // desktop, squeezed into geomLayerBounds=[96, 0, 1176, 1080] out of a 1440x3120
+            // display - "a real desktop, but squeezed/tiny" - while the SurfaceFlinger
+            // composition table showed nothing at all.
+            //
+            // The render target is ALWAYS landscape outputWidth x outputHeight: the native
+            // blit scales every source frame to (width, height) and allocates the
+            // AHardwareBuffer slots at that size (see the ahb_vk renderer's slot
+            // allocation). So those are the only correct dimensions for both the buffer and
+            // the destination rect. They are set just below.
+            int targetW = 2340;
+            int targetH = 1080;
             presentLayer = new SurfaceControl.Builder()
                 .setName("WayLandIELinuxWindowLayer:waylandie-present")
-                .setBufferSize(layerW, layerH)
+                .setBufferSize(targetW, targetH)
                 .setFormat(PixelFormat.RGBA_8888)
-                .setOpaque(true)
+                .setOpaque(false)
                 .setHidden(false)
                 .build();
             // Keep render target at landscape 2340x1080 (the native GPU blit
             // target and slot buffer size). The SurfaceControl layer is sized
             // to the full screen, and SurfaceFlinger handles scaling/rotation.
-            width = 2340;
-            height = 1080;
+            width = targetW;
+            height = targetH;
             SurfaceControl.Transaction txn = new SurfaceControl.Transaction()
                 .setVisibility(presentLayer, true)
                 .setPosition(presentLayer, 0.0f, 0.0f)
-                .setBufferSize(presentLayer, layerW, layerH)
-                .setCrop(presentLayer, new Rect(0, 0, layerW, layerH));
+                .setBufferSize(presentLayer, targetW, targetH)
+                .setCrop(presentLayer, new Rect(0, 0, targetW, targetH));
             if (parent != null) {
                 // reparent() is what actually establishes the parent/child relationship; the
                 // Builder takes no parent argument in this API.
                 txn.reparent(presentLayer, parent);
             }
-            // Apply alpha AFTER reparenting, and last.
-            //
-            // Measured problem: after the round-26 rewrite the layer composites with
-            // `alpha=0.000000` in its LayerFE block (blend=PREMULTIPLIED), so it is drawn fully
-            // transparent - which over a black background is indistinguishable from a black
-            // desktop. Both alpha writers in the code set 1.0 (Java setAlpha at creation, native
-            // setBufferAlpha every frame), so the zero is not coming from a value anyone wrote.
-            //
-            // reparent() is the one operation in this transaction that changes what the layer
-            // inherits, and a child inherits from its parent - so ordering alpha before the
-            // reparent is a plausible way for the reparent to supersede it. AOSP documents
-            // reparent as: "Children inherit transform (position, scaling) crop, visibility, and
-            // Z-ordering from their parents", and explicitly lists transform/crop/visibility/
-            // Z-order as inherited; alpha is not listed, which is why this is a hypothesis to
-            // measure, not a claim.
+            // setOpaque(false) above, deliberately: ASurfaceTransaction_setBufferTransparency
+            // is set to TRANSLUCENT per frame natively, and the Builder's setOpaque() only
+            // feeds SurfaceFlinger's opacity *hint*. Declaring a buffer opaque that contains
+            // zeroed pixels is the documented route to "visual errors", and the bridge's
+            // shm_to_ahb output is exactly that (measured nonzero=10233 of 2,764,800 bytes).
+            // Alpha is driven natively by setBufferAlpha(1.0f) + TRANSLUCENT, so nothing here
+            // needs to guess at it.
             txn.setAlpha(presentLayer, 1.0f);
-            txn.setLayer(presentLayer, Integer.MAX_VALUE);
-            txn.apply();
-            Log.i(TAG, "Created presentLayer: " + layerW + "x" + layerH
-                    + " (source=" + w + "x" + h + ")"
-                    + " parent=" + parentSource);
+            // Z-order: NOT Integer.MAX_VALUE. This layer is a child of the app window, so the
+            // only thing it needs to outrank is its siblings inside that window - and
+            // Integer.MAX_VALUE also outranks the system's own layers (StatusBar, navigation
+            // bar, IME) if the parent were ever the display. The measured dumpsys recorded
+            // `z=2147483647`, which is the kind of context-free maximum that caused the
+            // "app UI was gone and the desktop filled the screen" report. A high-but-sane
+            // value inside the window is sufficient.
+            txn.setLayer(presentLayer, 100);
+            txn.apply();            // Report the parent's own geometry so the next dumpsys can be checked against a
+            // known parent, and so a destination rect that does not fill the parent is visible
+            // in logcat rather than only on the screen. parentW/parentH are the parent's size
+            // in buffer pixels; the native destination rect is expressed in this space.
+            int parentW = -1, parentH = -1;
+            try { parentW = parent.getWidth(); parentH = parent.getHeight(); } catch (Throwable ignored) {}
+            int hostW = hostView.getWidth(), hostH = hostView.getHeight();
+            Log.i(TAG, "Created presentLayer: buffer=" + targetW + "x" + targetH
+                    + " (frame source=" + w + "x" + h + ")"
+                    + " parent=" + parentSource + " parentSize=" + parentW + "x" + parentH
+                    + " hostView=" + hostW + "x" + hostH
+                    + " -> destination 0,0," + targetW + "," + targetH + " in parent space"
+                    + " (fill=" + (parentW > 0
+                        ? String.format(Locale.US, "%.2fx%.2f", targetW / (float) parentW,
+                                        targetH / (float) parentH)
+                        : "unknown") + " of parent)");
         } catch (Exception e) {
             Log.e(TAG, "Failed to create presentLayer", e);
         }
