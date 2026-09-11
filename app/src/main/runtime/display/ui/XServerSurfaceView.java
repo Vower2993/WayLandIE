@@ -252,9 +252,23 @@ public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Cal
                         for (java.io.File d : driverDirs) {
                             java.io.File freedreno = new java.io.File(d, "libvulkan_freedreno.so");
                             if (freedreno.exists() && freedreno.length() > 1000) {
-                                driverPath = d.getAbsolutePath();
+                                // MUST end with a separator: adrenotools_open_libvulkan() does
+                                //   stat(std::string(customDriverDir) + customDriverName)
+                                // with no separator inserted (adrenotools/src/driver.cpp), so a
+                                // bare directory path makes it look for
+                                //   .../turnip_xlibvulkan_freedreno.so
+                                // which does not exist, and it bails with
+                                //   "ADRENOTOOLS_DRIVER_CUSTOM present but importable driver doesn't exist"
+                                // then silently falls back to the system Vulkan driver (which lacks
+                                // VK_EXT_external_memory_dma_buf / image_drm_format_modifier, so
+                                // vkCreateDevice fails and no frame can ever be presented).
+                                // AdrenotoolsManager.getDriverPath() already appends "/"; this
+                                // inline probe did not, which is why the compositor never used
+                                // Turnip even when a driver was installed.
+                                driverPath = d.getAbsolutePath() + java.io.File.separator;
                                 android.util.Log.i("XServerSurfaceView",
-                                    "Found Turnip driver at " + freedreno.getAbsolutePath());
+                                    "Found Turnip driver at " + freedreno.getAbsolutePath()
+                                    + " (driverPath=" + driverPath + ")");
                                 break;
                             }
                         }
