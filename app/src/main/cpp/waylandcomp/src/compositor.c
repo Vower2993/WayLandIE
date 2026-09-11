@@ -896,26 +896,6 @@ static void deliver_key(const struct input_msg *m) {
     wl_display_flush_clients(g_display);
 }
 
-/* Compositor thread only. Re-advertise wl_output to every client that already bound it.
- * Clients that connected before the size was known were told the default mode, and
- * winewayland derives its notion of the screen from wl_output. Java sets the size in
- * setupUI() (before any client connects), so this normally finds nothing to do; it matters
- * on a rotation/resize where the surface is recreated while clients stay attached. */
-static void notify_outputs_of_size(void) {
-    if (!g_display) return;
-    struct wl_client *client;
-    struct wl_resource *res;
-    int n = 0;
-    wl_client_for_each(client, wl_display_get_client_list(g_display)) {
-        wl_resource_for_each(res, client) {
-            if (!res || !wl_resource_instance_of(res, &wl_output_interface, NULL)) continue;
-            output_send_current(res);
-            n++;
-        }
-    }
-    if (n) WLOGI("re-advertised wl_output to %d bound resource(s)", n);
-}
-
 /* Compositor thread only (dispatched from on_input_readable). */
 static void apply_output_size(int w, int h) {
     if (w <= 0 || h <= 0) return;
@@ -923,7 +903,13 @@ static void apply_output_size(int w, int h) {
     g_out_w = w;
     g_out_h = h;
     WLOGI("output size set to %dx%d (pointer input space + wl_output mode)", w, h);
-    notify_outputs_of_size();
+    /* Deliberately no re-send to already-bound wl_output resources: libwayland keeps
+     * `struct wl_client` opaque, so there is no public way to walk the clients from here
+     * (wl_client_for_each does not compile, and wl_client_get_resource_list() is private).
+     * It is also unnecessary: Java calls setWaylandOutputSize() from setupUI(), which runs
+     * before the guest is launched, so every wl_output binds through bind_output() below and
+     * receives the correct mode there. A host-side rotation/resize between clients is the
+     * only case that would go stale, and that is a separate change. */
 }
 
 /* wl event-loop callback: drain queued input events written by the Android UI thread.
