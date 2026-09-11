@@ -15,6 +15,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/time.h>   /* struct timeval, for SO_RCVTIMEO on the presenter socket */
 #include <sys/types.h>
 #include <sys/un.h>
 #include <time.h>
@@ -1586,6 +1587,29 @@ static int present_buffer_to_android(struct surface_state *surface, struct shm_b
         state->bridge_sock = connect_abstract_socket(state->bridge_socket_name);
         if (state->bridge_sock >= 0) {
             g_diag.bridge_reconnects++;
+            /* Bound the wait for the presenter's reply.
+             *
+             * send_command_with_fd() below is followed by a blocking read(). With no
+             * receive timeout, a presenter that accepts the connection and then stops
+             * answering wedges this call forever. That is not hypothetical: in the
+             * session this was diagnosed from, the presenter spent the whole run in a
+             * "Bind failed: Address already in use" retry loop (a leaked listener from a
+             * previous accept-loop generation), the bridge logged its last line at
+             * frame=40 and the process then sat idle - every later frame blocked here,
+             * with the display frozen on whatever was last composited.
+             *
+             * A healthy presenter answers in 1-3ms (measured present-ms=1.2..2.3 in the
+             * same log), so 2s is a wide margin. On timeout the connection is dropped and
+             * the next frame reconnects, which also guarantees the presenter is the real
+             * one rather than a stale listener. */
+            struct timeval bridge_recv_timeout;
+            bridge_recv_timeout.tv_sec = 2;
+            bridge_recv_timeout.tv_usec = 0;
+            if (setsockopt(state->bridge_sock, SOL_SOCKET, SO_RCVTIMEO,
+                           &bridge_recv_timeout, sizeof(bridge_recv_timeout)) != 0) {
+                printf("wayland-shm-ahb frame=%d warn=setsockopt-SO_RCVTIMEO errno=%d\n",
+                       frame_index, errno);
+            }
             printf("wayland-shm-ahb frame=%d bridge-connected sock=%d\n", frame_index, state->bridge_sock);
             fflush(stdout);
         }

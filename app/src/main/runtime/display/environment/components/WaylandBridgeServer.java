@@ -34,6 +34,9 @@ public class WaylandBridgeServer {
     private int frameIndex = 0;
     /** Consecutive failed binds in the current accept loop; reset on success. */
     private int bindFailures = 0;
+    /** Accepted client sockets, so stop() can close them and unblock their handler threads. */
+    private final java.util.Set<LocalSocket> clientSockets =
+            java.util.Collections.newSetFromMap(new java.util.concurrent.ConcurrentHashMap<LocalSocket, Boolean>());
     private Runnable preloaderDismissCallback = null;
     private Runnable onFirstFrameCallback = null;
 
@@ -172,6 +175,19 @@ public class WaylandBridgeServer {
             presentLayer.release();
             presentLayer = null;
         }
+        // Close every accepted client socket.
+        //
+        // handleClient() serves the bridge's long-lived "input-stream" connection by
+        // blocking in is.read() until the peer disconnects. Setting running=false does not
+        // unblock a blocking read, and nothing closed that socket, so the client thread
+        // (and its fd) outlived stop() - and with it any process restart that reuses this
+        // class. Closing the sockets makes the blocked read return and the thread exit.
+        synchronized (clientSockets) {
+            for (LocalSocket c : clientSockets) {
+                try { c.close(); } catch (IOException ignored) {}
+            }
+            clientSockets.clear();
+        }
     }
 
     /**
@@ -257,6 +273,7 @@ public class WaylandBridgeServer {
                         break;
                     }
                     Log.i(TAG, "Bridge client connected");
+                    clientSockets.add(client);
                     // Handle each client in a separate thread so multiple
                     // bridge connections (input-stream + dmabuf-present)
                     // can be served simultaneously.
@@ -338,6 +355,7 @@ public class WaylandBridgeServer {
         } catch (IOException e) {
             Log.w(TAG, "Client error: " + e.getMessage());
         } finally {
+            clientSockets.remove(client);
             try { client.close(); } catch (IOException ignored) {}
         }
     }
@@ -742,7 +760,8 @@ public class WaylandBridgeServer {
             // "app UI was gone and the desktop filled the screen" report. A high-but-sane
             // value inside the window is sufficient.
             txn.setLayer(presentLayer, 100);
-            txn.apply();            // Report what was applied. There is no public API to read a SurfaceControl's
+            txn.apply();
+            // Report what was applied. There is no public API to read a SurfaceControl's
             // size back (SurfaceControl has no getWidth/getHeight), so log the inputs
             // instead: the parent source, the app window size, and the child's own size.
             // The authoritative check is the SurfaceFlinger dump - look for the layer
