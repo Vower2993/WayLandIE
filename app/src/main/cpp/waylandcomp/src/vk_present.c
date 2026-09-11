@@ -112,6 +112,18 @@ void vk_present_set_size(int w, int h) {
     pthread_mutex_unlock(&g_lock);
 }
 
+/* True only when the swapchain extent genuinely disagrees with the size Java last
+ * reported. Used to decide whether a VK_SUBOPTIMAL_KHR actually warrants a rebuild:
+ * Android's WSI reports SUBOPTIMAL for a swapchain that is already the correct size,
+ * and recreating on that condition loops forever. */
+static int extent_differs_from_desired(void) {
+    pthread_mutex_lock(&g_lock);
+    int dw = g_desired_w, dh = g_desired_h;
+    pthread_mutex_unlock(&g_lock);
+    if (dw <= 0 || dh <= 0) return 0; /* no request on record: nothing to match */
+    return (g_extent.width != (uint32_t)dw || g_extent.height != (uint32_t)dh);
+}
+
 static int has_ext(VkExtensionProperties *e, uint32_t n, const char *name) {
     for (uint32_t i = 0; i < n; i++)
         if (!strcmp(e[i].extensionName, name)) return 1;
@@ -516,11 +528,20 @@ int vk_present_commit_dmabuf(int fd, uint32_t drm_format, uint64_t modifier, int
     sr = g_vk.QueuePresentKHR(g_queue, &pi);
     if (sr != VK_SUCCESS && sr != VK_SUBOPTIMAL_KHR)
         LOGE("present: QueuePresentKHR failed (%d)", (int)sr);
-    /* SUBOPTIMAL from acquire or present means the image was still acquired and
-     * presented, so the frame is valid - but the swapchain no longer matches the
-     * surface, so rebuild it on the next commit rather than dropping the frame. */
-    if (ar == VK_SUBOPTIMAL_KHR || sr == VK_SUBOPTIMAL_KHR)
-        g_recreate = 1;
+    /* SUBOPTIMAL from acquire or present means the image WAS acquired and
+     * presented, so the frame is valid - keep it. Only re-arm recreation if the
+     * requested size actually differs from the current swapchain extent.
+     *
+     * Blindly setting g_recreate here created an unbreakable rebuild loop on
+     * device: Android's WSI on a 120 Hz panel returns VK_SUBOPTIMAL_KHR for a
+     * swapchain that is already the right size, so each commit recreated the
+     * swapchain, the fresh one was SUBOPTIMAL again, and "swapchain up" was
+     * logged 31 times in ~0.5 s. Tearing the swapchain down mid-present is why
+     * the screen stayed black even though everything else worked. */
+    if (ar == VK_SUBOPTIMAL_KHR || sr == VK_SUBOPTIMAL_KHR) {
+        if (extent_differs_from_desired())
+            g_recreate = 1;
+    }
     /* Bounded fence wait only. The fence covers the blit submit, so the old
      * QueueWaitIdle() (which also waits for the FIFO present to be displayed)
      * was redundant and could stall the Wayland dispatch thread for a full frame
@@ -712,9 +733,14 @@ int vk_present_commit_shm(const void *data, int w, int h, int stride, uint32_t w
     sr = g_vk.QueuePresentKHR(g_queue, &pi);
     if (sr != VK_SUCCESS && sr != VK_SUBOPTIMAL_KHR)
         LOGE("present: QueuePresentKHR failed (%d)", (int)sr);
-    /* SUBOPTIMAL still presented a valid frame; rebuild the swapchain next commit. */
-    if (ar == VK_SUBOPTIMAL_KHR || sr == VK_SUBOPTIMAL_KHR)
-        g_recreate = 1;
+    /* SUBOPTIMAL still presented a valid frame; see the dmabuf path for why the
+     * rebuild is conditional on the size having actually changed. */
+    /* As in the dmabuf path: only rebuild when the size actually changed, otherwise
+     * SUBOPTIMAL would recreate the swapchain on every commit forever. */
+    if (ar == VK_SUBOPTIMAL_KHR || sr == VK_SUBOPTIMAL_KHR) {
+        if (extent_differs_from_desired())
+            g_recreate = 1;
+    }
     /* Bounded fence wait only (same rationale as the dmabuf path): the fence covers
      * the blit submit, so the old QueueWaitIdle() was redundant and could stall the
      * Wayland dispatch thread forever on a wedged queue. A 2s cap drops the frame
