@@ -46,6 +46,25 @@ public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Cal
      */
     private volatile int waylandOutputW = 0;
     private volatile int waylandOutputH = 0;
+
+    /**
+     * Which Wayland server this app runs.
+     *
+     * <p>false = the standalone bridge process (libwaylandie_bridge_exe.so, started by
+     * WaylandBridgeComponent). It is the component with the SHM→AHB conversion
+     * (WAYLANDIE_HAS_AHARDWAREBUFFER) feeding the Java SurfaceControl presenter, and the
+     * handoff records it as the path that actually displayed the Wine desktop.
+     *
+     * <p>true = the newer in-process compositor (libwaylandie_comp.so). It has no SHM→AHB
+     * path: it uploads the client's wl_shm buffer into a linear VkImage and blits it, and the
+     * desktop has never been visible through it.
+     *
+     * <p>Exactly one may own the wayland-0 socket; starting both makes them race and produces a
+     * black screen, which is why the bridge was disabled when the in-process compositor landed.
+     * Kept as a switch rather than deleting either path so the choice can be reversed without
+     * archaeology.
+     */
+    public static final boolean USE_IN_PROCESS_COMPOSITOR = false;
     // Wayland dmabuf frame (set by bridge, consumed by render thread)
     private volatile int wlDmabufFd = -1;
     private volatile int wlWidth = 0;
@@ -260,7 +279,15 @@ public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Cal
         // Start the in-process Wayland compositor (Bannerlator architecture).
         // dlopen's libwaylandie_comp.so and starts banner_wayland_run() on a thread.
         // No System.loadLibrary — avoids KSP bug with Java static initializers.
-        if (waylandMode) {
+        //
+        // Only when USE_IN_PROCESS_COMPOSITOR: the standalone bridge owns wayland-0 otherwise,
+        // and two servers racing for that socket is what produced the original black screen.
+        if (waylandMode && !USE_IN_PROCESS_COMPOSITOR) {
+            android.util.Log.i("XServerSurfaceView",
+                "surfaceCreated: in-process compositor DISABLED - the standalone bridge "
+                + "(WaylandBridgeComponent) owns wayland-0");
+        }
+        if (waylandMode && USE_IN_PROCESS_COMPOSITOR) {
             try {
                 // Logged BEFORE anything else so this line is a positive marker that the
                 // compositor-startup block was entered at all. A prior hypothesis ("setupUI

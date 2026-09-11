@@ -6229,6 +6229,9 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
         }
 
         environment = new XEnvironment(this, imageFs);
+        // Publish the guest desktop size before any component starts, so display components
+        // configure themselves for the guest's coordinate space rather than the panel's.
+        environment.setScreenSize(xServer.screenInfo.width, xServer.screenInfo.height);
         environment.addComponent(
                 new SysVSharedMemoryComponent(
                         xServer,
@@ -6295,11 +6298,21 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
             } catch (Exception e) {
                 Log.e("XServerDisplayActivity", "Failed to ensure Wayland driver installed", e);
             }
-            // The in-process compositor (libwaylandie_comp.so, started by
-            // XServerSurfaceView.surfaceCreated) is the ONLY Wayland server.
-            // Do NOT add WaylandBridgeComponent here: its legacy bridge process
-            // unlinks wayland-0 and races the in-process compositor for the
-            // socket, which causes a black screen.
+            // Run the standalone bridge (WaylandBridgeComponent) as the single Wayland server.
+            // It is the only compositor here with the SHM->AHB conversion whose
+            // AHardwareBuffer becomes a dmabuf fd, presented through WaylandBridgeServer +
+            // SurfaceControl. The in-process compositor (libwaylandie_comp.so) has no SHM->AHB
+            // path, and the desktop was never visible through it.
+            //
+            // The previous note here warned that the bridge "unlinks wayland-0 and races the
+            // in-process compositor". That race was real, but the remedy was wrong: instead of
+            // disabling the working compositor, exactly one is now selected. The in-process
+            // compositor does not start because XServerSurfaceView.USE_IN_PROCESS_COMPOSITOR is
+            // false, so the bridge owns wayland-0 uncontested.
+            if (!com.winlator.cmod.runtime.display.ui.XServerSurfaceView.USE_IN_PROCESS_COMPOSITOR) {
+                environment.addComponent(
+                        new com.winlator.cmod.runtime.display.environment.components.WaylandBridgeComponent());
+            }
         }
         environment.addComponent(new NetworkInfoUpdateComponent());
 
@@ -6757,17 +6770,54 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
         FrameLayout rootView = xServerDisplayFrame;
         xServerView = new XServerSurfaceView(this, xServer);
 
-        // In Wayland mode, the in-process compositor (libwaylandie_comp.so)
-        // handles everything — started by XServerSurfaceView.surfaceCreated()
-        // via nativeStartCompositor(). The OLD multi-process bridge
-        // (WaylandBridgeServer + WaylandBridgeComponent) is NOT started:
-        //   - It would race the in-process compositor for the wayland-0 socket
-        //     in the shared XDG_RUNTIME_DIR (imagefs/usr/tmp/runtime/).
-        //   - One would win the bind(), the other would silently fail.
-        //   - Even if both ran, only one set of wl_surface.commit callbacks
-        //     would fire, splitting the render path.
-        // The in-process compositor replaces the bridge entirely — no IPC,
-        // no SCM_RIGHTS fd passing, no second process.
+        // Start the dmabuf PRESENTER when the standalone bridge is the Wayland server.
+        //
+        // Two different objects are easy to confuse here, and both are required:
+        //   WaylandBridgeServer  - Java side. Listens on the abstract socket
+        //                          "waylandie.display.bridge.v1", receives dmabuf fds over
+        //                          SCM_RIGHTS and presents them via SurfaceControl
+        //                          (nativePresentAhbVkDmaBufFrame). Started HERE.
+        //   WaylandBridgeComponent - Java side. Launches the bridge binary itself; registered
+        //                          as an environment component so it starts with the session.
+        //
+        // The bridge binary receives frames from Wine and forwards them to this presenter.
+        // Without the presenter listening, the bridge's per-frame dmabuf-present connect has
+        // nowhere to send them and the screen stays black even though the compositor is fine.
+        // start() waits up to 2s for the socket to bind, because the bridge's input-stream
+        // connect is single-shot and loses the race permanently if it arrives first.
+        if (!com.winlator.cmod.runtime.display.ui.XServerSurfaceView.USE_IN_PROCESS_COMPOSITOR) {
+            try {
+                waylandBridgeServer =
+                    new com.winlator.cmod.runtime.display.environment.components.WaylandBridgeServer();
+                waylandBridgeServer.setPreloaderDismissCallback(this::onWaylandFirstFrame);
+                waylandBridgeServer.start(xServerView, this);
+                android.util.Log.i("XServerDisplayActivity",
+                    "WaylandBridgeServer (dmabuf presenter) started for the standalone bridge");
+            } catch (Throwable t) {
+                android.util.Log.e("XServerDisplayActivity",
+                    "Failed to start WaylandBridgeServer presenter", t);
+            }
+        }
+
+        // Wayland display server selection.
+        //
+        // Exactly ONE compositor may own wayland-0, and which one is chosen by
+        // XServerSurfaceView.USE_IN_PROCESS_COMPOSITOR:
+        //
+        //   false (current) - the standalone bridge process (WaylandBridgeComponent) owns the
+        //     socket, with the WaylandBridgeServer presenter above receiving its dmabuf fds.
+        //     This is the only compositor here with an SHM->AHB conversion
+        //     (WAYLANDIE_HAS_AHARDWAREBUFFER): Wine's desktop arrives as wl_shm, is converted to
+        //     an AHardwareBuffer, exported as a dmabuf fd, imported by Turnip and presented via
+        //     SurfaceControl. The handoff records this as the path that displayed the desktop.
+        //
+        //   true - the in-process compositor (libwaylandie_comp.so) owns it. It has NO SHM->AHB
+        //     path: it uploads the client's wl_shm buffer into a linear VkImage and blits it, and
+        //     the desktop has never been visible through it. A frame dump proved the buffers it
+        //     receives are entirely zero bytes, so no presenter could have shown content.
+        //
+        // The two racing for the socket is what the old note here warned about, and it was a
+        // real hazard - but the fix is to select one, not to disable the working one.
         if ("wayland".equals(displayMode)) {
             xServerView.setWaylandMode(true);
             android.util.Log.i("XServerDisplayActivity",

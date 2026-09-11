@@ -18,10 +18,29 @@ public class XEnvironment implements Iterable<EnvironmentComponent> {
   private Context context;
   private final ImageFs imageFs;
   private final ArrayList<EnvironmentComponent> components = new ArrayList<>();
+  /**
+   * The guest's desktop size, i.e. the container's {@code screenSize}. This is the size the
+   * guest is launched with as {@code wine explorer /desktop=shell,WxH} and therefore the size
+   * the Wayland output must advertise. It is deliberately NOT the Android panel size
+   * (3120x1440 on the test device): components that configure the display need the guest's
+   * coordinate space, and telling Wine its screen is 3120x1440 when its desktop is 1280x720
+   * makes it size windows against the wrong screen.
+   */
+  private int screenWidth;
+  private int screenHeight;
 
   public XEnvironment(Context context, ImageFs imageFs) {
     this.context = context;
     this.imageFs = imageFs;
+  }
+
+  public int getScreenWidth() { return screenWidth; }
+
+  public int getScreenHeight() { return screenHeight; }
+
+  public void setScreenSize(int width, int height) {
+    this.screenWidth = width;
+    this.screenHeight = height;
   }
 
   public Context getContext() {

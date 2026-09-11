@@ -3,6 +3,7 @@ package com.winlator.cmod.runtime.display.environment.components;
 import com.winlator.cmod.runtime.display.environment.EnvironmentComponent;
 import com.winlator.cmod.runtime.display.environment.ImageFs;
 import com.winlator.cmod.runtime.display.environment.XEnvironment;
+import com.winlator.cmod.runtime.display.ui.XServerSurfaceView;
 
 import android.content.Context;
 import android.util.Log;
@@ -34,12 +35,23 @@ public class WaylandBridgeComponent extends EnvironmentComponent {
 
     @Override
     public void start() {
-        Log.w(TAG, "WaylandBridgeComponent.start() disabled: the in-process "
-                + "compositor (libwaylandie_comp.so) is the only Wayland server. "
-                + "Starting the legacy bridge would race it for wayland-0 and "
-                + "produce a black screen.");
-        return;
-        /*
+        // Re-enabled. This was disabled when the in-process compositor (libwaylandie_comp.so)
+        // landed, to stop the two racing for wayland-0 - a real hazard. The fix is not to
+        // disable one of them, but to run exactly one: XServerSurfaceView.USE_IN_PROCESS_COMPOSITOR
+        // is now false, so the in-process compositor does not start and this bridge owns the
+        // socket alone.
+        //
+        // This path is the one that matters: it is the only compositor here with the SHM->AHB
+        // conversion (WAYLANDIE_HAS_AHARDWAREBUFFER) whose AHardwareBuffer is exported as a
+        // dmabuf fd and presented through WaylandBridgeServer + SurfaceControl. The in-process
+        // compositor has no SHM->AHB path at all - it blits a linear VkImage - and the Wine
+        // desktop has never been visible through it.
+        if (XServerSurfaceView.USE_IN_PROCESS_COMPOSITOR) {
+            Log.w(TAG, "WaylandBridgeComponent.start() skipped: the in-process compositor "
+                    + "(libwaylandie_comp.so) is selected and would race this bridge for "
+                    + "wayland-0.");
+            return;
+        }
         XEnvironment env = environment;
         if (env == null) {
             Log.e(TAG, "Environment not set");
@@ -82,12 +94,26 @@ public class WaylandBridgeComponent extends EnvironmentComponent {
         File logsDir = com.winlator.cmod.runtime.system.LogManager.getLogsDir(context);
         outputLogFile = new File(logsDir, "wayland-bridge-output.log");
 
-        // Get actual screen dimensions for the bridge's Wayland output size
-        android.util.DisplayMetrics metrics = new android.util.DisplayMetrics();
-        ((android.view.WindowManager) context.getSystemService(Context.WINDOW_SERVICE))
-                .getDefaultDisplay().getRealMetrics(metrics);
-        int bridgeWidth = metrics.widthPixels > 0 ? metrics.widthPixels : 1280;
-        int bridgeHeight = metrics.heightPixels > 0 ? metrics.heightPixels : 720;
+        // Output size for the bridge's Wayland output. This MUST be the guest's desktop size
+        // (the container's screenSize, which is also what the guest is launched with as
+        // `wine explorer /desktop=shell,WxH`), NOT the Android panel size. The bridge uses it
+        // for xdg_toplevel configure and for mapping pointer coordinates, and Wine sizes its
+        // windows from the advertised output - so handing it 3120x1440 while the guest desktop
+        // is 1280x720 makes the guest lay out against a screen that does not exist.
+        int bridgeWidth = environment != null ? environment.getScreenWidth() : 0;
+        int bridgeHeight = environment != null ? environment.getScreenHeight() : 0;
+        if (bridgeWidth <= 0 || bridgeHeight <= 0) {
+            // No size published: fall back to the panel, which at least produces a usable
+            // output rather than a zero-sized one.
+            android.util.DisplayMetrics metrics = new android.util.DisplayMetrics();
+            ((android.view.WindowManager) context.getSystemService(Context.WINDOW_SERVICE))
+                    .getDefaultDisplay().getRealMetrics(metrics);
+            bridgeWidth = metrics.widthPixels > 0 ? metrics.widthPixels : 1280;
+            bridgeHeight = metrics.heightPixels > 0 ? metrics.heightPixels : 720;
+            Log.w(TAG, "guest screen size unavailable; falling back to panel "
+                    + bridgeWidth + "x" + bridgeHeight);
+        }
+        Log.i(TAG, "bridge Wayland output size = " + bridgeWidth + "x" + bridgeHeight);
 
         List<String> cmd = new ArrayList<>();
         cmd.add(bridgeBin.getAbsolutePath());
@@ -193,7 +219,6 @@ public class WaylandBridgeComponent extends EnvironmentComponent {
             Log.e(TAG, "Failed to start bridge", e);
             writeDiagnostic(context, "BRIDGE_EXCEPTION: " + e.getClass().getName() + ": " + e.getMessage());
         }
-        */
     }
 
     private void writeDiagnostic(Context ctx, String message) {
