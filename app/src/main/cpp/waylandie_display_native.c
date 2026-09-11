@@ -5536,6 +5536,19 @@ Java_com_winlator_cmod_runtime_display_environment_components_WaylandBridgeServe
             transaction,
             surface_control,
             1.0f);
+    /* Log the compositing inputs alongside the geometry. The layer composites at
+     * alpha=0.000000 in its LayerFE block even though both alpha writers in this code set 1.0
+     * (there and in Java), so record exactly what is being applied per frame to find which
+     * write wins. */
+    {
+        static int alpha_logged = 0;
+        if (alpha_logged < 4) {
+            alpha_logged++;
+            __android_log_print(ANDROID_LOG_INFO, "BannerWayland",
+                "present-alpha #%d setBufferAlpha=1.0 transparency=OPAQUE(2) frame=%lld",
+                alpha_logged, (long long)frame_index);
+        }
+    }
     ASurfaceTransaction_setPosition(transaction, surface_control, 0, 0);
     /* Set source and destination TOGETHER, via ASurfaceTransaction_setGeometry (API 29+).
      *

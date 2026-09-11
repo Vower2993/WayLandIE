@@ -601,16 +601,30 @@ public class WaylandBridgeServer {
             height = 1080;
             SurfaceControl.Transaction txn = new SurfaceControl.Transaction()
                 .setVisibility(presentLayer, true)
-                .setAlpha(presentLayer, 1.0f)
                 .setPosition(presentLayer, 0.0f, 0.0f)
                 .setBufferSize(presentLayer, layerW, layerH)
                 .setCrop(presentLayer, new Rect(0, 0, layerW, layerH));
             if (parent != null) {
                 // reparent() is what actually establishes the parent/child relationship; the
-                // Builder takes no parent argument in this API. Z-order is relative to siblings
-                // under the same parent, so a high value keeps us above the SurfaceView.
+                // Builder takes no parent argument in this API.
                 txn.reparent(presentLayer, parent);
             }
+            // Apply alpha AFTER reparenting, and last.
+            //
+            // Measured problem: after the round-26 rewrite the layer composites with
+            // `alpha=0.000000` in its LayerFE block (blend=PREMULTIPLIED), so it is drawn fully
+            // transparent - which over a black background is indistinguishable from a black
+            // desktop. Both alpha writers in the code set 1.0 (Java setAlpha at creation, native
+            // setBufferAlpha every frame), so the zero is not coming from a value anyone wrote.
+            //
+            // reparent() is the one operation in this transaction that changes what the layer
+            // inherits, and a child inherits from its parent - so ordering alpha before the
+            // reparent is a plausible way for the reparent to supersede it. AOSP documents
+            // reparent as: "Children inherit transform (position, scaling) crop, visibility, and
+            // Z-ordering from their parents", and explicitly lists transform/crop/visibility/
+            // Z-order as inherited; alpha is not listed, which is why this is a hypothesis to
+            // measure, not a claim.
+            txn.setAlpha(presentLayer, 1.0f);
             txn.setLayer(presentLayer, Integer.MAX_VALUE);
             txn.apply();
             Log.i(TAG, "Created presentLayer: " + layerW + "x" + layerH
