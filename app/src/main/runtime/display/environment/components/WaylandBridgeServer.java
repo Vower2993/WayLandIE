@@ -742,22 +742,18 @@ public class WaylandBridgeServer {
             // "app UI was gone and the desktop filled the screen" report. A high-but-sane
             // value inside the window is sufficient.
             txn.setLayer(presentLayer, 100);
-            txn.apply();            // Report the parent's own geometry so the next dumpsys can be checked against a
-            // known parent, and so a destination rect that does not fill the parent is visible
-            // in logcat rather than only on the screen. parentW/parentH are the parent's size
-            // in buffer pixels; the native destination rect is expressed in this space.
-            int parentW = -1, parentH = -1;
-            try { parentW = parent.getWidth(); parentH = parent.getHeight(); } catch (Throwable ignored) {}
+            txn.apply();            // Report what was applied. There is no public API to read a SurfaceControl's
+            // size back (SurfaceControl has no getWidth/getHeight), so log the inputs
+            // instead: the parent source, the app window size, and the child's own size.
+            // The authoritative check is the SurfaceFlinger dump - look for the layer
+            // under the DISPLAY hierarchy with geomLayerBounds filling the parent, and
+            // for the layer name appearing in the composition table.
             int hostW = hostView.getWidth(), hostH = hostView.getHeight();
             Log.i(TAG, "Created presentLayer: buffer=" + targetW + "x" + targetH
                     + " (frame source=" + w + "x" + h + ")"
-                    + " parent=" + parentSource + " parentSize=" + parentW + "x" + parentH
+                    + " parent=" + parentSource
                     + " hostView=" + hostW + "x" + hostH
-                    + " -> destination 0,0," + targetW + "," + targetH + " in parent space"
-                    + " (fill=" + (parentW > 0
-                        ? String.format(Locale.US, "%.2fx%.2f", targetW / (float) parentW,
-                                        targetH / (float) parentH)
-                        : "unknown") + " of parent)");
+                    + " z=100 alpha=1.0 transparency set per-frame to TRANSLUCENT(1)");
         } catch (Exception e) {
             Log.e(TAG, "Failed to create presentLayer", e);
         }
