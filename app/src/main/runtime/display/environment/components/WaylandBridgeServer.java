@@ -558,6 +558,35 @@ public class WaylandBridgeServer {
             // the SurfaceView, the presentLayer gets the transform
             // scale(1.333) + translate(3231, 0) which pushes it off-screen.
             // Root-level layers use screen coordinates directly.
+            // Parent the presenter to the app's own window SurfaceControl.
+            //
+            // AOSP documents that a SurfaceControl's geometric properties are interpreted in its
+            // PARENT's space: "Geometric properties like transform, crop, and Z-ordering will be
+            // inherited from the parent, as if the child were content in the parents buffer
+            // stream" (SurfaceControl class doc), and the NDK header defines
+            // ASurfaceTransaction_setGeometry's destination as "the rect in the parent's space
+            // where this surface will be drawn ... clipped by the bounds of its parent".
+            //
+            // This layer was previously built with NO parent at all, which leaves its destination
+            // rect with no parent space to be resolved against, and SurfaceFlinger never
+            // composited it: it appeared in dumpsys exactly once, as a hierarchy node with no
+            // geometry, and never in Active Layers or the composition table, while the app
+            // reported hundreds of frames of "status=pass" (a hardcoded literal).
+            //
+            // Reparenting to the host view's SurfaceControl gives it a real coordinate space.
+            // The native side now also sets source+destination atomically via
+            // ASurfaceTransaction_setGeometry, so the earlier concern about inheriting the
+            // SurfaceView's scale transform is handled by that explicit destination rect.
+            SurfaceControl parent = null;
+            try {
+                parent = hostView.getSurfaceControl();
+            } catch (Throwable t) {
+                Log.w(TAG, "presentLayer: hostView.getSurfaceControl() failed", t);
+            }
+            if (parent == null) {
+                Log.w(TAG, "presentLayer: no host SurfaceControl — layer will be unparented "
+                        + "and may never be composited");
+            }
             presentLayer = new SurfaceControl.Builder()
                 .setName("WayLandIELinuxWindowLayer:waylandie-present")
                 .setBufferSize(layerW, layerH)
@@ -570,15 +599,23 @@ public class WaylandBridgeServer {
             // to the full screen, and SurfaceFlinger handles scaling/rotation.
             width = 2340;
             height = 1080;
-            new SurfaceControl.Transaction()
-                .setLayer(presentLayer, Integer.MAX_VALUE)
+            SurfaceControl.Transaction txn = new SurfaceControl.Transaction()
                 .setVisibility(presentLayer, true)
                 .setAlpha(presentLayer, 1.0f)
                 .setPosition(presentLayer, 0.0f, 0.0f)
                 .setBufferSize(presentLayer, layerW, layerH)
-                .setCrop(presentLayer, new Rect(0, 0, layerW, layerH))
-                .apply();
-            Log.i(TAG, "Created presentLayer: " + layerW + "x" + layerH + " (source=" + w + "x" + h + ")");
+                .setCrop(presentLayer, new Rect(0, 0, layerW, layerH));
+            if (parent != null) {
+                // reparent() is what actually establishes the parent/child relationship; the
+                // Builder takes no parent argument in this API. Z-order is relative to siblings
+                // under the same parent, so a high value keeps us above the SurfaceView.
+                txn.reparent(presentLayer, parent);
+            }
+            txn.setLayer(presentLayer, Integer.MAX_VALUE);
+            txn.apply();
+            Log.i(TAG, "Created presentLayer: " + layerW + "x" + layerH
+                    + " (source=" + w + "x" + h + ")"
+                    + (parent != null ? " parented to host SurfaceControl" : " UNPARENTED"));
         } catch (Exception e) {
             Log.e(TAG, "Failed to create presentLayer", e);
         }
