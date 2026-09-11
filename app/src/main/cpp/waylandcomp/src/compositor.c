@@ -197,7 +197,7 @@ static void compositor_create_surface(struct wl_client *c, struct wl_resource *r
                                      wl_resource_get_version(r), id);
     wl_resource_set_implementation(s->resource, &surface_impl, s,
                                    surface_resource_destroy);
-    fprintf(stderr, "[srv] compositor.create_surface -> %p\n", (void *)s);
+    WLOGI("[srv] compositor.create_surface -> %p", (void *)s);
 }
 static void compositor_create_region(struct wl_client *c, struct wl_resource *r,
                                      uint32_t id) {
@@ -214,7 +214,7 @@ static void bind_compositor(struct wl_client *c, void *data, uint32_t ver,
     struct wl_resource *r =
         wl_resource_create(c, &wl_compositor_interface, ver, id);
     wl_resource_set_implementation(r, &compositor_impl, NULL, NULL);
-    fprintf(stderr, "[srv] client bound wl_compositor v%u\n", ver);
+    WLOGI("[srv] client bound wl_compositor v%u", ver);
 }
 
 /* --------------------------------------------------------------- wl_subcompositor
@@ -256,8 +256,8 @@ static void subcompositor_get_subsurface(struct wl_client *c, struct wl_resource
     wl_resource_set_implementation(sub, &subsurface_impl, NULL, NULL);
     /* A subsurface carries window content (winewayland uses these for child windows) -> presentable. */
     { struct surface *s = wl_resource_get_user_data(surface); if (s) s->presentable = 1; }
-    fprintf(stderr, "[srv] subcompositor.get_subsurface -> %p (parent %p)\n",
-            (void *)sub, (void *)parent);
+    WLOGI("[srv] subcompositor.get_subsurface -> %p (parent %p)",
+          (void *)sub, (void *)parent);
 }
 static const struct wl_subcompositor_interface subcompositor_impl = {
     .destroy = subcompositor_destroy,
@@ -268,7 +268,7 @@ static void bind_subcompositor(struct wl_client *c, void *data, uint32_t ver,
     struct wl_resource *r =
         wl_resource_create(c, &wl_subcompositor_interface, ver, id);
     wl_resource_set_implementation(r, &subcompositor_impl, NULL, NULL);
-    fprintf(stderr, "[srv] client bound wl_subcompositor v%u\n", ver);
+    WLOGI("[srv] client bound wl_subcompositor v%u", ver);
 }
 
 /* ---------------------------------------------------------------- wp_viewporter
@@ -299,7 +299,7 @@ static void viewporter_get_viewport(struct wl_client *c, struct wl_resource *r,
     struct wl_resource *vp =
         wl_resource_create(c, &wp_viewport_interface, wl_resource_get_version(r), id);
     wl_resource_set_implementation(vp, &viewport_impl, NULL, NULL);
-    fprintf(stderr, "[srv] viewporter.get_viewport -> %p\n", (void *)vp);
+    WLOGI("[srv] viewporter.get_viewport -> %p", (void *)vp);
 }
 static const struct wp_viewporter_interface viewporter_impl = {
     .destroy = viewporter_destroy,
@@ -310,7 +310,7 @@ static void bind_viewporter(struct wl_client *c, void *data, uint32_t ver,
     struct wl_resource *r =
         wl_resource_create(c, &wp_viewporter_interface, ver, id);
     wl_resource_set_implementation(r, &viewporter_impl, NULL, NULL);
-    fprintf(stderr, "[srv] client bound wp_viewporter v%u\n", ver);
+    WLOGI("[srv] client bound wp_viewporter v%u", ver);
 }
 
 /* ------------------------------------------------------------------ xdg_shell */
@@ -322,7 +322,7 @@ static void xdg_toplevel_noop_parent(struct wl_client *c, struct wl_resource *r,
                                      struct wl_resource *p) {}
 static void xdg_toplevel_set_title(struct wl_client *c, struct wl_resource *r,
                                    const char *title) {
-    fprintf(stderr, "[srv] xdg_toplevel.set_title \"%s\"\n", title);
+    WLOGI("[srv] xdg_toplevel.set_title \"%s\"", title);
 }
 static void xdg_toplevel_set_app_id(struct wl_client *c, struct wl_resource *r,
                                     const char *id) {}
@@ -370,7 +370,7 @@ static void xdg_surface_get_toplevel(struct wl_client *c, struct wl_resource *r,
     *st = XDG_TOPLEVEL_STATE_ACTIVATED;
     xdg_toplevel_send_configure(tl, 0, 0, &states);
     wl_array_release(&states);
-    fprintf(stderr, "[srv] xdg_surface.get_toplevel -> configured\n");
+    WLOGI("[srv] xdg_surface.get_toplevel -> configured");
 }
 static void xdg_surface_get_popup(struct wl_client *c, struct wl_resource *r,
                                   uint32_t id, struct wl_resource *parent,
@@ -379,7 +379,7 @@ static void xdg_surface_set_geometry(struct wl_client *c, struct wl_resource *r,
                                      int32_t x, int32_t y, int32_t w, int32_t h) {}
 static void xdg_surface_ack_configure(struct wl_client *c, struct wl_resource *r,
                                       uint32_t serial) {
-    fprintf(stderr, "[srv] xdg_surface.ack_configure %u\n", serial);
+    WLOGI("[srv] xdg_surface.ack_configure %u", serial);
 }
 static const struct xdg_surface_interface xdg_surface_impl = {
     .destroy = xdg_surface_destroy,
@@ -410,7 +410,7 @@ static void xdg_wm_base_get_xdg_surface(struct wl_client *c, struct wl_resource 
     { struct surface *s = wl_resource_get_user_data(surf); if (s) s->presentable = 1; }
     /* Initial configure so the client proceeds to attach a buffer. */
     xdg_surface_send_configure(xs, 1);
-    fprintf(stderr, "[srv] xdg_wm_base.get_xdg_surface -> configure(1)\n");
+    WLOGI("[srv] xdg_wm_base.get_xdg_surface -> configure(1)");
 }
 static void xdg_wm_base_pong(struct wl_client *c, struct wl_resource *r,
                              uint32_t serial) {}
@@ -425,7 +425,7 @@ static void bind_xdg_wm_base(struct wl_client *c, void *data, uint32_t ver,
     struct wl_resource *r =
         wl_resource_create(c, &xdg_wm_base_interface, ver, id);
     wl_resource_set_implementation(r, &xdg_wm_base_impl, NULL, NULL);
-    fprintf(stderr, "[srv] client bound xdg_wm_base v%u\n", ver);
+    WLOGI("[srv] client bound xdg_wm_base v%u", ver);
 }
 
 /* ------------------------------------------------------------ zwp_linux_dmabuf_v1
@@ -570,8 +570,8 @@ static struct wl_resource *params_do_create(struct wl_client *c,
         struct stat st;
         long long sz = -1;
         if (p->fd[i] >= 0 && fstat(p->fd[i], &st) == 0) sz = (long long)st.st_size;
-        fprintf(stderr, "[srv]     plane %d: fd=%d size=%lld offset=%u stride=%u\n",
-                i, p->fd[i], sz, p->offset[i], p->stride[i]);
+        WLOGI("[srv]     plane %d: fd=%d size=%lld offset=%u stride=%u",
+              i, p->fd[i], sz, p->offset[i], p->stride[i]);
         b->fd[i] = p->fd[i];
         b->offset[i] = p->offset[i];
         b->stride[i] = p->stride[i];
@@ -756,7 +756,7 @@ static void bind_seat(struct wl_client *c, void *data, uint32_t ver, uint32_t id
     wl_resource_set_implementation(r, &seat_impl, NULL, NULL);
     wl_seat_send_capabilities(r, WL_SEAT_CAPABILITY_POINTER | WL_SEAT_CAPABILITY_KEYBOARD);
     if (ver >= 2) wl_seat_send_name(r, "bannerlator-seat");
-    fprintf(stderr, "[srv] client bound wl_seat v%u\n", ver);
+    WLOGI("[srv] client bound wl_seat v%u", ver);
 }
 
 /* Deliver one pointer event to the visible surface's client pointer. Compositor thread. */
@@ -929,11 +929,10 @@ int banner_wayland_run(void) {
         WLOGE("input pipe creation failed");
     }
 
-    fprintf(stderr, "[srv] bannerlator-wayland compositor up on WAYLAND_DISPLAY=%s\n",
-            socket);
-    fprintf(stderr, "[srv] globals: wl_compositor v6, wl_shm, wl_output v2, "
-                    "xdg_wm_base v1, zwp_linux_dmabuf_v1 v3\n");
-    fflush(stderr);
+    WLOGI("[srv] bannerlator-wayland compositor up on WAYLAND_DISPLAY=%s",
+          socket);
+    WLOGI("[srv] globals: wl_compositor v6, wl_shm, wl_output v2, "
+          "xdg_wm_base v1, zwp_linux_dmabuf_v1 v3");
     WLOGI("compositor READY: listening on %s/%s (socket now exists on disk)",
           rt ? rt : "(null)", socket);
 
