@@ -1180,6 +1180,61 @@ if [ -f "$WINEVK_SO" ]; then
   if [ -n "$WINEVK_DLL" ]; then
     echo "winevulkan.dll found at: $WINEVK_DLL ($(stat -c%s "$WINEVK_DLL") bytes)"
   fi
+
+  # === Vulkan Wayland-surface support check =====================================
+  # Wine only compiles its Wayland platform support into winevulkan when configure
+  # finds a libwayland-client SONAME (SONAME_LIBWAYLAND_CLIENT, used by winevulkan to
+  # dlopen the client library at runtime). Without it no VK_KHR_wayland_surface is
+  # advertised, and that is fatal for us: DXVK then sees only VK_KHR_win32_surface,
+  # fails DxvkInstance::createInstance, and every game dies before rendering:
+  #
+  #   info:  Enabled instance extensions:
+  #   info:    VK_KHR_win32_surface
+  #   err:   DxvkInstance::createInstance: Failed to create Vulkan instance
+  #   err:   Failed to initialize DXVK.
+  #
+  # This is a BINARY check on purpose. The build logs were ambiguous: they show
+  # WAYLAND_CLIENT_CFLAGS/LIBS set and ac_cv_lib_wayland_client_wl_display_connect=yes,
+  # which reads like Wayland is enabled, yet the resulting object demonstrably is not.
+  # Grepping the artifact settles it instead of arguing about configure output.
+  echo "=== winevulkan Wayland-platform support (binary check) ==="
+  WINEVK_HAVE_WAYLAND=0
+  if [ -f "$WINEVK_SO" ]; then
+    for sym in wl_display_connect wl_proxy_marshal vkCreateWaylandSurfaceKHR; do
+      if grep -qa "$sym" "$WINEVK_SO"; then
+        echo "  winevulkan.so: FOUND $sym"
+        WINEVK_HAVE_WAYLAND=1
+      else
+        echo "  winevulkan.so: missing $sym"
+      fi
+    done
+    if grep -qa "VK_KHR_wayland_surface" "$WINEVK_SO"; then
+      echo "  winevulkan.so: FOUND VK_KHR_wayland_surface string"
+    else
+      echo "  winevulkan.so: missing VK_KHR_wayland_surface string"
+    fi
+  fi
+  if [ "$WINEVK_HAVE_WAYLAND" = "1" ]; then
+    echo "RESULT: winevulkan.so HAS Wayland platform support"
+  else
+    echo "RESULT: winevulkan.so has NO Wayland platform support"
+    echo "        -> DXVK cannot create a Vulkan instance; all Vulkan games will fail."
+    echo "        Likely cause: only STATIC libwayland-*.a are produced, so Wine's"
+    echo "        configure cannot resolve a libwayland-client soname to dlopen."
+    echo "        Also check that Wine's config.h defines SONAME_LIBWAYLAND_CLIENT."
+  fi
+
+  # The authoritative answer on whether Wine thinks it has Wayland: config.h. Wine gates its
+  # Wayland platform code on these sonames, so a missing SONAME_LIBWAYLAND_CLIENT explains a
+  # winevulkan without any Wayland symbols far more directly than the configure summary does.
+  WINE_CONFIG_H=$(ls /tmp/proton-wine/include/config.h 2>/dev/null | head -1)
+  if [ -n "$WINE_CONFIG_H" ]; then
+    echo "=== Wayland sonames in $WINE_CONFIG_H ==="
+    grep -E "SONAME_LIBWAYLAND|HAVE_WAYLAND" "$WINE_CONFIG_H" || \
+      echo "  (none defined - Wine will not advertise VK_KHR_wayland_surface)"
+  else
+    echo "=== WARNING: config.h not found to check Wayland sonames ==="
+  fi
 else
   echo "WARNING: winevulkan.so not found in Proton source tree"
   echo "Searching for any winevulkan files..."
