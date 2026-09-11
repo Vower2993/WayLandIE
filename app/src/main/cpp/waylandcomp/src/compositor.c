@@ -928,15 +928,15 @@ int banner_wayland_run(void) {
     WLOGI("compositor READY: listening on %s/%s (socket now exists on disk)",
           rt ? rt : "(null)", socket);
 
-    /* wl_display_run() returns when the event loop exits, which can happen if a
-     * client sends a fatal error or the socket becomes unusable. Log the return
-     * and an explicit "socket gone" line, because wl_display_destroy() UNLINKS the
+    /* wl_display_run() returns void and only returns once the event loop has been
+     * terminated (wl_display_terminate, or the loop exiting after a fatal client
+     * error). Log that explicitly, because wl_display_destroy() UNLINKS the
      * socket: without this, a disappeared wayland-0 is ambiguous between "the app
-     * deleted it" and "the compositor exited and unlinked it", and those need
+     * deleted it" and "the compositor stopped and unlinked it", and those need
      * different fixes. */
-    int rc = wl_display_run(display);
-    WLOGW("compositor event loop RETURNED rc=%d - the compositor is stopping and "
-          "wl_display_destroy() will unlink %s/%s", rc, rt ? rt : "(null)", socket);
+    wl_display_run(display);
+    WLOGW("compositor event loop EXITED - wl_display_destroy() will now unlink %s/%s",
+          rt ? rt : "(null)", socket);
 
     wl_display_destroy(display);
     WLOGW("compositor destroyed; %s/%s has been unlinked. If the guest had not "
