@@ -5537,12 +5537,39 @@ Java_com_winlator_cmod_runtime_display_environment_components_WaylandBridgeServe
             surface_control,
             1.0f);
     ASurfaceTransaction_setPosition(transaction, surface_control, 0, 0);
-    waylandie_surface_transaction_set_crop(transaction, surface_control, &crop);
-    /* Set destination frame explicitly — tells SurfaceFlinger the exact
-     * output rectangle so it doesn't default to 0x0 or buffer-native size */
-    waylandie_surface_transaction_set_destination_frame(
+    /* Set source and destination TOGETHER, via ASurfaceTransaction_setGeometry (API 29+).
+     *
+     * This replaces a set_crop + set_destination_frame pair that could not work on this target:
+     * android_api_override.h force-defines __ANDROID_API__ 31 for every translation unit of this
+     * library (it is -include'd), so the destination-frame wrapper's `#if __ANDROID_API__ >= 34`
+     * branch never compiled and its #else called setCrop a second time with the same rect - a
+     * no-op. The destination frame was therefore never applied and the layer had no usable
+     * geometry, which matches the measured symptom: the layer exists with a live handle but
+     * never appears in SurfaceFlinger's composition table, and the screen stays black.
+     *
+     * AOSP documents setGeometry as the atomic form, with source and destination both required to
+     * have width and height > 0 and the destination interpreted in the parent's space. The source
+     * rect here is the full blit target (originally `crop`, which is 0,0..target_width,height).
+     */
+    waylandie_surface_transaction_set_geometry(
             transaction, surface_control,
+            0, 0, (int32_t)target_width, (int32_t)target_height,
             0, 0, (int32_t)target_width, (int32_t)target_height);
+    /* Report the geometry we are about to apply, and that a buffer is being attached at all.
+     * The previous code could not report its own failure (status=pass was a literal, and
+     * ASurfaceTransaction_apply returns void), which is why a non-composited layer looked like a
+     * success for many rounds. Log the inputs instead of trusting the outcome. */
+    {
+        static int geom_logged = 0;
+        if (geom_logged < 4) {
+            geom_logged++;
+            __android_log_print(ANDROID_LOG_INFO, "BannerWayland",
+                "present-geometry #%d src=0,0,%d,%d dst=0,0,%d,%d buffer=%p frame=%lld",
+                geom_logged, (int)target_width, (int)target_height,
+                (int)target_width, (int)target_height,
+                (void *)slot->buffer, (long long)frame_index);
+        }
+    }
     ASurfaceTransaction_setDamageRegion(transaction, surface_control, &crop, 1);
 
     if (slot_wait_us > 0) {

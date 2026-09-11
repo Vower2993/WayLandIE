@@ -100,6 +100,18 @@ void waylandie_surface_transaction_set_destination_frame(
         ASurfaceControl *surface_control,
         int32_t left, int32_t top, int32_t right, int32_t bottom);
 
+// Sets source and destination together via ASurfaceTransaction_setGeometry (API 29+).
+//
+// Use this instead of set_crop + set_destination_frame. The latter pair is broken on this
+// target: android_api_override.h force-defines __ANDROID_API__ 31, so the
+// set_destination_frame wrapper's `#if __ANDROID_API__ >= 34` branch never compiles and the
+// destination frame was silently never applied. See the note in surface_control_cpp_shim.cpp.
+void waylandie_surface_transaction_set_geometry(
+        ASurfaceTransaction *transaction,
+        ASurfaceControl *surface_control,
+        int32_t src_left, int32_t src_top, int32_t src_right, int32_t src_bottom,
+        int32_t dst_left, int32_t dst_top, int32_t dst_right, int32_t dst_bottom);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif
