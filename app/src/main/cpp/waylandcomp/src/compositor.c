@@ -85,7 +85,11 @@ static void surface_attach(struct wl_client *c, struct wl_resource *r,
                            struct wl_resource *buffer, int32_t x, int32_t y) {
     struct surface *s = wl_resource_get_user_data(r);
     s->pending_buffer = buffer;
-    fprintf(stderr, "[srv] surface.attach buffer=%p (%d,%d)\n", (void *)buffer, x, y);
+    /* stderr from the Android process goes to /dev/null, so this was invisible:
+     * every buffer attach was unobservable, which made "is the client producing
+     * frames at all?" impossible to answer from logcat. Log it instead. */
+    WLOGI("surface.attach buffer=%p (%d,%d) presentable=%d",
+          (void *)buffer, x, y, s ? s->presentable : -1);
 }
 static void surface_damage(struct wl_client *c, struct wl_resource *r,
                            int32_t x, int32_t y, int32_t w, int32_t h) {}
@@ -96,6 +100,7 @@ static void surface_frame(struct wl_client *c, struct wl_resource *r, uint32_t c
         wl_resource_create(c, &wl_callback_interface, 1, cb);
     wl_callback_send_done(callback, 0);
     wl_resource_destroy(callback);
+    WLOGI("surface.frame -> done(0) immediately");
 }
 static void surface_set_opaque(struct wl_client *c, struct wl_resource *r,
                                struct wl_resource *region) {}
@@ -114,6 +119,7 @@ static void surface_commit(struct wl_client *c, struct wl_resource *r) {
          * skips it regardless: blitting a 24x24 cursor fullscreen would stretch it over the whole
          * screen. A real small cursor overlay is a later step. */
         if (!s->presentable) {
+            WLOGI("surface.commit: NOT presentable (no window role) -> releasing buffer");
             wl_buffer_send_release(s->pending_buffer);
             s->pending_buffer = NULL;
             return;
@@ -126,6 +132,9 @@ static void surface_commit(struct wl_client *c, struct wl_resource *r) {
          * surface always re-presents its own new frames. This is a single-window stopgap; a true
          * multi-window desktop needs per-surface geometry composition (the wlroots project). */
         long long area = buffer_area(s->pending_buffer);
+        WLOGI("surface.commit: presentable area=%lld vis_area=%lld visible_self=%d -> %s",
+              area, g_vis_area, (s->resource == g_visible_surface),
+              ((s->resource == g_visible_surface || area >= g_vis_area) ? "PRESENT" : "skip"));
         if (s->resource == g_visible_surface || area >= g_vis_area) {
             present_committed_buffer(s->pending_buffer); /* sets g_vis_w/h */
             g_visible_surface = s->resource; /* pointer routes here (we blit it fullscreen) */
