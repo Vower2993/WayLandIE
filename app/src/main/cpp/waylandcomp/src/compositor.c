@@ -84,6 +84,44 @@ struct surface {
     int presentable; /* has a window role (xdg_surface or subsurface); a cursor/plain surface = 0 */
 };
 
+/* Write one committed wl_shm buffer to an uncompressed PPM so the guest's actual output can be
+ * inspected directly instead of inferred. Sampling statistics can only say "the pixels are
+ * black"; a dump says WHAT was painted, and whether it is a real desktop, a partially drawn
+ * window, or nothing at all. PPM (P6) is chosen because it is trivial to write from C - no
+ * encoder, no allocation strategy, no dependency.
+ *
+ * Written once per size to /data/local/tmp, which is world-writable and readable by adb, so the
+ * file can be pulled without root. Best-effort: any failure returns quietly, because this is
+ * diagnostic only and must never affect presentation. */
+static void dump_shm_ppm(const void *data, int w, int h, int stride) {
+    static int dumped_sizes = 0;
+    char path[128];
+    if (dumped_sizes >= 4) return; /* one per distinct size, a handful of sizes at most */
+    snprintf(path, sizeof(path), "/data/local/tmp/wl-frame-%dx%d.ppm", w, h);
+    if (access(path, F_OK) == 0) return; /* already dumped this size */
+    FILE *f = fopen(path, "wb");
+    if (!f) return;
+    fprintf(f, "P6\n%d %d\n255\n", w, h);
+    /* PPM is R,G,B; the client's buffer is B,G,R,X (little-endian XRGB8888), so swap. */
+    const unsigned char *row = (const unsigned char *)data;
+    unsigned char *line = malloc((size_t)w * 3);
+    if (line) {
+        for (int y = 0; y < h; y++) {
+            const unsigned char *p = row + (size_t)y * stride;
+            for (int x = 0; x < w; x++) {
+                line[x * 3 + 0] = p[x * 4 + 2];
+                line[x * 3 + 1] = p[x * 4 + 1];
+                line[x * 3 + 2] = p[x * 4 + 0];
+            }
+            fwrite(line, 1, (size_t)w * 3, f);
+        }
+        free(line);
+    }
+    fclose(f);
+    dumped_sizes++;
+    WLOGI("dumped frame %dx%d stride=%d -> %s", w, h, stride, path);
+}
+
 static void surface_destroy(struct wl_client *c, struct wl_resource *r) {
     wl_resource_destroy(r);
 }
@@ -553,6 +591,10 @@ static void present_committed_buffer(struct wl_resource *buffer) {
                       "first_nz=(%ld,%ld)", seen[slot].n, w, h, stride,
                       wl_shm_buffer_get_format(shm), total, nz,
                       total ? (int)(nz * 100 / total) : 0, first_nz_x, first_nz_y);
+                /* Dump a LATER frame, not the first commit: a client's first attach is
+                 * commonly a blank pre-paint buffer, so dumping frame #1 would show black
+                 * whether or not the desktop ever gets drawn and would prove nothing. */
+                if (seen[slot].n >= 3) dump_shm_ppm(data, w, h, stride);
             }
             vk_present_commit_shm(data, w, h, stride, wl_shm_buffer_get_format(shm));
         }
