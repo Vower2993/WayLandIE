@@ -32,6 +32,8 @@ public class WaylandBridgeServer {
     private int width = 1920;
     private int height = 1080;
     private int frameIndex = 0;
+    /** Consecutive failed binds in the current accept loop; reset on success. */
+    private int bindFailures = 0;
     private Runnable preloaderDismissCallback = null;
     private Runnable onFirstFrameCallback = null;
 
@@ -151,6 +153,15 @@ public class WaylandBridgeServer {
         }
         if (acceptThread != null) {
             acceptThread.interrupt();
+            // Join it before returning. Without this, a subsequent start() can overlap with a
+            // generation that is still between its while-check and its bind, which is exactly
+            // how the leaked listener described in acceptLoop() got created. Bounded wait so a
+            // stuck accept() cannot block teardown.
+            try {
+                acceptThread.join(500);
+            } catch (InterruptedException ignored) {
+                Thread.currentThread().interrupt();
+            }
             acceptThread = null;
         }
         if (presentLayer != null) {
@@ -176,51 +187,90 @@ public class WaylandBridgeServer {
     private void acceptLoop() {
         long retryDelayMs = 100L;
         while (running) {
+            // Bind into a LOCAL, and use that local everywhere inside this iteration.
+            //
+            // This is the fix for a leak that made the presenter permanently deaf. The
+            // previous version assigned straight to the `serverSocket` field and used the
+            // field in the inner accept loop. Because `start()` sets `running = true` and
+            // `stop()` sets it false, an accept loop from a PREVIOUS generation can still be
+            // between its while-check and its bind when a new generation starts. Both loops
+            // then bind, the second overwrites the field, and the first one's listener is
+            // never closed - it stays bound to the abstract socket for the life of the
+            // process, so `new LocalServerSocket(name)` fails with "Address already in use"
+            // forever.
+            //
+            // Measured symptom, with the session fully alive underneath it:
+            //   WaylandBridgeServer: Bind failed (will retry in 5000ms): Address already in use
+            // repeating every 5s for the rest of the session, TWO threads doing it in lockstep,
+            // while /proc/net/unix showed the listener held by a process nobody could name.
+            // The bridge's own log ends at frame=0 present-step, so the 40 desktop frames that
+            // were converted to AHardwareBuffer had nowhere to go.
+            LocalServerSocket bound;
             try {
-                serverSocket = new LocalServerSocket(SOCKET_NAME);
-                Log.i(TAG, "Listening on abstract socket: " + SOCKET_NAME);
-                // Signal start() that the socket is bound — allows the bridge
-                // binary to be launched without racing the bind.
-                if (socketBoundLatch != null) {
-                    socketBoundLatch.countDown();
+                bound = new LocalServerSocket(SOCKET_NAME);
+            } catch (IOException e) {
+                if (!running) break;
+                bindFailures++;
+                if (bindFailures == 4) {
+                    // Escalate once. This state is a silent total failure of the display path -
+                    // the bridge keeps producing frames into a socket nobody is listening on,
+                    // and every downstream diagnostic still says status=pass - so it must not
+                    // look like a routine retry in the log.
+                    Log.e(TAG, "SOCKET UNAVAILABLE: cannot bind " + SOCKET_NAME
+                            + " after " + bindFailures + " attempts. A stale listener from a "
+                            + "previous session is holding the abstract socket, so NO frame can "
+                            + "be presented and the screen stays black regardless of what the "
+                            + "bridge or the compositor report. Clear it by killing the old "
+                            + "process (am force-stop, or kill the previous activity instance).");
+                } else {
+                    Log.w(TAG, "Bind failed (will retry in " + retryDelayMs + "ms): " + e.getMessage());
                 }
-                retryDelayMs = 100L;  // Reset backoff on successful bind
+                try {
+                    Thread.sleep(retryDelayMs);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+                // Exponential backoff: double each retry, cap at 5s.
+                retryDelayMs = Math.min(retryDelayMs * 2, 5000L);
+                continue;
+            }
+            serverSocket = bound;
+            bindFailures = 0;
+            Log.i(TAG, "Listening on abstract socket: " + SOCKET_NAME);
+            // Signal start() that the socket is bound — allows the bridge
+            // binary to be launched without racing the bind.
+            if (socketBoundLatch != null) {
+                socketBoundLatch.countDown();
+            }
+            retryDelayMs = 100L;  // Reset backoff on successful bind
+            try {
                 while (running) {
+                    LocalSocket client;
                     try {
-                        LocalSocket client = serverSocket.accept();
-                        Log.i(TAG, "Bridge client connected");
-                        // Handle each client in a separate thread so multiple
-                        // bridge connections (input-stream + dmabuf-present)
-                        // can be served simultaneously.
-                        Thread clientThread = new Thread(
-                                () -> handleClient(client),
-                                "wl-bridge-client");
-                        clientThread.setDaemon(true);
-                        clientThread.start();
+                        client = bound.accept();
                     } catch (IOException e) {
                         if (running) {
                             Log.w(TAG, "Accept error: " + e.getMessage());
+                            break;  // re-bind in the outer loop
                         }
-                    }
-                }
-            } catch (IOException e) {
-                if (running) {
-                    Log.w(TAG, "Bind failed (will retry in " + retryDelayMs
-                            + "ms): " + e.getMessage());
-                    try {
-                        Thread.sleep(retryDelayMs);
-                    } catch (InterruptedException ie) {
-                        Thread.currentThread().interrupt();
                         break;
                     }
-                    // Exponential backoff: double each retry, cap at 5s.
-                    retryDelayMs = Math.min(retryDelayMs * 2, 5000L);
+                    Log.i(TAG, "Bridge client connected");
+                    // Handle each client in a separate thread so multiple
+                    // bridge connections (input-stream + dmabuf-present)
+                    // can be served simultaneously.
+                    Thread clientThread = new Thread(
+                            () -> handleClient(client),
+                            "wl-bridge-client");
+                    clientThread.setDaemon(true);
+                    clientThread.start();
                 }
             } finally {
-                if (serverSocket != null) {
-                    try { serverSocket.close(); } catch (IOException ignored) {}
-                    serverSocket = null;
-                }
+                // Close only THIS iteration's socket, never whatever the field happens to
+                // hold now (a newer generation may already own it).
+                try { bound.close(); } catch (IOException ignored) {}
+                if (serverSocket == bound) serverSocket = null;
             }
         }
         Log.i(TAG, "Bridge server thread exiting");
@@ -503,6 +553,19 @@ public class WaylandBridgeServer {
 
             Log.i(TAG, "Present result: " + result + " frame=" + (frameIndex - 1) +
                     " source=" + srcWidth + "x" + srcHeight);
+            // Periodic heartbeat. Before this, the ONLY per-frame log line was the one above,
+            // and it was emitted only when a frame actually arrived - so a presenter that had
+            // silently stopped receiving frames (bind failure, dead client) produced no output
+            // at all and looked identical to a presenter the bridge had never connected to.
+            // Log the first few frames unconditionally, then every 60th, so "frames are
+            // arriving" and "frames stopped arriving" are both visible in logcat.
+            int frameNo = frameIndex - 1;
+            if (frameNo < 3 || frameNo % 60 == 0) {
+                Log.i(TAG, "frame-heartbeat n=" + frameNo + " source=" + srcWidth + "x" + srcHeight
+                        + " target=" + width + "x" + height + " result="
+                        + (result == null ? "null" : (result.length() > 60
+                            ? result.substring(0, 60) : result)));
+            }
 
             // Dismiss the preloader dialog on the first successful frame.
             if (frameIndex == 1) {
