@@ -309,6 +309,7 @@ else:
     with open('dlls/winewayland.drv/window_surface.c', 'w') as f:
         f.write(c)
     print("  [window_surface.c] copy_pixel_region full-extent fallback applied")
+PYFALLBACK
 
     # === Instrument wayland_shm_buffer_copy_data: is the SOURCE surface painted? ===
     #
