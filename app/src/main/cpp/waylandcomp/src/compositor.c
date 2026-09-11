@@ -90,17 +90,27 @@ struct surface {
  * window, or nothing at all. PPM (P6) is chosen because it is trivial to write from C - no
  * encoder, no allocation strategy, no dependency.
  *
- * Written once per size to /data/local/tmp, which is world-writable and readable by adb, so the
- * file can be pulled without root. Best-effort: any failure returns quietly, because this is
- * diagnostic only and must never affect presentation. */
+ * Written once per size, capped at 4 sizes, and entirely best-effort: any failure returns
+ * quietly, because this is diagnostic only and must never affect presentation.
+ *
+ * The file goes under the app's own files/ dir, NOT /data/local/tmp. That directory is
+ * drwxrwx--x owned by shell, so the app's uid cannot create files in it - the first version
+ * wrote there, fopen() failed silently, and no dump ever appeared even though the code ran.
+ * files/ is writable by the app and still readable over adb without root via
+ *   adb exec-out run-as com.tencent.ig cat files/wl-frame-WxH.ppm > frame.ppm */
 static void dump_shm_ppm(const void *data, int w, int h, int stride) {
     static int dumped_sizes = 0;
-    char path[128];
+    char path[160];
     if (dumped_sizes >= 4) return; /* one per distinct size, a handful of sizes at most */
-    snprintf(path, sizeof(path), "/data/local/tmp/wl-frame-%dx%d.ppm", w, h);
+    snprintf(path, sizeof(path), "/data/data/com.tencent.ig/files/wl-frame-%dx%d.ppm", w, h);
     if (access(path, F_OK) == 0) return; /* already dumped this size */
     FILE *f = fopen(path, "wb");
-    if (!f) return;
+    if (!f) {
+        /* Do not fail silently: a permission problem here is invisible otherwise, which is
+         * exactly how the first version of this dump produced nothing at all. */
+        WLOGW("dump_shm_ppm: cannot create %s (errno=%d)", path, errno);
+        return;
+    }
     fprintf(f, "P6\n%d %d\n255\n", w, h);
     /* PPM is R,G,B; the client's buffer is B,G,R,X (little-endian XRGB8888), so swap. */
     const unsigned char *row = (const unsigned char *)data;
