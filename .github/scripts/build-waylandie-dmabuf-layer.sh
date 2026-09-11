@@ -91,10 +91,30 @@ echo "=== Linking libvk_layer_waylandie_dmabuf.so ==="
     -o "$OUT" \
     /tmp/waylandie_dmabuf_layer.o \
     -Wl,--no-undefined \
+    -Wl,-z,max-page-size=16384 \
     -landroid \
     -llog \
     -ldl \
     -lc
+
+# 16 KB page size (Android 15+). app/build.gradle passes
+# -Wl,-z,max-page-size=16384 for the Gradle/CMake linkers, but this script links
+# the layer itself, and app/build.gradle's jniLibs.pickFirsts means THIS artifact
+# is the one packaged (it collides with the identically named CMake target). With
+# the default alignment the shipped .so kept 0x1000 LOAD alignment and Android
+# flagged the app: "This app isn't 16 KB-compatible. ELF alignment check failed
+# ... libvk_layer_waylandie_dmabuf.so : LOAD segment not aligned". Emulators and
+# devices with 16 KB pages can fail to load an unaligned .so, and the layer is
+# what carries zero-copy dmabuf frames, so this matters for the pipeline itself.
+if "$TOOLCHAIN/bin/llvm-readelf" -l "$OUT" 2>/dev/null | grep -q 'LOAD'; then
+    ALIGN=$("$TOOLCHAIN/bin/llvm-readelf" -l "$OUT" 2>/dev/null |
+            awk '/LOAD/ {print $NF}' | sort -u | tail -1)
+    echo "LOAD alignment: $ALIGN (expect 0x4000)"
+    case "$ALIGN" in
+        0x4000) ;;
+        *) echo "WARNING: $OUT is not 16 KB aligned (got $ALIGN)" >&2 ;;
+    esac
+fi
 
 echo "=== Verifying output ==="
 ls -la "$OUT"
