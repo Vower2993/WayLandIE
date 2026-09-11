@@ -217,6 +217,99 @@ with open('dlls/winewayland.drv/window_surface.c', 'w') as f:
 print("  [window_surface.c] NtGdiGetRegionData neutralized")
 PYNTGDI
 
+    # === Instrument wayland_shm_buffer_copy_data: is the SOURCE surface painted? ===
+    #
+    # This settles the one question the desktop work has been stuck on. On-device evidence:
+    #
+    #   * Wine's committed wl_shm buffers are 100% zero bytes - proved from inside the bridge
+    #     process (1,966,080 pixel bytes, 0 non-zero) for THREE different windows: the
+    #     WineAppBar taskbars (1280x128), wfm.exe (1024x640) and a winemine probe (1280x768).
+    #   * Wine nonetheless runs the full copy: "wayland_shm_buffer_copy_data buffer=...
+    #     bits=... rect=(0,0)-(1024,640)", i.e. the full surface, on every flush.
+    #
+    # So the copy executes, over the whole surface, and lands zeros. Either Wine's GDI window
+    # surface genuinely holds no pixels, or the copy is reading the wrong place. Both are
+    # visible if we print the source and destination the copy actually uses, plus whether the
+    # source holds any non-zero byte.
+    #
+    # This is the same trick that made the bridge conclusive: measure the bytes, do not infer.
+    echo "  Patching window_surface.c: wayland_shm_buffer_copy_data source/dest diagnostics"
+    python3 << 'PYSHMDBG'
+with open('dlls/winewayland.drv/window_surface.c', 'r') as f:
+    c = f.read()
+
+anchor = 'static void wayland_shm_buffer_copy_data('
+idx = c.find(anchor)
+if idx < 0:
+    print("  WARNING: wayland_shm_buffer_copy_data not found; skipping source diagnostics")
+else:
+    brace = c.find('{', idx)
+    if brace < 0:
+        print("  WARNING: could not locate function body; skipping")
+    else:
+        # Real signature (wine dlls/winewayland.drv/window_surface.c):
+        #   wayland_shm_buffer_copy_data(struct wayland_shm_buffer *buffer,
+        #                                const char *bits, RECT *rect,
+        #                                HRGN region, BOOL force_opaque)
+        # The function is tail-positioned: it converts rect/region, calls
+        # copy_pixel_region(bits, rect, buffer->map_data, &buffer_rect, region, force_opaque),
+        # and returns. So the diagnostic is inserted BEFORE that call, and it reports the
+        # region-data state plus the src buffer, then a second report is unnecessary because
+        # the caller's TRACE already gives buffer=%p bits=%p rect=%s.
+        probe = '''
+    /* WayLandIE diagnostic: why is the destination buffer left zeroed?
+     *
+     * Stock copy_pixel_region() begins:
+     *     RGNDATA *rgndata = get_region_data(region);
+     *     if (!rgndata) return;            <- copies NOTHING
+     * and the build applies a patch making NtGdiGetRegionData(...) evaluate to 0, which makes
+     * get_region_data return NULL unconditionally. If that is the cause, this prints
+     * rgndata=NULL on every flush while Wine's own trace shows a full-surface rect. */
+    {
+        static int wlcopy_dbg = 0;
+        if (wlcopy_dbg < 12) {
+            HRGN dbg_rgn = region;
+            RGNDATA *dbg_rgndata = get_region_data(dbg_rgn);
+            const unsigned char *dbg_src = (const unsigned char *)bits;
+            long dbg_nz = 0, dbg_total = 0;
+            int dbg_max = 0;
+            if (dbg_src && rect) {
+                int dbg_stride = (rect->right - rect->left) * 4;
+                for (int dy = 0; dy < (rect->bottom - rect->top); dy += 8) {
+                    const unsigned char *row = dbg_src + (size_t)dy * dbg_stride;
+                    for (int dx = 0; dx < (rect->right - rect->left); dx += 8) {
+                        const unsigned char *p = row + (size_t)dx * 4;
+                        if (p[0] || p[1] || p[2]) dbg_nz++;
+                        if (p[0] > dbg_max) dbg_max = p[0];
+                        if (p[1] > dbg_max) dbg_max = p[1];
+                        if (p[2] > dbg_max) dbg_max = p[2];
+                        dbg_total++;
+                    }
+                }
+            }
+            wlcopy_dbg++;
+            fprintf(stderr, "[winewayland] shm-copy #%d buffer=%p bits=%p rect=(%d,%d)-(%d,%d) "
+                            "region=%p rgndata=%p sampled=%ld src_nonzero=%ld src_max=%d\\n",
+                    wlcopy_dbg, (void *)buffer, (void *)bits,
+                    rect ? rect->left : -1, rect ? rect->top : -1,
+                    rect ? rect->right : -1, rect ? rect->bottom : -1,
+                    (void *)dbg_rgn, (void *)dbg_rgndata,
+                    dbg_total, dbg_nz, dbg_max);
+            if (dbg_rgndata) free(dbg_rgndata);
+        }
+    }
+'''
+        c = c[:brace + 1] + probe + c[brace + 1:]
+        with open('dlls/winewayland.drv/window_surface.c', 'w') as f:
+            f.write(c)
+        print("  [window_surface.c] wayland_shm_buffer_copy_data diagnostics inserted")
+
+        for need in ('buffer->map_data', 'get_region_data', 'copy_pixel_region',
+                     'wayland_shm_buffer_copy_data'):
+            if need not in c:
+                print(f"  WARNING: '{need}' not found - the inserted probe may not compile")
+PYSHMDBG
+
     # Instrument wayland.c: log the exact reason wl_display_connect fails
     # (errno + env). The stock code returns FALSE silently on connect failure,
     # which surfaces only as "Initialization of winewayland.drv failed" +
