@@ -6718,6 +6718,27 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
         
     }
 
+    /**
+     * Forward one pointer event to the in-process Wayland compositor's wl_seat.
+     *
+     * <p>Coordinates arrive in XServer's screen space, which is the same space the guest desktop
+     * is launched in ({@code /desktop=shell,WxH}) and which was declared to the compositor via
+     * {@code setWaylandOutputSize}. The compositor rescales from there into the focused
+     * surface's real buffer size, so no scaling happens here. Negatives are possible
+     * ({@code injectPointerMoveDelta} allows a 5% soft margin) and are passed through: the
+     * compositor clamps them into the surface.
+     *
+     * @param action 0 = button down, 1 = motion, 2 = button up (matches deliver_pointer())
+     */
+    private void sendWaylandPointer(int action, int x, int y) {
+        try {
+            com.winlator.cmod.runtime.display.environment.components.WaylandBridgeServer
+                .nativeCompositorSendPointer(action, x, y);
+        } catch (Throwable t) {
+            android.util.Log.w("XServerDisplayActivity", "sendWaylandPointer failed", t);
+        }
+    }
+
     private void createWrapperScript(String path, String content) {
         File scriptFile = new File(path);
         FileUtils.writeString(scriptFile, content);
@@ -6744,6 +6765,31 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
             // NOTE: The ANativeWindow pointer wait is done in the background
             // executor (setupXEnvironment), NOT here. This method runs on the
             // UI thread — blocking it would prevent surfaceCreated from firing.
+
+            // wl_seat input wiring. Everything that injects pointer input in this app
+            // (TouchpadView for trackpad/touchscreen modes, InputControlsView for on-screen
+            // controls, external mice) funnels through XServer.injectPointer*, but in Wayland
+            // mode there is no X server to receive it — those calls previously mutated only
+            // XServer's own pointer state. The compositor therefore advertised a wl_seat
+            // pointer that never received an event, so the guest desktop had a dead cursor
+            // (defect #10). Install a sink that forwards the same coordinates to the
+            // compositor's seat, converting XServer screen space -> compositor output space.
+            xServerView.setWaylandOutputSize(xServer.screenInfo.width, xServer.screenInfo.height);
+            xServer.setPointerSink(new com.winlator.cmod.runtime.display.xserver.XServer.PointerSink() {
+                @Override
+                public void onPointerMove(int x, int y) {
+                    sendWaylandPointer(1 /* move */, x, y);
+                }
+
+                @Override
+                public void onPointerButton(boolean pressed, int button) {
+                    // Only the buttons the compositor's seat models (BTN_LEFT/RIGHT/MIDDLE)
+                    // are forwarded; evdevButtonFor() returns 0 for anything else (scroll).
+                    if (button == 0) return;
+                    sendWaylandPointer(pressed ? 0 /* down */ : 2 /* up */,
+                                       xServer.pointer.getX(), xServer.pointer.getY());
+                }
+            });
         }
         final VulkanRenderer renderer = xServerView.getRenderer();
         // Match guest libvulkan so imported AHB tiling matches the producer.

@@ -5982,12 +5982,14 @@ typedef void (*vk_present_set_window_fn)(ANativeWindow*);
 typedef void (*vk_present_set_driver_fn)(const char*, const char*, const char*);
 typedef void (*banner_send_pointer_fn)(int action, int x, int y);
 typedef void (*banner_send_key_fn)(int evdev, int state);
+typedef void (*banner_set_output_size_fn)(int w, int h);
 
 static banner_wayland_run_fn g_banner_run = NULL;
 static vk_present_set_window_fn g_set_window = NULL;
 static vk_present_set_driver_fn g_set_driver = NULL;
 static banner_send_pointer_fn g_send_pointer = NULL;
 static banner_send_key_fn g_send_key = NULL;
+static banner_set_output_size_fn g_set_output_size = NULL;
 
 /* Create $XDG_RUNTIME_DIR if missing (0700, as Wayland requires) so
  * wl_display_add_socket() cannot fail on a fresh container. */
@@ -6083,6 +6085,14 @@ Java_com_winlator_cmod_runtime_display_environment_components_WaylandBridgeServe
             "compositor input symbols missing: pointer=%p key=%p "
             "(input will not reach the guest)",
             (void*)g_send_pointer, (void*)g_send_key);
+    /* Optional: only needed so pointer coords are interpreted in the guest's real screen
+     * space instead of a hardcoded 1920x1080. A missing symbol degrades to that default. */
+    g_set_output_size = (banner_set_output_size_fn)dlsym(g_comp_handle,
+                                                         "banner_wayland_set_output_size");
+    if (!g_set_output_size)
+        __android_log_print(ANDROID_LOG_WARN, "WaylandBridgeServer",
+            "banner_wayland_set_output_size missing - pointer coords will be mapped "
+            "through the default 1920x1080 output space");
 
     if (!g_banner_run || !g_set_window) {
         __android_log_print(ANDROID_LOG_ERROR, "WaylandBridgeServer",
@@ -6229,6 +6239,19 @@ Java_com_winlator_cmod_runtime_display_environment_components_WaylandBridgeServe
     (void)env; (void)clazz;
     if (!g_send_pointer) return;
     g_send_pointer((int)action, (int)x, (int)y);
+}
+
+/* JNI: declare the coordinate space that nativeCompositorSendPointer() coordinates are in.
+ * Pass the guest's screen size (the container's `screenSize`, which is also what the guest is
+ * launched with as `wine explorer /desktop=shell,WxH`). The compositor rescales from here into
+ * the focused surface's real buffer size, so this must be the guest desktop size or every click
+ * lands in the wrong place. Optional: without it the compositor keeps its 1920x1080 default. */
+JNIEXPORT void JNICALL
+Java_com_winlator_cmod_runtime_display_environment_components_WaylandBridgeServer_nativeCompositorSetOutputSize(
+        JNIEnv* env, jclass clazz, jint w, jint h) {
+    (void)env; (void)clazz;
+    if (!g_set_output_size) return;
+    g_set_output_size((int)w, (int)h);
 }
 
 /* JNI: forward one key event to the compositor's wl_seat.

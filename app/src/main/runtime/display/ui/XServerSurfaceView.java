@@ -87,6 +87,25 @@ public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Cal
         // The default Z-ordering (below overlays) is what 41d5ea6 uses.
     }
 
+    /**
+     * Declare the coordinate space that pointer events injected into the compositor are in.
+     *
+     * <p>The guest desktop is launched as {@code wine explorer /desktop=shell,WxH}, and the
+     * sink installed by the activity forwards XServer-space coordinates, so this must be the
+     * guest's screen size. The compositor rescales from here into the focused surface's real
+     * buffer size; without it the compositor assumed 1920x1080 and every click landed in the
+     * wrong place. Safe to call repeatedly and before the compositor has started.
+     */
+    public void setWaylandOutputSize(int width, int height) {
+        if (width <= 0 || height <= 0) return;
+        try {
+            com.winlator.cmod.runtime.display.environment.components.WaylandBridgeServer
+                .nativeCompositorSetOutputSize(width, height);
+        } catch (Throwable t) {
+            android.util.Log.w("XServerSurfaceView", "setOutputSize failed", t);
+        }
+    }
+
     /** Dup the dmabuf fd via native dup() to avoid fdsan ownership conflicts. */
     public void setWaylandDmaBufFrame(int fd, int w, int h, int stride, int drmFormat) {
         if (wlDmabufFd >= 0) { closeFd(wlDmabufFd); wlDmabufFd = -1; }

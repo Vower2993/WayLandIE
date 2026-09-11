@@ -19,6 +19,39 @@ import java.util.EnumMap;
 import java.util.concurrent.locks.ReentrantLock;
 
 public class XServer {
+
+  /**
+   * Optional sink that receives pointer events as they are injected.
+   *
+   * <p>In Wayland mode there is no X server: the guest is a Wayland client of the in-process
+   * compositor, and everything that injects input (TouchpadView for trackpad/touchscreen modes,
+   * InputControlsView for on-screen controls, external mice) funnels through the
+   * {@code injectPointer*} methods below. Without a sink those calls only mutate this class's
+   * own {@code pointer} state, so the compositor's {@code wl_seat} advertises a pointer that
+   * never receives a single event and the guest desktop has a dead cursor.
+   *
+   * <p>Coordinates are in this server's own screen space ({@code screenInfo}). That is the same
+   * space the guest desktop is created in ({@code /desktop=shell,WxH}) and the space the
+   * compositor is told about via {@code nativeCompositorSetOutputSize}, so a sink may forward
+   * them unchanged; the compositor rescales into the focused surface's real buffer size.
+   */
+  public interface PointerSink {
+    void onPointerMove(int x, int y);
+
+    /** @param pressed true for press, false for release; button is an evdev BTN_* code */
+    void onPointerButton(boolean pressed, int button);
+  }
+
+  private volatile PointerSink pointerSink;
+
+  public void setPointerSink(PointerSink sink) {
+    this.pointerSink = sink;
+  }
+
+  public PointerSink getPointerSink() {
+    return pointerSink;
+  }
+
   private static final String SGSR_RESIZE_TAG = "SGSRResize";
 
   public enum Lockable {
@@ -219,6 +252,8 @@ public class XServer {
     try (XLock lock = lock(Lockable.WINDOW_MANAGER, Lockable.INPUT_DEVICE)) {
       pointer.setPosition(x, y);
     }
+    PointerSink sink = pointerSink;
+    if (sink != null) sink.onPointerMove(x, y);
   }
 
   public void injectPointerMoveDelta(int dx, int dy) {
@@ -260,6 +295,8 @@ public class XServer {
       if (xi != null) xi.emitRawMotion(2, (double)dx, (double)dy);
     }
     if (renderer != null) renderer.requestCursorRender();
+    PointerSink sink = pointerSink;
+    if (sink != null) sink.onPointerMove(pointer.getX(), pointer.getY());
   }
 
   public void updatePointerForDisplay(int x, int y) {
@@ -290,6 +327,23 @@ public class XServer {
     if (renderer != null) renderer.requestCursorRender();
   }
 
+  /**
+   * Linux evdev BTN_* code for the X11 button number this server uses.
+   *
+   * <p>X11 button 1/2/3 are BTN_LEFT/MIDDLE/RIGHT, but their numeric values differ (X11 1/2/3
+   * vs evdev 0x110/0x112/0x111), so the sink cannot just pass the ordinal through.
+   * Scroll and higher buttons are not modelled by the compositor's seat yet and map to 0,
+   * which the sink treats as "unhandled".
+   */
+  public static int evdevButtonFor(Pointer.Button buttonCode) {
+    switch (buttonCode) {
+      case BUTTON_LEFT: return 0x110;   /* BTN_LEFT */
+      case BUTTON_RIGHT: return 0x111;  /* BTN_RIGHT */
+      case BUTTON_MIDDLE: return 0x112; /* BTN_MIDDLE */
+      default: return 0;
+    }
+  }
+
   public void injectPointerButtonPress(Pointer.Button buttonCode) {
     try (XLock lock = lock(Lockable.WINDOW_MANAGER, Lockable.INPUT_DEVICE)) {
       pointer.setButton(buttonCode, true);
@@ -297,6 +351,8 @@ public class XServer {
       XInput2Extension xInput2Extension = getExtension(XInput2Extension.MAJOR_OPCODE);
       if (xInput2Extension != null) xInput2Extension.emitRawButton(2, buttonCode.ordinal() + 1, true);
     }
+    PointerSink sink = pointerSink;
+    if (sink != null) sink.onPointerButton(true, evdevButtonFor(buttonCode));
   }
 
   public void injectPointerButtonRelease(Pointer.Button buttonCode) {
@@ -306,6 +362,8 @@ public class XServer {
       XInput2Extension xInput2Extension = getExtension(XInput2Extension.MAJOR_OPCODE);
       if (xInput2Extension != null) xInput2Extension.emitRawButton(2, buttonCode.ordinal() + 1, false);
     }
+    PointerSink sink = pointerSink;
+    if (sink != null) sink.onPointerButton(false, evdevButtonFor(buttonCode));
   }
 
   public void injectKeyPress(XKeycode xKeycode) {

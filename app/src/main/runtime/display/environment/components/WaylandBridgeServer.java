@@ -64,10 +64,17 @@ public class WaylandBridgeServer {
     public static native void nativeCompositorSetSurface(android.view.Surface surface);
     // Input injection into the compositor's wl_seat. Without these the seat is
     // advertised but never receives an event, so Wine has a dead pointer and
-    // keyboard. action: 0=down 1=move 2=up; x,y in OUTPUT space (0..1919,0..1079).
+    // keyboard. action: 0=down 1=move 2=up; x,y in the OUTPUT space declared by
+    // nativeCompositorSetOutputSize() (defaults to 1920x1080 if never called).
     // evdev is a Linux input keycode (KEY_A=30), state 1=down 0=up.
     public static native void nativeCompositorSendPointer(int action, int x, int y);
     public static native void nativeCompositorSendKey(int evdev, int state);
+    // Declare the coordinate space nativeCompositorSendPointer() uses. Pass the
+    // guest's screen size (the container's `screenSize`, which is also the value the
+    // guest is launched with as `wine explorer /desktop=shell,WxH`). The compositor
+    // rescales from here into the focused surface's real buffer size, so a mismatch
+    // puts every click in the wrong place. Idempotent; safe before the compositor starts.
+    public static native void nativeCompositorSetOutputSize(int width, int height);
 
     static {
         try {

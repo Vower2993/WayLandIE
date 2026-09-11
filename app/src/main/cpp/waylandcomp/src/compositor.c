@@ -49,9 +49,15 @@ static int g_nptrs;
 static struct seat_keyboard g_kbs[MAX_PTRS];
 static int g_nkbs;
 static struct wl_resource *g_visible_surface; /* last surface committed with a buffer = what's on screen */
-/* Real buffer size of g_visible_surface. We blit it STRETCHED to the fullscreen (1920x1080) output,
- * so incoming pointer coords (output space) must be scaled back to surface-local space by this ratio
- * or clicks on any non-fullscreen window (e.g. the file manager) land outside the real surface. */
+/* The coordinate space that Android pointer input arrives in. deliver_pointer() rescales from
+ * here into the focused surface's real size. This was hardcoded 1920x1080 while the guest is
+ * actually driven as `wine explorer /desktop=shell,1280x720`, so every click was mapped through
+ * the wrong ratio (and the guest desktop the client creates is 1024x640, not 1280x720 either).
+ * Java now reports the real output size via banner_wayland_set_output_size(); the default is
+ * only a fallback for callers that never set it. */
+static int g_out_w = 1920, g_out_h = 1080;
+/* Real buffer size of g_visible_surface; incoming pointer coords are scaled by g_vis_* / g_out_*
+ * so clicks on a non-fullscreen window land inside the real surface. */
 static int g_vis_w = 1920, g_vis_h = 1080;
 /* Area (px) of the current visible surface's buffer. We present the LARGEST presentable surface,
  * not the last one committed: winewayland in /desktop mode spawns tiny taskbar/helper toplevels
@@ -813,12 +819,21 @@ static void deliver_pointer(const struct input_msg *m) {
     /* Java sends coords in the 1920x1080 output space; we blit the surface stretched to fullscreen,
      * so map back to the surface's real (g_vis_w x g_vis_h) local space or clicks miss non-fullscreen
      * windows (e.g. the file manager). Fullscreen surfaces scale 1:1 (no-op). */
-    int lx = (int)((long long)m->p2 * g_vis_w / 1920);
-    int ly = (int)((long long)m->p3 * g_vis_h / 1080);
+    int lx = (int)((long long)m->p2 * g_vis_w / (g_out_w > 0 ? g_out_w : 1920));
+    int ly = (int)((long long)m->p3 * g_vis_h / (g_out_h > 0 ? g_out_h : 1080));
+    /* Callers legitimately produce out-of-range coords: XServer.injectPointerMoveDelta
+     * allows a 5% soft margin on every side so the cursor can leave the screen, and the
+     * compositor's wl_pointer contract has no meaning for negative surface-local values.
+     * Clamp into the real buffer so a drag off-screen pins to the edge instead of
+     * emitting nonsense coordinates the client has to defend against. */
+    if (lx < 0) lx = 0;
+    else if (lx > g_vis_w - 1) lx = g_vis_w - 1;
+    if (ly < 0) ly = 0;
+    else if (ly > g_vis_h - 1) ly = g_vis_h - 1;
     wl_fixed_t fx = wl_fixed_from_int(lx), fy = wl_fixed_from_int(ly);
     uint32_t t = now_ms();
-    WLOGI("pointer action=%d out=(%d,%d) surf=%dx%d -> local=(%d,%d)",
-          action, m->p2, m->p3, g_vis_w, g_vis_h, lx, ly);
+    WLOGI("pointer action=%d out=(%d,%d)/%dx%d surf=%dx%d -> local=(%d,%d)",
+          action, m->p2, m->p3, g_out_w, g_out_h, g_vis_w, g_vis_h, lx, ly);
     if (sp->focus != g_visible_surface) {
         if (sp->focus)
             wl_pointer_send_leave(ptr, wl_display_next_serial(g_display), sp->focus);
@@ -872,8 +887,21 @@ static int on_input_readable(int fd, uint32_t mask, void *data) {
     return 0;
 }
 
+/* Called from JNI (any thread). Sets the coordinate space that Android pointer input arrives
+ * in. Java passes the guest's screen size (the container's `screenSize`, which is also what
+ * winewayland is launched with as `/desktop=shell,WxH`). Without this the mapping used a
+ * hardcoded 1920x1080, so every click was scaled through the wrong ratio and landed in the
+ * wrong place. Only the compositor thread reads these, and an int write is atomic enough for
+ * a diagnostic-grade mapping; the values are set once at surface creation. */
+void banner_wayland_set_output_size(int w, int h) {
+    if (w <= 0 || h <= 0) return;
+    g_out_w = w;
+    g_out_h = h;
+    WLOGI("output size set to %dx%d (pointer input space)", w, h);
+}
+
 /* Called from JNI (Android UI thread). Queues a pointer event; the compositor thread
- * dispatches it. x/y are in output space (0..1919, 0..1079). */
+ * dispatches it. x/y are in the output space set by banner_wayland_set_output_size(). */
 void banner_wayland_send_pointer(int action, int x, int y) {
     if (g_input_pipe[1] < 0) return;
     struct input_msg m = { 0, action, x, y };
