@@ -70,20 +70,31 @@ public final class WaylandDriverInstaller {
         File system32 = new File(prefix, "drive_c/windows/system32");
         File driverInSystem32 = new File(system32, "winewayland.drv");
 
-        boolean needsInstall = !driverInSystem32.exists()
-                || driverInSystem32.length() < 1000;
-        if (needsInstall) {
-            Log.i(TAG, "ensureDriverInstalled: winewayland.drv missing from system32 — extracting");
-            try {
-                extractZip(ctx, prefix);
-                copyToSystem32(prefix);
-            } catch (IOException e) {
-                Log.e(TAG, "ensureDriverInstalled: extraction failed", e);
-                writeDiagnostic(ctx, prefix, winePath, "EXTRACTION_FAILED: " + e.getMessage());
-                return false;
-            }
-        } else {
-            Log.i(TAG, "ensureDriverInstalled: winewayland.drv already present in system32");
+        // ALWAYS re-extract the bundled driver zip.
+        //
+        // This used to be guarded by "is winewayland.drv already in system32?", which meant a
+        // reinstall over an existing prefix - the normal case - skipped extraction entirely and
+        // left the PREVIOUS driver in place forever. The app then went on to copy from that
+        // stale extracted tree, so it reported success ("copied to system32: winewayland.drv")
+        // while installing the old bytes.
+        //
+        // That was observed directly: the APK's bundled zip contained
+        // lib/wine/aarch64-unix/winewayland.so at 1530328 bytes (md5 CB78EB...) and
+        // lib/wine/aarch64-windows/winewayland.drv with a 16:40 timestamp, while the installed
+        // prefix held the previous 1528728-byte .so and a .drv still dated 02:51. Every fix to
+        // the driver therefore appeared to do nothing on-device, which is exactly the failure
+        // mode that wastes whole sessions.
+        //
+        // Extraction is idempotent and cheap relative to a launch (the zip is ~22 MB), so it is
+        // simply always performed. The driver must match the APK that is actually installed.
+        Log.i(TAG, "ensureDriverInstalled: extracting bundled driver zip (unconditional)");
+        try {
+            extractZip(ctx, prefix);
+            copyToSystem32(prefix);
+        } catch (IOException e) {
+            Log.e(TAG, "ensureDriverInstalled: extraction failed", e);
+            writeDiagnostic(ctx, prefix, winePath, "EXTRACTION_FAILED: " + e.getMessage());
+            return false;
         }
 
         // CRITICAL: Copy winewayland.drv + winewayland.so to Wine's install dir.
