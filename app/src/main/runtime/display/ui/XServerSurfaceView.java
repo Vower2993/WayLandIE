@@ -359,6 +359,9 @@ public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Cal
         try {
             com.winlator.cmod.runtime.display.environment.components.WaylandBridgeServer
                 .nativeCompositorSendPointer(action, outX, outY);
+            android.util.Log.i("XServerSurfaceView",
+                "touch action=" + action + " view=" + vw + "x" + vh
+                + " -> out=" + outX + "," + outY);
         } catch (Throwable t) {
             android.util.Log.w("XServerSurfaceView", "sendPointer failed", t);
         }

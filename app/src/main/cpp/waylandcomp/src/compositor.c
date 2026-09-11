@@ -507,6 +507,32 @@ static void present_committed_buffer(struct wl_resource *buffer) {
         int32_t stride = wl_shm_buffer_get_stride(shm);
         if (data && w > 0 && h > 0) {
             g_vis_w = w; g_vis_h = h;
+            /* Evidence for "the output is black": is the CLIENT's buffer black, or is our
+             * upload/blit producing black? Sample the buffer once every 2s (not per frame -
+             * it is a full CPU read of the surface and would eat the frame budget) and report
+             * the byte statistics. allzero=1 with nonzero_bytes=0 means Wine painted black;
+             * nonzero_bytes>0 means the desktop HAS content and the fault is in our path. */
+            static double last_shm_stat;
+            struct timespec ts;
+            clock_gettime(CLOCK_MONOTONIC, &ts);
+            double now = ts.tv_sec + ts.tv_nsec / 1e9;
+            if (now - last_shm_stat >= 2.0) {
+                last_shm_stat = now;
+                const unsigned char *px = (const unsigned char *)data;
+                long nz = 0, al = 0;
+                long total = 0;
+                for (int y = 0; y < h; y += 16)
+                    for (int x = 0; x < w; x += 16) {
+                        const unsigned char *p = px + (size_t)y * stride + (size_t)x * 4;
+                        unsigned char b0 = p[0], b1 = p[1], b2 = p[2], b3 = p[3];
+                        if (b0 || b1 || b2) nz++;
+                        if (b3 == 0xff) al++;
+                        total++;
+                    }
+                WLOGI("shm.stats %dx%d stride=%d wl_fmt=%u sampled=%ld nonzero_px=%ld pct=%d%% "
+                      "alpha_ff=%ld", w, h, stride, wl_shm_buffer_get_format(shm), total, nz,
+                      total ? (int)(nz * 100 / total) : 0, al);
+            }
             vk_present_commit_shm(data, w, h, stride, wl_shm_buffer_get_format(shm));
         }
         wl_shm_buffer_end_access(shm);
