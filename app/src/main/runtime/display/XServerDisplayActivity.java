@@ -262,6 +262,14 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
     private XEnvironment environment;
     private ComposeView displayHostComposeView;
     private FrameLayout xServerDisplayFrame;
+    /**
+     * Last absolute pointer position in the compositor's output space (XServer screen space).
+     * Trackpad mode only reports deltas, and button events carry no coordinates, so the click
+     * position has to be remembered here or every click would be delivered at (0,0).
+     * UI-thread only (set by the PointerSink, read by the same sink).
+     */
+    private int waylandPointerX = 0;
+    private int waylandPointerY = 0;
     private ContainerManager containerManager;
     protected Container container;
     private XServer xServer;
@@ -6762,6 +6770,9 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
         // no SCM_RIGHTS fd passing, no second process.
         if ("wayland".equals(displayMode)) {
             xServerView.setWaylandMode(true);
+            android.util.Log.i("XServerDisplayActivity",
+                "setupUI: wayland branch; screenInfo=" + xServer.screenInfo
+                + " -> declaring compositor output size");
             // NOTE: The ANativeWindow pointer wait is done in the background
             // executor (setupXEnvironment), NOT here. This method runs on the
             // UI thread — blocking it would prevent surfaceCreated from firing.
@@ -6782,12 +6793,25 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
                 }
 
                 @Override
+                public void onPointerAbsolute(int x, int y) {
+                    // Destination for a real press/click. Trackpad mode only ever sends deltas,
+                    // so the pointer would otherwise stay near the origin and every click would
+                    // land in the corner regardless of where the user actually tapped.
+                    waylandPointerX = x;
+                    waylandPointerY = y;
+                    sendWaylandPointer(1 /* move */, x, y);
+                }
+
+                @Override
                 public void onPointerButton(boolean pressed, int button) {
                     // Only the buttons the compositor's seat models (BTN_LEFT/RIGHT/MIDDLE)
                     // are forwarded; evdevButtonFor() returns 0 for anything else (scroll).
                     if (button == 0) return;
+                    // Press/release carry no coordinates of their own in this path, so they are
+                    // sent at the last known position - otherwise wl_pointer would deliver the
+                    // click at (0,0) while the guest's own cursor is somewhere else.
                     sendWaylandPointer(pressed ? 0 /* down */ : 2 /* up */,
-                                       xServer.pointer.getX(), xServer.pointer.getY());
+                                       waylandPointerX, waylandPointerY);
                 }
             });
         }

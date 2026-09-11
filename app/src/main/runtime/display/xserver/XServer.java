@@ -40,6 +40,19 @@ public class XServer {
 
     /** @param pressed true for press, false for release; button is an evdev BTN_* code */
     void onPointerButton(boolean pressed, int button);
+
+    /**
+     * Pointer moved to an absolute position rather than by a relative delta.
+     *
+     * <p>Needed because the two input paths mean different things. Trackpad mode emits deltas
+     * ({@link #injectPointerMoveDelta}), so the position only advances as fast as the user
+     * moves and degenerates into a cursor stuck near the origin when the start position was
+     * never set. Touchscreen mode ({@code screenTouchMode == MODE_TOUCHSCREEN}) and direct
+     * clicks emit absolute positions in this server's screen space. A sink that only sees
+     * deltas cannot tell "the user tapped here" from "the cursor drifted here", so absolute
+     * input is reported separately.
+     */
+    void onPointerAbsolute(int x, int y);
   }
 
   private volatile PointerSink pointerSink;
@@ -253,7 +266,10 @@ public class XServer {
       pointer.setPosition(x, y);
     }
     PointerSink sink = pointerSink;
-    if (sink != null) sink.onPointerMove(x, y);
+    if (sink != null) {
+      sink.onPointerMove(x, y);
+      sink.onPointerAbsolute(x, y);
+    }
   }
 
   public void injectPointerMoveDelta(int dx, int dy) {

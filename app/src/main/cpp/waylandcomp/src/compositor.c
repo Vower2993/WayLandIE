@@ -940,6 +940,7 @@ static void deliver_key(const struct input_msg *m) {
 
 /* Compositor thread only (dispatched from on_input_readable). */
 static void apply_output_size(int w, int h) {
+    WLOGI("apply_output_size(%d,%d): current=%dx%d", w, h, g_out_w, g_out_h);
     if (w <= 0 || h <= 0) return;
     if (w == g_out_w && h == g_out_h) return;
     g_out_w = w;
@@ -972,6 +973,7 @@ static int on_input_readable(int fd, uint32_t mask, void *data) {
  * which is not safe; the compositor's input pipe already exists to marshal exactly this kind
  * of UI-thread -> event-loop work. */
 void banner_wayland_set_output_size(int w, int h) {
+    WLOGI("set_output_size called: %dx%d pipe=%d/%d", w, h, g_input_pipe[0], g_input_pipe[1]);
     if (w <= 0 || h <= 0) return;
     if (g_input_pipe[1] < 0) { /* no event loop yet: bind_output() reads these directly */
         g_out_w = w;

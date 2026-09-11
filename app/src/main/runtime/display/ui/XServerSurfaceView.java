@@ -101,6 +101,8 @@ public class XServerSurfaceView extends SurfaceView implements SurfaceHolder.Cal
         try {
             com.winlator.cmod.runtime.display.environment.components.WaylandBridgeServer
                 .nativeCompositorSetOutputSize(width, height);
+            android.util.Log.i("XServerSurfaceView",
+                "setWaylandOutputSize(" + width + "x" + height + ") -> native OK");
         } catch (Throwable t) {
             android.util.Log.w("XServerSurfaceView", "setOutputSize failed", t);
         }
