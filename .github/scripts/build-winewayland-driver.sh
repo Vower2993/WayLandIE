@@ -860,54 +860,63 @@ ls -la /tmp/proton-wine/dlls/ntdll/aarch64-windows/ 2>/dev/null
 ls -la /tmp/proton-wine/dlls/ntdll/arm64ec-windows/ 2>/dev/null
 
 echo "=== [9/9] Collect + zip ==="
-# Each architecture's PE must land in its OWN directory.
+# The PE-side driver is a single HYBRID image, and it must be installed in BOTH architecture
+# directories.
 #
-# The previous code searched one list of candidates and copied the FIRST that existed into
-# aarch64-windows/, then broke out of the loop. Because the arm64ec path was listed BEFORE the
-# aarch64 path, the arm64ec build was copied to aarch64-windows/ and **nothing was ever copied
-# to arm64ec-windows/**. Consequences, both observed on-device:
+# Wine's winegcc links one winewayland.drv from the aarch64-windows AND arm64ec-windows object
+# files together:
 #
-#   1. lib/wine/arm64ec-windows/winewayland.drv was absent from the shipped zip (aarch64-unix,
-#      aarch64-windows and arm64ec-windows were all created, but only the first two were filled).
-#   2. Wine builds ntdll.dll as a HYBRID ARM64X PE carrying both aarch64 and arm64ec code, so
-#      the arm64ec-linked aarch64-windows/winewayland.drv still loaded for the "native" case and
-#      Wayland appeared to work. But a process that resolves its drivers from arm64ec-windows/
-#      found none, could not load a display driver, and died in init_driver with
-#      nodrv_CreateWindow - which is exactly the error seen for limbo.exe and the explorer
-#      fallback path.
+#   winegcc -o dlls/winewayland.drv/aarch64-windows/winewayland.drv --winebuild \
+#     -Wl,--wine-builtin -shared \
+#     dlls/winewayland.drv/aarch64-windows/dllmain.o \
+#     dlls/winewayland.drv/arm64ec-windows/dllmain.o ...
 #
-# ntdll.dll below already does this correctly by copying to both directories; the driver must
-# do the same. Build the destination from the source, so a path cannot be mismatched again.
-collect_pe() {
+# so the result is an ARM64X hybrid PE (machine 0xAA64, with .hexpthk / .a64xrm sections) that
+# carries both native ARM64 and arm64ec code. There is no separate arm64ec-only .drv to build -
+# requesting that target produces nothing, which is why arm64ec-windows/ was empty.
+#
+# Nothing was ever copied there, because the old code searched a candidate list whose first
+# entry was the aarch64 path and then broke out of the loop. The aarch64 copy therefore
+# satisfied the "native" case while arm64ec-windows/ stayed empty. ntdll.dll already does the
+# right thing by copying its hybrid PE to both directories; the driver must match.
+#
+# I first "fixed" this by asserting a distinct arm64ec build must exist. CI run 34612382829
+# proved that wrong:
+#   Collected driver: .../aarch64-windows/winewayland.drv (1048576 bytes) -> aarch64-windows/
+#   FATAL: lib/wine/arm64ec-windows/winewayland.drv missing from winewayland-driver.zip
+# The collection was right; there is simply no second artifact. `make
+# dlls/winewayland.drv/arm64ec-windows/winewayland.drv` (line ~848) is a silent no-op, and can
+# be removed once someone confirms no Wine target depends on it. Copying the one hybrid to both
+# directories is the correct behaviour, so the zip assertion below now checks both directories
+# rather than demanding two distinct files.
+collect_drv() {
   src="$1"; destdir="$2"
   if [ -f "$src" ] && [ "$(stat -c%s "$src")" -gt 1000 ]; then
     mkdir -p "$destdir"
     cp "$src" "$destdir/winewayland.drv"
-    echo "Collected PE: $src ($(stat -c%s "$src") bytes) -> $destdir/winewayland.drv"
+    echo "Collected driver: $src ($(stat -c%s "$src") bytes) -> $destdir/winewayland.drv"
     return 0
   fi
   return 1
 }
 
-DRV_AARCH64="/tmp/proton-wine/dlls/winewayland.drv/aarch64-windows/winewayland.drv"
-DRV_ARM64EC="/tmp/proton-wine/dlls/winewayland.drv/arm64ec-windows/winewayland.drv"
+DRV_SRC=""
+for f in \
+  "/tmp/proton-wine/dlls/winewayland.drv/aarch64-windows/winewayland.drv" \
+  "/tmp/proton-wine/dlls/winewayland.drv/winewayland.drv.so" \
+  "/tmp/proton-wine/dlls/winewayland.drv/winewayland.drv" \
+  "/tmp/proton-wine/dlls/winewayland.drv/winewayland.dll.so"; do
+  if [ -f "$f" ] && [ "$(stat -c%s "$f")" -gt 1000 ]; then DRV_SRC="$f"; break; fi
+done
 
-# aarch64-windows/ additionally accepts the arch-neutral names, since older Wine put the PE at
-# the top level. Order is only preserved for this fallback list, never across architectures.
-if ! collect_pe "$DRV_AARCH64" "$PROTON_OUT/lib/wine/aarch64-windows"; then
-  for f in \
-    "/tmp/proton-wine/dlls/winewayland.drv/winewayland.drv.so" \
-    "/tmp/proton-wine/dlls/winewayland.drv/winewayland.drv" \
-    "/tmp/proton-wine/dlls/winewayland.drv/winewayland.dll.so"; do
-    if collect_pe "$f" "$PROTON_OUT/lib/wine/aarch64-windows"; then break; fi
-  done
-fi
-
-# arm64ec-windows/ gets its own build. Falling back to the aarch64 PE would be wrong: that is
-# what silently papered over the missing directory before.
-if ! collect_pe "$DRV_ARM64EC" "$PROTON_OUT/lib/wine/arm64ec-windows"; then
-  echo "WARNING: arm64ec-windows/winewayland.drv was not built; processes that resolve their"
-  echo "         display driver from arm64ec-windows/ will fail with nodrv_CreateWindow."
+if [ -n "$DRV_SRC" ]; then
+  collect_drv "$DRV_SRC" "$PROTON_OUT/lib/wine/aarch64-windows" || true
+  # Same hybrid artifact, second destination: a process that resolves its display driver from
+  # arm64ec-windows/ must find one there too.
+  collect_drv "$DRV_SRC" "$PROTON_OUT/lib/wine/arm64ec-windows" || true
+else
+  echo "FATAL: no winewayland.drv was built; Wine cannot load a Wayland display driver."
+  exit 1
 fi
 
 for f in \
