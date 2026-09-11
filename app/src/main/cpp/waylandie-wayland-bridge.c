@@ -1193,6 +1193,84 @@ static void shm_ahb_pool_release(AHardwareBuffer *ahb) {
     g_diag.ahb_released++;
 }
 
+// Dump the client's SHM source pixels to a PPM, once per distinct buffer size.
+//
+// This answers the one question that decides where the remaining work is: does Wine's desktop
+// actually contain pixels, or is the black screen simply Wine committing an untouched buffer?
+// The present path reports status=pass for every frame, but that only means "the present
+// succeeded" - it says nothing about whether there was content. Sampling statistics can only
+// report "black"; a PPM can be looked at.
+//
+// Written under the app's external files dir so adb can read it without root:
+//   adb shell cat /storage/emulated/0/Android/data/com.tencent.ig/files/logs/wl-src-WxH.ppm
+//
+// Best-effort: any failure returns quietly so a diagnostic can never break presentation.
+static void dump_shm_src_ppm(const struct shm_buffer_state *shm) {
+    static int dumped = 0;
+    static unsigned int seen_w[8], seen_h[8];
+    static int nseen = 0;
+    char path[256];
+    if (dumped >= 8) return;
+
+    for (int i = 0; i < nseen; i++)
+        if (seen_w[i] == (unsigned int)shm->width && seen_h[i] == (unsigned int)shm->height)
+            return;  // already dumped this size
+    if (nseen < 8) {
+        seen_w[nseen] = (unsigned int)shm->width;
+        seen_h[nseen] = (unsigned int)shm->height;
+        nseen++;
+    }
+
+    // The bridge's cwd is the imagefs root; write to a path adb can reach instead.
+    snprintf(path, sizeof(path),
+             "/storage/emulated/0/Android/data/com.tencent.ig/files/logs/wl-src-%dx%d.ppm",
+             shm->width, shm->height);
+    FILE *f = fopen(path, "wb");
+    if (f == NULL) {
+        printf("wayland-shm-ahb src-dump status=fail can-not-create path=%s errno=%d\n", path, errno);
+        fflush(stdout);
+        return;
+    }
+
+    const unsigned char *base = (const unsigned char *)shm->pool->data + shm->offset;
+    long nonzero = 0, total = 0;
+    int maxb = 0;
+    for (int y = 0; y < shm->height; y += 8) {
+        const unsigned char *row = base + (size_t)y * shm->stride;
+        for (int x = 0; x < shm->width; x += 8) {
+            const unsigned char *p = row + (size_t)x * 4;
+            // XRGB8888 little-endian: bytes are B,G,R,X - ignore the X padding.
+            if (p[0] || p[1] || p[2]) nonzero++;
+            if (p[0] > maxb) maxb = p[0];
+            if (p[1] > maxb) maxb = p[1];
+            if (p[2] > maxb) maxb = p[2];
+            total++;
+        }
+    }
+
+    fprintf(f, "P6\n%d %d\n255\n", shm->width, shm->height);
+    unsigned char *line = (unsigned char *)malloc((size_t)shm->width * 3);
+    if (line != NULL) {
+        for (int y = 0; y < shm->height; y++) {
+            const unsigned char *row = base + (size_t)y * shm->stride;
+            for (int x = 0; x < shm->width; x++) {
+                const unsigned char *p = row + (size_t)x * 4;
+                line[x * 3 + 0] = p[2];  // R
+                line[x * 3 + 1] = p[1];  // G
+                line[x * 3 + 2] = p[0];  // B
+            }
+            fwrite(line, 1, (size_t)shm->width * 3, f);
+        }
+        free(line);
+    }
+    fclose(f);
+    dumped++;
+
+    printf("wayland-shm-ahb src-dump %dx%d stride=%d sampled=%ld nonzero=%ld max_byte=%d path=%s\n",
+           shm->width, shm->height, shm->stride, total, nonzero, maxb, path);
+    fflush(stdout);
+}
+
 static int shm_to_ahb(struct shm_buffer_state *shm, int frame_index,
                        struct shm_ahb_handle *out) {
     out->ahb = NULL;
@@ -1258,6 +1336,9 @@ static int shm_to_ahb(struct shm_buffer_state *shm, int frame_index,
         g_diag.shm_to_ahb_failures++;
         return -1;
     }
+    // Validation passed: pool, offset and stride are all sound, so whatever sits at
+    // pool->data + offset is exactly what the client painted. Record it once per size.
+    dump_shm_src_ppm(shm);
 
     // 1. Acquire AHardwareBuffer from pool (reuses existing AHBs)
     int pool_stride_px = 0;
