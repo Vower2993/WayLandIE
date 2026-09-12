@@ -4801,6 +4801,37 @@ static void surface_commit(struct wl_client *client, struct wl_resource *resourc
     int present_failed = 0;
     struct surface_state *presentable = surface;
     struct surface_state *child_presentable = find_presentable_subsurface(surface);
+    /* Report the present-selection decision for each commit.
+     *
+     * The measured problem this exists to explain: Wine renders TWO xdg_toplevels here -
+     * a 1024x640 surface whose own pixels already contain the taskbar, and a 1280x128
+     * taskbar surface. The presenter receives BOTH (verified in logcat: frames 35-38
+     * source=1024x640, frames 39-41 source=1280x128, all status=pass, zero-copy=gpu),
+     * and the screen ends up flat white with a smeared blue bar - i.e. the taskbar keeps
+     * replacing the desktop on screen even though the desktop's area is 4x larger.
+     *
+     * The gate below is `s->resource == g_visible_surface || area >= g_vis_area`, which
+     * should already prefer the larger surface, so the decision has to be observed rather
+     * than reasoned about. Record the size, the area, the current slot holder and its area,
+     * and which way the gate went. */
+    {
+        static int sel_logged = 0;
+        if (sel_logged < 40) {
+            sel_logged++;
+            int64_t this_area = buffer_area(surface->pending_buffer);
+            printf("wayland-shm-ahb present-select n=%d surf=%p size=%dx%d area=%lld "
+                   "slot=%p slot_area=%lld is_slot=%d wins=%d has_displayed=%d\n",
+                   sel_logged, (void *)surface->resource,
+                   surface->pending_buffer != NULL ? surface->pending_buffer->width : 0,
+                   surface->pending_buffer != NULL ? surface->pending_buffer->height : 0,
+                   (long long)this_area,
+                   (void *)g_visible_surface, (long long)g_vis_area,
+                   surface->resource == g_visible_surface ? 1 : 0,
+                   (surface->resource == g_visible_surface || this_area >= g_vis_area) ? 1 : 0,
+                   surface->server->has_ever_displayed);
+            fflush(stdout);
+        }
+    }
     if (child_presentable != NULL
             && child_presentable->pending_buffer != NULL
             && buffer_area(child_presentable->pending_buffer) > buffer_area(surface->pending_buffer)) {
