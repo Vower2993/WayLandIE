@@ -31,6 +31,26 @@ public class WaylandBridgeServer {
     private Context context;
     private int width = 1920;
     private int height = 1080;
+    /**
+     * Render-target size = the guest's desktop size (the container's screenSize, which is also
+     * what the guest is launched with as {@code explorer /desktop=shell,WxH} and what the bridge
+     * advertises through {@code wl_output}).
+     *
+     * Measured defect this fixes: the target used to be a hardcoded 2340x1080 (the phone panel's
+     * landscape extent, 21.7:9) while the guest desktop is 1280x720 (16:9) and the surface Wine
+     * actually paints is 1024x640 (16:10). The native blit is a fixed full-screen quad (see
+     * ahb_vk_3d_shaders.h: the vertex shader emits hardcoded NDC positions), so it STRETCHES the
+     * source into the target with no aspect preservation. A 16:10 desktop forced into 21.7:9 is
+     * scaled 2.29x horizontally and 1.69x vertically, which pushes the taskbar strip off the
+     * bottom of the target. That is the observed screen: flat white with only a fragment of the
+     * blue taskbar visible.
+     *
+     * Matching the target to the guest desktop removes the mismatch at its source, and because
+     * SurfaceFlinger scales the layer to the panel anyway, nothing is lost by not targeting the
+     * panel size here.
+     */
+    private volatile int renderTargetW = 0;
+    private volatile int renderTargetH = 0;
     private int frameIndex = 0;
     /** Consecutive failed binds in the current accept loop; reset on success. */
     private int bindFailures = 0;
@@ -106,8 +126,23 @@ public class WaylandBridgeServer {
         start(view, null);
     }
 
-    public void start(SurfaceView view, Context ctx) {
-        this.hostView = view;
+    /**
+     * Declare the guest desktop size, which is also the presenter's render-target size.
+     *
+     * Call this from setupUI() with {@code xServer.screenInfo.width/height} - the same values
+     * already passed to {@code setWaylandOutputSize()} - BEFORE the first frame arrives, so
+     * ensurePresentLayer() allocates the layer at the right size on its first call. If it is
+     * never called the layer falls back to the panel extent, which is the old behaviour.
+     */
+    public void setRenderTargetSize(int w, int h) {
+        if (w > 0 && h > 0) {
+            renderTargetW = w;
+            renderTargetH = h;
+            Log.i(TAG, "renderTarget set to guest desktop size " + w + "x" + h);
+        }
+    }
+
+    public void start(SurfaceView view, Context ctx) {        this.hostView = view;
         this.context = ctx != null ? ctx.getApplicationContext() : null;
         running = true;
         // Release stale presentLayer from previous session — its parent
@@ -720,8 +755,8 @@ public class WaylandBridgeServer {
             // AHardwareBuffer slots at that size (see the ahb_vk renderer's slot
             // allocation). So those are the only correct dimensions for both the buffer and
             // the destination rect. They are set just below.
-            int targetW = 2340;
-            int targetH = 1080;
+            int targetW = renderTargetW > 0 ? renderTargetW : 2340;
+            int targetH = renderTargetH > 0 ? renderTargetH : 1080;
             presentLayer = new SurfaceControl.Builder()
                 .setName("WayLandIELinuxWindowLayer:waylandie-present")
                 .setBufferSize(targetW, targetH)

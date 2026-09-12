@@ -6836,6 +6836,14 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
             // (defect #10). Install a sink that forwards the same coordinates to the
             // compositor's seat, converting XServer screen space -> compositor output space.
             xServerView.setWaylandOutputSize(xServer.screenInfo.width, xServer.screenInfo.height);
+            // Give the presenter the guest desktop size as its render target, so the native blit
+            // does not stretch a 16:10 desktop into a 21.7:9 target (which cropped the taskbar off
+            // the bottom and produced a flat white screen). Same values as the output size above:
+            // both must describe the guest, not the phone panel.
+            if (waylandBridgeServer != null) {
+                waylandBridgeServer.setRenderTargetSize(
+                        xServer.screenInfo.width, xServer.screenInfo.height);
+            }
             xServer.setPointerSink(new com.winlator.cmod.runtime.display.xserver.XServer.PointerSink() {
                 @Override
                 public void onPointerMove(int x, int y) {
