@@ -4844,6 +4844,75 @@ static void surface_commit(struct wl_client *client, struct wl_resource *resourc
                 presentable->pending_buffer->height);
         fflush(stdout);
     }
+    /* Visible-surface gate: prefer the LARGER surface, and require a new surface to beat the
+     * current one decisively before it may take over the screen.
+     *
+     * Measured defect this fixes: this bridge had NO such gate - it called
+     * present_buffer_to_android() for whatever surface happened to commit. Wine in
+     * /desktop mode renders TWO xdg_toplevels, and they alternate:
+     *
+     *   logcat: Present result ... frame 35 source=1024x640   <- the desktop
+     *           Present result ... frame 36 source=1024x640
+     *           Present result ... frame 39 source=1280x128   <- the taskbar strip
+     *           Present result ... frame 41 source=1280x128
+     *
+     * so the last surface to commit was what stayed on screen. The taskbar strip
+     * (1280x128 = 163,840 px) kept replacing the desktop (1024x640 = 655,360 px), which is
+     * exactly the observed screen: flat white with a fragment of the blue bar, because the
+     * strip was stretched across the whole render target.
+     *
+     * The desktop surface ALREADY contains the taskbar drawn inside it, verified from the
+     * bridge's own dump (wl-src-1024x640.ppm: (245,245,245)x2500 plus (96,125,139)x91), so
+     * keeping the desktop on screen is sufficient to show a recognisable desktop - no Wine
+     * patch and no scene composition required for this step.
+     *
+     * 1.5x rather than a bare `>` so genuine window changes still win while a small
+     * ancillary strip cannot take the screen back.
+     */
+    {
+        static struct wl_resource *gate_holder = NULL;
+        static int64_t gate_area = 0;
+        int64_t gate_this = buffer_area(buffer_to_present);
+        if (gate_this > 0
+                && gate_holder != NULL
+                && gate_holder != presentable->resource
+                && gate_area > 0
+                && gate_this * 2 < gate_area * 3) {
+            printf("wayland-shm-ahb commit=smaller-surface-skipped size=%dx%d area=%lld "
+                   "held=%lld holder=%p this=%p\n",
+                   buffer_to_present != NULL ? buffer_to_present->width : 0,
+                   buffer_to_present != NULL ? buffer_to_present->height : 0,
+                   (long long)gate_this, (long long)gate_area,
+                   (void *)gate_holder, (void *)presentable->resource);
+            fflush(stdout);
+            if (presentable != surface && surface->pending_buffer != NULL
+                    && surface->pending_buffer->resource != NULL) {
+                wl_buffer_send_release(surface->pending_buffer->resource);
+            }
+            if (buffer_to_present != NULL && buffer_to_present->resource != NULL) {
+                wl_buffer_send_release(buffer_to_present->resource);
+            }
+            surface->has_pending_attach = 0;
+            surface->pending_buffer = NULL;
+            if (presentable != surface) {
+                presentable->has_pending_attach = 0;
+                presentable->pending_buffer = NULL;
+            }
+            surface->server->commit_count++;
+            surface->commit_count++;
+            if (presentable != surface) {
+                presentable->commit_count++;
+            }
+            send_surface_focus(surface, resource, surface->current_width, surface->current_height);
+            send_surface_presentation_feedback(surface, 0);
+            send_surface_frame_callbacks(surface);
+            return;
+        }
+        if (gate_this > 0 && (gate_holder == NULL || gate_this >= gate_area)) {
+            gate_holder = presentable->resource;
+            gate_area = gate_this;
+        }
+    }
     struct shm_buffer_state *buffer_to_present = presentable->pending_buffer;
     /* Check primary against the PRESENTABLE surface (which may be a child
      * subsurface), not the parent surface. The old code checked against
