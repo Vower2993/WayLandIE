@@ -4844,6 +4844,11 @@ static void surface_commit(struct wl_client *client, struct wl_resource *resourc
                 presentable->pending_buffer->height);
         fflush(stdout);
     }
+    /* Declared here, BEFORE the gate below, because the gate reads it. The original
+     * assignment sat after the gate; using it earlier without this move is what made the
+     * first version of this change fail to compile ("use of undeclared identifier
+     * 'buffer_to_present'"). */
+    struct shm_buffer_state *buffer_to_present = presentable->pending_buffer;
     /* Visible-surface gate: prefer the LARGER surface, and require a new surface to beat the
      * current one decisively before it may take over the screen.
      *
@@ -4913,7 +4918,7 @@ static void surface_commit(struct wl_client *client, struct wl_resource *resourc
             gate_area = gate_this;
         }
     }
-    struct shm_buffer_state *buffer_to_present = presentable->pending_buffer;
+    /* buffer_to_present is declared above, before the gate. */
     /* Check primary against the PRESENTABLE surface (which may be a child
      * subsurface), not the parent surface. The old code checked against
      * 'surface' (parent), which caused child subsurface buffers (e.g., 768x512
