@@ -4801,34 +4801,35 @@ static void surface_commit(struct wl_client *client, struct wl_resource *resourc
     int present_failed = 0;
     struct surface_state *presentable = surface;
     struct surface_state *child_presentable = find_presentable_subsurface(surface);
-    /* Report the present-selection decision for each commit.
+    /* Report the present-selection inputs for each commit.
      *
-     * The measured problem this exists to explain: Wine renders TWO xdg_toplevels here -
-     * a 1024x640 surface whose own pixels already contain the taskbar, and a 1280x128
-     * taskbar surface. The presenter receives BOTH (verified in logcat: frames 35-38
-     * source=1024x640, frames 39-41 source=1280x128, all status=pass, zero-copy=gpu),
-     * and the screen ends up flat white with a smeared blue bar - i.e. the taskbar keeps
-     * replacing the desktop on screen even though the desktop's area is 4x larger.
+     * The measured problem this exists to explain: Wine renders TWO xdg_toplevels here - a
+     * 1024x640 surface whose own pixels already contain the taskbar, and a 1280x128 taskbar
+     * surface. The presenter receives BOTH (verified in logcat: frames 35-38 source=1024x640,
+     * frames 39-41 source=1280x128, all status=pass / zero-copy=gpu) and the screen ends up
+     * flat white with a fragment of the blue bar - i.e. the smaller bar keeps replacing the
+     * desktop on screen even though the desktop's area is 4x larger.
      *
-     * The gate below is `s->resource == g_visible_surface || area >= g_vis_area`, which
-     * should already prefer the larger surface, so the decision has to be observed rather
-     * than reasoned about. Record the size, the area, the current slot holder and its area,
-     * and which way the gate went. */
+     * There is no visible-surface slot in this bridge to inspect (unlike the separate
+     * waylandcomp compositor, which has g_visible_surface/g_vis_area) - this bridge calls
+     * present_buffer_to_android for whatever surface commits. So record what IS available:
+     * which surface, its buffer size and area, whether a child subsurface is being preferred,
+     * and the has_ever_displayed latch that buffer_is_primary_for_surface() consults. */
     {
         static int sel_logged = 0;
         if (sel_logged < 40) {
             sel_logged++;
             int64_t this_area = buffer_area(surface->pending_buffer);
-            printf("wayland-shm-ahb present-select n=%d surf=%p size=%dx%d area=%lld "
-                   "slot=%p slot_area=%lld is_slot=%d wins=%d has_displayed=%d\n",
+            printf("wayland-shm-ahb present-select n=%d surf=%p xdg=%d sub=%d size=%dx%d "
+                   "area=%lld child=%p has_displayed=%d nonprimary=%d\n",
                    sel_logged, (void *)surface->resource,
+                   surface->is_xdg_surface, surface->is_subsurface,
                    surface->pending_buffer != NULL ? surface->pending_buffer->width : 0,
                    surface->pending_buffer != NULL ? surface->pending_buffer->height : 0,
                    (long long)this_area,
-                   (void *)g_visible_surface, (long long)g_vis_area,
-                   surface->resource == g_visible_surface ? 1 : 0,
-                   (surface->resource == g_visible_surface || this_area >= g_vis_area) ? 1 : 0,
-                   surface->server->has_ever_displayed);
+                   (void *)(child_presentable != NULL ? child_presentable->resource : NULL),
+                   surface->server->has_ever_displayed,
+                   buffer_is_primary_for_surface(surface, surface->pending_buffer) ? 0 : 1);
             fflush(stdout);
         }
     }
